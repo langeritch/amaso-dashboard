@@ -20,6 +20,10 @@ const ARM64_ASSET = "amaso-companion-arm64.dmg";
 const X64_ASSET = "amaso-companion-x64.dmg";
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
+// Short negative-cache TTL so a `null` cached just before a release is
+// published (or just after a transient 4xx) doesn't pin the install page
+// to "No release available yet" for the full 10 min positive window.
+const NEGATIVE_CACHE_TTL_MS = 30 * 1000;
 
 interface GithubRelease {
   tag_name: string;
@@ -108,8 +112,11 @@ export async function GET(): Promise<NextResponse> {
   if (!auth.ok) return auth.res;
 
   const now = Date.now();
-  if (cached && now - cached.at < CACHE_TTL_MS) {
-    return NextResponse.json({ release: cached.info });
+  if (cached) {
+    const ttl = cached.info ? CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
+    if (now - cached.at < ttl) {
+      return NextResponse.json({ release: cached.info });
+    }
   }
 
   let info: CompanionReleaseInfo | null = null;
