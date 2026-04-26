@@ -1,0 +1,54 @@
+# Pinned on purpose — see RESEARCH.md "Fallbacks".
+# pytgcalls 2.x is the first version that ships private 1-on-1 calls in a
+# release build. Going above 2.2.x without checking the release notes is
+# how you lose the `call_user`-style path.
+py-tgcalls==2.2.12
+# Upstream `pyrogram` hasn't shipped since 2.0.106 (2023) and is missing
+# error classes py-tgcalls 2.2 references (GroupcallForbidden, etc.).
+# PyroFork is the active drop-in — installs under the `pyrogram` module
+# name, same session format, same public API, plus the missing errors.
+pyrofork>=2.3,<3
+tgcrypto-pyrofork>=1.2.8
+
+# ctranslate2 4.4.0 still `import pkg_resources` at module scope, and
+# setuptools 81+ removed pkg_resources entirely. Pin below 81 until
+# ctranslate2 ships a fix (tracked upstream). Without this pin every
+# `import faster_whisper` explodes.
+setuptools<81
+# faster-whisper declares `requests` as an optional dep rather than a
+# hard one, but imports it unconditionally. Install it explicitly.
+requests>=2.31
+
+# HTTP + WS surface for the dashboard.
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+python-dotenv==1.0.1
+httpx==0.28.1
+
+# STT pipeline. faster-whisper picks GPU automatically when CUDA is
+# present and falls back to CPU. ctranslate2 is a transitive dep but
+# pinning here keeps Windows wheel resolution deterministic.
+faster-whisper==1.0.3
+ctranslate2==4.4.0
+
+# LLM for the incoming-call conversation loop. Direct Anthropic SDK
+# rather than proxying through the dashboard — keeps the service
+# self-contained and avoids an extra Node round-trip per utterance.
+anthropic>=0.40,<1
+
+# Audio resampling / PCM handling between Kokoro, pytgcalls, and Whisper.
+# pytgcalls expects 48 kHz s16le; Kokoro outputs 24 kHz; Whisper wants
+# 16 kHz. soxr is 10x faster than scipy.signal.resample_poly for our
+# frame sizes.
+numpy==2.1.3
+soundfile==0.12.1
+soxr==0.5.0.post1
+
+# YouTube audio extraction for the dashboard ↔ Telegram handoff.
+# OPTIONAL: filler_manager catches ImportError and falls back to news
+# transparently when this isn't installed, so a partial environment
+# (CI, headless test rigs) still serves calls. yt-dlp ships frequent
+# extractor updates as YouTube changes its player config — pin to a
+# minor floor and let `pip install -U yt-dlp` keep it fresh.
+yt-dlp>=2024.12.13

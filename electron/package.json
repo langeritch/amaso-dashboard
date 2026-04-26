@@ -1,0 +1,76 @@
+{
+  "name": "amaso-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Amaso Companion — tiny macOS menu-bar agent. Signs into the Amaso dashboard and runs local-only actions (shell, filesystem, system audio) on its behalf. NOT a dashboard — the dashboard is the PWA.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac",
+    "publish": "electron-builder --mac --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "nl.amaso.companion",
+    "productName": "Amaso Companion",
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "amaso-companion-${arch}.${ext}",
+      "extendInfo": {
+        "LSUIElement": true,
+        "NSMicrophoneUsageDescription": "Amaso Companion listens to your mic locally to detect when you're talking, so it can mute other apps while you speak."
+      },
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "dmg": {
+      "writeUpdateInfo": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "amaso",
+        "repo": "amaso-dashboard"
+      }
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "vad-preload.js",
+      "vad.html",
+      "audio-duck.js",
+      "login.html",
+      "assets/**",
+      "entitlements.mac.plist",
+      "package.json"
+    ]
+  }
+}

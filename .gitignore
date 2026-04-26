@@ -1,0 +1,50 @@
+node_modules
+.next
+out
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+# Session signing key — random 32 bytes generated on first boot.
+# Anyone with this file can forge auth cookies. Never commit.
+data/.session-secret
+# Per-user knowledge graph: personal facts the assistant has learned
+# about each user across conversations. Never commit — it contains
+# names, routines, preferences, etc.
+data/user-knowledge-graph/
+# Runtime user data — chat history, remarks, browser profiles,
+# recordings, uploads. Generated at runtime, never source.
+data/chat/
+data/remarks/
+data/heartbeat/
+data/graph/
+data/graph.json
+data/browser-profiles/
+data/recording-chrome-profile/
+data/terminal-uploads/
+data/demo-project/
+.env
+.env.local
+*.log
+logs/
+.DS_Store
+.gstack/
+electron/node_modules/
+electron/dist/
+electron/dist-local/
+scripts/__pycache__/
+tsconfig.tsbuildinfo
+# Old companion DMG/ZIP artifacts. The release workflow republishes
+# these via the GitHub Release URL — no need to commit binaries.
+public/downloads/*.zip
+public/downloads/*.dmg
+# Telegram userbot runtime — assistant.session is an AUTHENTICATED
+# session token, never commit. Caches and logs are runtime too.
+telegram-voice/assistant.session
+telegram-voice/__pycache__/
+telegram-voice/filler-cache/
+telegram-voice/headline-archive.json
+telegram-voice/unknown_errors.txt
+# Scratch / accidental files
+_pty_test*.mjs
+60s)

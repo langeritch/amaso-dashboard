@@ -1,0 +1,107 @@
+{
+  "_comment": "previewUrl = public tunnel URL (universal access). devPort = local port the dev server binds to. subPath scopes an entry to a subfolder of a shared codebase.",
+  "projects": [
+    {
+      "id": "neva17",
+      "name": "NEVA17 — Website, Hosting, Email",
+      "path": "C:/Users/santi/projects/neva17",
+      "visibility": "client",
+      "previewUrl": "https://neva17.amaso.nl",
+      "devPort": 1717,
+      "liveUrl": "https://neva17-preview.vercel.app"
+    },
+    {
+      "id": "amaso-portfolio",
+      "name": "Amaso Portfolio",
+      "path": "C:/Users/santi/projects/amaso-portfolio",
+      "visibility": "team",
+      "previewUrl": "https://amaso-portfolio.amaso.nl",
+      "devPort": 1718
+    },
+    {
+      "id": "tf-pricing-saas",
+      "name": "TF Pricing SaaS",
+      "path": "C:/Users/santi/projects/tf-pricing-saas",
+      "visibility": "team",
+      "previewUrl": "https://tf-pricing-saas.amaso.nl",
+      "devPort": 3030,
+      "_note": "port 1719 is IANA-reserved (H.323 gatestat), Next.js refuses it",
+      "devCommand": "npx next dev --port {{PORT}}"
+    },
+    {
+      "id": "prom-declaraties",
+      "name": "PROM Declaraties",
+      "path": "C:/Users/santi/projects/prom-declaraties",
+      "visibility": "team",
+      "previewUrl": "https://prom-declaraties.amaso.nl",
+      "devPort": 1720
+    },
+    {
+      "id": "concert-lab",
+      "name": "Concert Lab",
+      "path": "C:/Users/santi/projects/concert-lab",
+      "visibility": "team",
+      "devPort": 1722
+    },
+    {
+      "id": "project-dashboard",
+      "name": "Project Dashboard 1",
+      "path": "C:/Users/santi/projects/amaso-dashboard",
+      "visibility": "team"
+    },
+    {
+      "id": "dashboard-sparring-partner",
+      "name": "Project Dashboard 2",
+      "path": "C:/Users/santi/projects/amaso-dashboard",
+      "visibility": "team"
+    },
+    {
+      "id": "dashboard-companion",
+      "name": "Project Dashboard 3",
+      "path": "C:/Users/santi/projects/amaso-dashboard",
+      "visibility": "team"
+    },
+    {
+      "id": "woonklasse",
+      "name": "Woonklasse",
+      "path": "C:/Users/santi/projects/woonklasse-badkamerstijl",
+      "subPath": "Woonklasse",
+      "visibility": "team",
+      "previewUrl": "https://woonklasse.amaso.nl",
+      "devPort": 1721
+    },
+    {
+      "id": "badkamerstijl",
+      "name": "Badkamerstijl",
+      "path": "C:/Users/santi/projects/woonklasse-badkamerstijl",
+      "subPath": "BadkamerStijl",
+      "visibility": "team",
+      "previewUrl": "https://woonklasse.amaso.nl",
+      "devPort": 1721
+    }
+  ],
+  "ignore": [
+    "node_modules",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".git",
+    ".claude",
+    ".stfolder",
+    ".stversions",
+    ".vercel",
+    "dist",
+    "build",
+    "coverage",
+    "*.log",
+    ".env",
+    ".env.*",
+    "*.db",
+    "*.db-journal",
+    "neva17(2)",
+    "neva17(3)",
+    "neva17(4)",
+    "neva17(5)",
+    "neva17(6)"
+  ]
+}

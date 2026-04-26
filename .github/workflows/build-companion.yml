@@ -1,0 +1,154 @@
+name: Build Mac companion DMG
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "electron/**"
+      - "scripts/generate-tray-icons.mjs"
+      - ".github/workflows/build-companion.yml"
+    # Tag pushes shape a real release. Tag format: companion-vX.Y.Z. The
+    # release-attaching step below picks this up and uses the tag name
+    # verbatim for the GitHub Release tag/title — so `git tag
+    # companion-v1.0.0 && git push --tags` is the entire ship workflow.
+    tags:
+      - "companion-v*"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Also create a GitHub Release with the DMG attached"
+        type: boolean
+        default: false
+      sign:
+        description: "Code-sign + notarize the DMG (requires repo secrets)"
+        type: boolean
+        default: false
+
+# Prevent two runs on the same branch from racing over the release — we
+# only want the most recent commit's artifact to end up attached.
+concurrency:
+  group: build-companion-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # required by softprops/action-gh-release
+
+jobs:
+  build:
+    # Apple Silicon runner — `macos-latest` is currently arm64. This lets
+    # electron-builder natively produce the arm64 DMG; the x64 slice is
+    # cross-built through Rosetta without extra setup.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          # Caching requires a lockfile; the companion doesn't ship one
+          # yet. Skipping — it's a tiny tree and installs in under 30 s.
+
+      - name: Install dependencies
+        working-directory: electron
+        run: npm install --no-audit --no-fund
+
+      - name: Generate tray icons if missing
+        # `scripts/generate-tray-icons.mjs` produces all six PNGs
+        # (1x + @2x for three states). Pure Node, no deps. Run
+        # unconditionally — it's cheap and guarantees CI builds with
+        # exactly the icons the script defines.
+        run: node scripts/generate-tray-icons.mjs
+
+      - name: Build DMG + ZIP (unsigned)
+        if: inputs.sign != true
+        working-directory: electron
+        env:
+          # Internal-only builds: skip every flavor of code-signing
+          # lookup. Without this electron-builder hangs looking for a
+          # Keychain identity that isn't there.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          # electron-builder's auto-publish step is what normally wants
+          # GH_TOKEN; we publish manually in a separate step so force
+          # --publish=never here.
+          GH_TOKEN: ""
+        # The `mac.target` config in package.json already pins both
+        # arm64 and x64 — `--mac` alone produces both slices.
+        run: npx electron-builder --mac --publish=never
+
+      - name: Build DMG + ZIP (signed + notarized)
+        if: inputs.sign == true
+        working-directory: electron
+        env:
+          # Developer ID Application cert exported from Keychain as a
+          # base64 .p12 and stored in the repo secret MAC_CERT_P12.
+          CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          # Notarization (electron-builder ≥24 uses notarytool under the
+          # hood when these three are set). An app-specific password
+          # generated at appleid.apple.com.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ""
+        run: |
+          # Sanity-check: all five secrets must be present, otherwise the
+          # signing path silently falls back to an unsigned build and
+          # ships something we can't actually distribute.
+          missing=""
+          for var in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!var}" ]; then missing="$missing $var"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::sign=true but required secrets missing:$missing"
+            exit 1
+          fi
+          npx electron-builder --mac --publish=never
+
+      - name: List build output
+        working-directory: electron
+        run: ls -la dist
+
+      - name: Upload DMG artifacts (run artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: amaso-companion-dmg-${{ github.sha }}
+          path: |
+            electron/dist/*.dmg
+            electron/dist/*.zip
+            electron/dist/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        # Two trigger paths:
+        #   1. A tag push matching companion-v* — the canonical "ship a
+        #      version" path. Tag name is used verbatim as the release
+        #      tag and title.
+        #   2. A manual workflow_dispatch with `release: true` — fallback
+        #      for one-off builds without a tag. (Boolean inputs surface
+        #      as strings in GitHub expressions.)
+        # Normal pushes to main keep producing only run-artifacts.
+        if: |
+          startsWith(github.ref, 'refs/tags/companion-v') ||
+          (github.event_name == 'workflow_dispatch' && inputs.release == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Reuse the tag verbatim when triggered by tag push so the URL
+          # `releases/latest/download/<asset>` keeps resolving against
+          # the right release. On manual dispatch we don't have a tag,
+          # so fall back to a synthetic build number.
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/companion-v') && github.ref_name || format('companion-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/companion-v') && format('Amaso Companion {0}', github.ref_name) || format('Amaso Companion (build {0})', github.run_number) }}
+          body: |
+            Internal-use Mac companion DMG build.
+
+            Commit: ${{ github.sha }}
+            Unsigned — first launch requires right-click → Open to bypass Gatekeeper.
+          files: |
+            electron/dist/*.dmg
+            electron/dist/*.zip
+          draft: false
+          prerelease: false

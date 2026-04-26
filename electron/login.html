@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+    <title>Amaso Companion</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0; padding: 0; height: 100%;
+        background: transparent;
+        color: #e5e5e5;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        font-size: 13px;
+        -webkit-user-select: none;
+        user-select: none;
+        overflow: hidden;
+      }
+      .app {
+        -webkit-app-region: drag;
+        padding: 16px;
+        display: flex; flex-direction: column; gap: 12px;
+        height: 100%; box-sizing: border-box;
+      }
+      h1 {
+        font-size: 14px; font-weight: 600; margin: 0;
+        display: flex; align-items: center; gap: 6px;
+      }
+      p.sub { margin: 0; color: #9ca3af; font-size: 12px; }
+      form { display: flex; flex-direction: column; gap: 8px; -webkit-app-region: no-drag; }
+      label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #9ca3af; }
+      input {
+        background: #1a1d21;
+        border: 1px solid #2a2e33;
+        border-radius: 6px;
+        color: #e5e5e5;
+        padding: 7px 9px;
+        font: inherit;
+        outline: none;
+      }
+      input:focus { border-color: #34d399; }
+      button {
+        -webkit-app-region: no-drag;
+        background: #10b981;
+        color: #052e1e;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 12px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .err { color: #f87171; font-size: 11px; min-height: 1em; }
+      .status {
+        display: flex; flex-direction: column; gap: 8px;
+        -webkit-app-region: no-drag;
+      }
+      .row { display: flex; justify-content: space-between; font-size: 12px; color: #9ca3af; gap: 8px; }
+      .row strong { color: #e5e5e5; font-weight: 500; }
+      .dot {
+        display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+        background: #6b7280; margin-right: 4px; vertical-align: middle;
+      }
+      .dot.connected { background: #10b981; box-shadow: 0 0 0 2px rgba(16,185,129,0.18); }
+      .dot.connecting { background: #f59e0b; animation: pulse 1.4s infinite ease-in-out; }
+      .dot.offline { background: #6b7280; }
+      .dot.error { background: #f87171; }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      .actions {
+        display: flex; flex-wrap: wrap; gap: 6px;
+        -webkit-app-region: no-drag;
+      }
+      .ghost {
+        background: transparent;
+        color: #d4d4d4;
+        border: 1px solid #2a2e33;
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+      .ghost:hover { background: #1a1d21; }
+      .danger {
+        background: transparent;
+        color: #fca5a5;
+        border: 1px solid #4b1d1d;
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+      .danger:hover { background: #2a1414; }
+      .settings {
+        display: flex; flex-direction: column; gap: 4px;
+        margin-top: 4px; padding-top: 8px;
+        border-top: 1px solid #1f2226;
+        -webkit-app-region: no-drag;
+      }
+      .toggle-row {
+        display: flex; justify-content: space-between; align-items: center;
+        font-size: 12px; color: #d4d4d4;
+        padding: 4px 0;
+      }
+      .toggle-row .label-stack { display: flex; flex-direction: column; gap: 1px; }
+      .toggle-row .label-stack .hint { font-size: 10px; color: #6b7280; }
+      /* Custom switch — native <input type=checkbox> looks wrong inside a
+         dark frameless popover. This keeps it small and consistent. */
+      .switch {
+        position: relative; width: 28px; height: 16px;
+        background: #2a2e33; border-radius: 999px; cursor: pointer;
+        transition: background 0.15s ease;
+        flex-shrink: 0;
+      }
+      .switch::after {
+        content: ""; position: absolute; top: 2px; left: 2px;
+        width: 12px; height: 12px; border-radius: 50%;
+        background: #d4d4d4; transition: left 0.15s ease, background 0.15s ease;
+      }
+      .switch.on { background: #10b981; }
+      .switch.on::after { left: 14px; background: #052e1e; }
+      .switch.disabled { opacity: 0.4; cursor: not-allowed; }
+    </style>
+  </head>
+  <body>
+    <div class="app" id="root">
+      <!-- rendered by script -->
+    </div>
+    <script>
+      const root = document.getElementById("root");
+      let unsubscribe = null;
+
+      function h(tag, attrs, ...children) {
+        const el = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+          if (k === "onClick") el.addEventListener("click", v);
+          else if (k === "onSubmit") el.addEventListener("submit", v);
+          else if (k === "className") el.className = v;
+          else el.setAttribute(k, v);
+        }
+        for (const c of children.flat()) {
+          if (c == null || c === false) continue;
+          el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        }
+        return el;
+      }
+
+      // Map the live ws status into a (dotClass, label) pair so the
+      // dot color and the headline phrase always agree. Kept in sync
+      // with `cloudLabel()` in main.js — same vocabulary on both sides
+      // means the right-click menu and the popover never disagree
+      // about whether we're online.
+      function describeStatus(snapshot) {
+        if (!snapshot.session) {
+          return { dotClass: "offline", label: "Signed out" };
+        }
+        switch (snapshot.wsStatus) {
+          case "open":
+            return { dotClass: "connected", label: "Connected" };
+          case "connecting":
+            return { dotClass: "connecting", label: "Connecting…" };
+          case "auth_failed":
+            return { dotClass: "error", label: "Auth failed — sign in again" };
+          default:
+            return { dotClass: "offline", label: "Offline — reconnecting" };
+        }
+      }
+
+      function describeMic(snapshot) {
+        if (!snapshot.duckingEnabled) return "off";
+        switch (snapshot.vadStatus) {
+          case "listening": return "listening";
+          case "denied": return "mic access denied";
+          case "error": return "mic unavailable";
+          default: return "starting…";
+        }
+      }
+
+      async function pull() {
+        const snap = await window.companion.status();
+        renderFromSnapshot(snap);
+      }
+
+      function renderFromSnapshot(snapshot) {
+        root.replaceChildren();
+        if (snapshot.session) renderStatus(snapshot);
+        else renderLogin(snapshot);
+      }
+
+      function renderLogin(status) {
+        const err = h("div", { className: "err" });
+        const form = h("form", {
+          onSubmit: async (e) => {
+            e.preventDefault();
+            err.textContent = "";
+            const email = form.querySelector("[name=email]").value.trim();
+            const password = form.querySelector("[name=password]").value;
+            if (!email || !password) return;
+            submit.disabled = true;
+            submit.textContent = "Signing in…";
+            const res = await window.companion.login(email, password);
+            if (res.ok) {
+              await pull();
+            } else {
+              submit.disabled = false;
+              submit.textContent = "Sign in";
+              err.textContent =
+                res.error === "invalid_credentials"
+                  ? "Wrong email or password."
+                  : res.error || "Couldn't sign in.";
+            }
+          },
+        });
+        const submit = h("button", { type: "submit" }, "Sign in");
+        form.append(
+          h("label", {}, "Email",
+            h("input", { type: "email", name: "email", autofocus: "", required: "" }),
+          ),
+          h("label", {}, "Password",
+            h("input", { type: "password", name: "password", required: "" }),
+          ),
+          submit,
+          err,
+        );
+        root.append(
+          h("h1", {}, "Amaso Companion"),
+          h("p", { className: "sub" }, "Sign in to connect this Mac to " + status.dashboardUrl.replace(/^https?:\/\//, "") + "."),
+          form,
+        );
+      }
+
+      function renderStatus(snapshot) {
+        const { dotClass, label } = describeStatus(snapshot);
+
+        const actions = h("div", { className: "actions" });
+        actions.append(
+          h("button", {
+            className: "ghost",
+            onClick: () => window.companion.openDashboard(),
+          }, "Open dashboard"),
+        );
+        if (snapshot.wsStatus !== "open" && snapshot.wsStatus !== "auth_failed") {
+          actions.append(
+            h("button", {
+              className: "ghost",
+              onClick: async (e) => {
+                const btn = e.currentTarget;
+                btn.disabled = true;
+                btn.textContent = "Reconnecting…";
+                await window.companion.reconnect();
+                // Push from main will re-render us; if the connect
+                // races, the next snapshot still arrives in <1s.
+              },
+            }, "Reconnect"),
+          );
+        }
+        actions.append(
+          h("button", {
+            className: "danger",
+            onClick: async () => { await window.companion.signOut(); await pull(); },
+          }, "Sign out"),
+        );
+
+        // Settings rows. The switch is just a styled <span> + click
+        // handler — using a checkbox/role=switch buys ARIA but breaks
+        // the visual treatment we want for a tiny popover.
+        const settings = h("div", { className: "settings" });
+        settings.append(
+          toggleRow({
+            label: "Launch at login",
+            hint: "Companion starts automatically",
+            checked: !!snapshot.launchAtLogin,
+            onChange: (next) => window.companion.setLaunchAtLogin(next),
+          }),
+          toggleRow({
+            label: "Mute others while I'm talking",
+            hint: "Auto-ducks Spotify, Music, etc.",
+            checked: !!snapshot.duckingEnabled,
+            onChange: (next) => window.companion.setDucking(next),
+          }),
+        );
+
+        root.append(
+          h("h1", {},
+            h("span", { className: "dot " + dotClass }),
+            label,
+          ),
+          h("p", { className: "sub" },
+            "Companion · " + snapshot.dashboardUrl.replace(/^https?:\/\//, ""),
+          ),
+          h("div", { className: "status" },
+            h("div", { className: "row" },
+              h("span", {}, "Account"),
+              h("strong", {}, snapshot.session.email),
+            ),
+            h("div", { className: "row" },
+              h("span", {}, "Mic"),
+              h("strong", {}, describeMic(snapshot)),
+            ),
+          ),
+          actions,
+          settings,
+        );
+      }
+
+      function toggleRow({ label, hint, checked, onChange }) {
+        const sw = h("span", { className: "switch" + (checked ? " on" : "") });
+        const row = h("div", { className: "toggle-row" },
+          h("div", { className: "label-stack" },
+            h("span", {}, label),
+            h("span", { className: "hint" }, hint),
+          ),
+          sw,
+        );
+        // Cancel the parent label's drag so a click on the switch
+        // doesn't get eaten by the popover's "drag to move" region.
+        sw.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (sw.classList.contains("disabled")) return;
+          sw.classList.add("disabled");
+          const next = !sw.classList.contains("on");
+          // Optimistic UI; the main-process push will reconcile.
+          if (next) sw.classList.add("on");
+          else sw.classList.remove("on");
+          try { await onChange(next); }
+          finally { sw.classList.remove("disabled"); }
+        });
+        return row;
+      }
+
+      // Wire the live push subscription once. The popover window is
+      // destroyed on hide (handled in main), so an explicit unsubscribe
+      // on unload is just belt-and-braces.
+      function subscribe() {
+        if (unsubscribe) return;
+        unsubscribe = window.companion.onStatus((snapshot) => {
+          renderFromSnapshot(snapshot);
+        });
+        window.addEventListener("unload", () => {
+          if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+        });
+      }
+
+      pull();
+      subscribe();
+    </script>
+  </body>
+</html>

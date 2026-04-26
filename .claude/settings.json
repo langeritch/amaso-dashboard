@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebFetch(*)",
+      "WebFetch(domain:*)",
+      "WebSearch(*)",
+      "Skill(*)",
+      "NotebookEdit(*)",
+      "Monitor(*)",
+      "CronCreate(*)",
+      "CronDelete(*)",
+      "CronList(*)",
+      "EnterWorktree(*)",
+      "ExitWorktree(*)",
+      "PushNotification(*)",
+      "RemoteTrigger(*)",
+      "TaskStop(*)",
+      "mcp__*",
+      "mcp__spar__*",
+      "mcp__claude_ai_Google_Drive__*",
+      "mcp__plugin_vercel_vercel__*"
+    ]
+  },
+  "enableAllProjectMcpServers": true
+}

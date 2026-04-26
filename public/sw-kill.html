@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clearing Amaso cache…</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; background: #0b0d10; color: #e5e5e5;
+        font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+      main { display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center;
+        height: 100%; text-align: center; padding: 24px; }
+      h1 { font-size: 16px; font-weight: 600; margin: 0; }
+      p { margin: 0; color: #9ca3af; font-size: 13px; }
+      pre { margin: 0; color: #34d399; font-size: 12px; max-width: 100%; overflow: auto; }
+      a { color: #34d399; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Clearing service worker and caches…</h1>
+      <p>This page unregisters the stale worker so fresh code can load.</p>
+      <pre id="log"></pre>
+      <p><a id="home" href="/">Take me home</a></p>
+    </main>
+    <script>
+      (async function () {
+        const log = document.getElementById("log");
+        const status = document.getElementById("status");
+        const line = (msg) => { log.textContent += msg + "\n"; };
+
+        try {
+          if ("serviceWorker" in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            line("Service workers found: " + regs.length);
+            for (const r of regs) {
+              const ok = await r.unregister();
+              line("  unregister " + (r.scope || "") + " → " + ok);
+            }
+          } else {
+            line("Service workers not supported.");
+          }
+
+          if (self.caches && caches.keys) {
+            const keys = await caches.keys();
+            line("Caches found: " + keys.length);
+            for (const k of keys) {
+              await caches.delete(k);
+              line("  deleted " + k);
+            }
+          }
+
+          try { sessionStorage.removeItem("amaso:sw-cleared"); } catch (_) {}
+
+          status.textContent = "Done. Redirecting…";
+          setTimeout(function () { location.replace("/"); }, 600);
+        } catch (err) {
+          status.textContent = "Cleanup failed";
+          line("Error: " + (err && err.message ? err.message : String(err)));
+        }
+      })();
+    </script>
+  </body>
+</html>

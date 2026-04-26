@@ -1,0 +1,16 @@
+# Pyrogram session files — these are credentials. Losing them means a
+# re-verify; leaking them means someone else has your Telegram account.
+*.session
+*.session-journal
+
+# Local env file, never the template.
+.env
+
+# Virtualenvs people make inline.
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Transcription logs we accumulate at runtime.
+transcripts/

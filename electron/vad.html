@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; media-src 'self' blob: mediastream:;"
+    />
+    <title>Amaso VAD</title>
+  </head>
+  <body>
+    <!--
+      Hidden window that runs a basic RMS voice-activity detector on the
+      default mic and reports "speech-start" / "speech-end" back to main via
+      IPC. Main then ducks/restores system output volume. Kept in HTML (not
+      the main process) because the Web Audio API is DOM-only in Electron.
+    -->
+    <script>
+      (async function main() {
+        // Tuning — overridable via amasoVad.onConfig({...}) from main.
+        const cfg = {
+          thresholdRms: 0.015, // ~-36 dBFS, roughly "someone talking"
+          holdMs: 600, // keep ducking this long after last loud sample
+          minSpeechMs: 120, // debounce: ignore spikes shorter than this
+          tickMs: 50, // 20 Hz sampling — plenty for VAD
+        };
+        window.amasoVad.onConfig((incoming) => {
+          for (const k of Object.keys(cfg)) {
+            if (typeof incoming[k] === "number") cfg[k] = incoming[k];
+          }
+        });
+
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: true,
+              autoGainControl: false,
+            },
+          });
+        } catch (err) {
+          window.amasoVad.sendError(err && err.message ? err.message : err);
+          return;
+        }
+
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0;
+        src.connect(analyser);
+
+        const frame = new Float32Array(analyser.fftSize);
+        let speaking = false;
+        let speechCandidateAt = 0;
+        let lastLoudAt = 0;
+
+        function tick() {
+          analyser.getFloatTimeDomainData(frame);
+          let sum = 0;
+          for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+          const rms = Math.sqrt(sum / frame.length);
+          const now = performance.now();
+          const loud = rms > cfg.thresholdRms;
+
+          if (loud) lastLoudAt = now;
+
+          if (!speaking) {
+            if (loud) {
+              if (!speechCandidateAt) speechCandidateAt = now;
+              if (now - speechCandidateAt >= cfg.minSpeechMs) {
+                speaking = true;
+                speechCandidateAt = 0;
+                window.amasoVad.sendState({ speaking: true, rms });
+              }
+            } else {
+              speechCandidateAt = 0;
+            }
+          } else {
+            if (now - lastLoudAt > cfg.holdMs) {
+              speaking = false;
+              window.amasoVad.sendState({ speaking: false, rms });
+            }
+          }
+        }
+
+        // Hidden BrowserWindows throttle requestAnimationFrame, so poll on a
+        // plain interval to keep the VAD reactive even when the window is
+        // offscreen.
+        setInterval(tick, cfg.tickMs);
+      })();
+    </script>
+  </body>
+</html>

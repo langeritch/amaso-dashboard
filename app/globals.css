@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+/* Keep Tailwind's content scanner out of the SQLite data directory.
+ * better-sqlite3 runs WAL mode, which holds an exclusive byte-range lock
+ * on `amaso.db-shm`. Tailwind v4 auto-discovery walks the project root
+ * and tries to read every file for class names; hitting the locked .shm
+ * makes Turbopack's PostCSS worker panic (os error 33), which turns every
+ * CSS-dependent route into a 500. */
+@source not "../data/**";
+
+:root {
+  color-scheme: dark;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+html.light {
+  color-scheme: light;
+}
+
+html,
+body {
+  /* Dynamic viewport on mobile so collapsing address bars don't leave a
+   * gap below the chrome. `100%` fallback for older browsers. */
+  height: 100%;
+  height: 100dvh;
+  background: #0b0d10;
+  color: #e6e8eb;
+  /* Stop iOS rubber-band from revealing a white page behind the PWA
+   * chrome — every scroll region in the app is internal. */
+  overscroll-behavior: none;
+}
+html.light,
+html.light body {
+  background: #fafafa;
+  color: #18181b;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Safe-area utilities for chrome that sits against screen edges in
+ * standalone mode. Applied to the Topbar, message inputs, terminal
+ * wrapper, etc. */
+.pt-safe { padding-top: max(0.5rem, var(--safe-top)); }
+.pb-safe { padding-bottom: max(0.75rem, var(--safe-bottom)); }
+.pl-safe { padding-left: max(0.75rem, var(--safe-left)); }
+.pr-safe { padding-right: max(0.75rem, var(--safe-right)); }
+.px-safe {
+  padding-left: max(0.75rem, var(--safe-left));
+  padding-right: max(0.75rem, var(--safe-right));
+}
+
+/* 16px inputs so iOS Safari doesn't auto-zoom on focus. The surrounding
+ * layouts still render smaller visuals via `sm:text-sm`. */
+@media (max-width: 640px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  a {
+    touch-action: manipulation;
+  }
+}
+
+/* xterm.js on mobile: the canvas defaults to native touch behaviour,
+ * which lets iOS start a rubber-band scroll of the page instead of
+ * feeding the gesture to TerminalPane's scroll-back handler. Killing
+ * touch-action hands full control to our JS listener. */
+.xterm,
+.xterm .xterm-screen,
+.xterm .xterm-viewport {
+  touch-action: none;
+}
+
+/* Flash highlight used when Monaco scrolls to an inspector-picked line */
+.monaco-flash-line {
+  background: rgba(16, 185, 129, 0.22) !important;
+  animation: amasoFlash 1.8s ease-out;
+}
+@keyframes amasoFlash {
+  0% { background: rgba(16, 185, 129, 0.55); }
+  100% { background: rgba(16, 185, 129, 0); }
+}
+
+/* Thin scrollbars for tree + editor panes */
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: #2a2f36;
+  border-radius: 4px;
+}
+.thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: #3a4048;
+}
+html.light .thin-scroll::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+}
+html.light .thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
+
+/* --- Light-mode utility overrides ---------------------------------------
+ * Tailwind utilities live in a cascade layer; these unlayered rules beat
+ * them without touching every component. We only swap the neutrals the
+ * dashboard actually uses — the accented bg/border (emerald, sky, amber,
+ * violet, red) keep their saturated look and still read fine on a light
+ * background.
+ */
+html.light .bg-neutral-950 { background-color: #fafafa; }
+html.light .bg-neutral-950\/60 { background-color: rgba(244, 244, 245, 0.6); }
+html.light .bg-neutral-950\/80 { background-color: rgba(250, 250, 250, 0.85); }
+html.light .bg-neutral-900 { background-color: #f4f4f5; }
+html.light .bg-neutral-900\/60 { background-color: rgba(228, 228, 231, 0.6); }
+html.light .bg-neutral-900\/80 { background-color: rgba(228, 228, 231, 0.85); }
+html.light .bg-neutral-800 { background-color: #e4e4e7; }
+html.light .bg-neutral-800\/70 { background-color: rgba(228, 228, 231, 0.7); }
+html.light .bg-neutral-800\/80 { background-color: rgba(228, 228, 231, 0.8); }
+
+html.light .border-neutral-900 { border-color: #e4e4e7; }
+html.light .border-neutral-800 { border-color: #e4e4e7; }
+html.light .border-neutral-700 { border-color: #d4d4d8; }
+html.light .divide-neutral-900 > :not([hidden]) ~ :not([hidden]) { border-color: #e4e4e7; }
+html.light .divide-neutral-800 > :not([hidden]) ~ :not([hidden]) { border-color: #e4e4e7; }
+
+html.light .text-white { color: #18181b; }
+html.light .text-neutral-100 { color: #18181b; }
+html.light .text-neutral-200 { color: #27272a; }
+html.light .text-neutral-300 { color: #3f3f46; }
+html.light .text-neutral-400 { color: #52525b; }
+html.light .text-neutral-500 { color: #71717a; }
+
+html.light .hover\:bg-neutral-900:hover { background-color: #f4f4f5; }
+html.light .hover\:bg-neutral-800:hover { background-color: #e4e4e7; }
+html.light .hover\:text-neutral-200:hover { color: #27272a; }
+html.light .hover\:text-neutral-100:hover { color: #18181b; }
+html.light .hover\:border-neutral-700:hover { border-color: #d4d4d8; }
+html.light .focus\:border-neutral-600:focus { border-color: #a1a1aa; }
+
+/* "Send" button etc. are bg-white text-black in dark mode — invert so they
+ * stay visible against the light shell without disappearing.
+ */
+html.light .bg-white { background-color: #18181b; }
+html.light .text-black { color: #fafafa; }
