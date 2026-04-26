@@ -10,6 +10,12 @@ import {
   attachmentsByRemark,
   saveAttachment,
 } from "@/lib/attachments";
+import {
+  MAX_BODY_TEXT_BYTES,
+  MAX_MULTIPART_UPLOAD_BYTES,
+  MAX_TEXT_JSON_BYTES,
+  tooLargeByContentLength,
+} from "@/lib/body-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -115,6 +121,12 @@ export async function POST(
   }
 
   const contentType = req.headers.get("content-type") ?? "";
+  const isMultipart = contentType.includes("multipart/form-data");
+  const tooLarge = tooLargeByContentLength(
+    req,
+    isMultipart ? MAX_MULTIPART_UPLOAD_BYTES : MAX_TEXT_JSON_BYTES,
+  );
+  if (tooLarge) return tooLarge;
   let body: string;
   let pathVal: string | null = null;
   let lineVal: number | null = null;
@@ -123,7 +135,7 @@ export async function POST(
   let contextJson: string | null = null;
   let columnVal: number | null = null;
 
-  if (contentType.includes("multipart/form-data")) {
+  if (isMultipart) {
     const form = await req.formData();
     body = String(form.get("body") ?? "").trim();
     const p = form.get("path");
@@ -180,6 +192,11 @@ export async function POST(
 
   if (!body) {
     return NextResponse.json({ error: "body_required" }, { status: 400 });
+  }
+  // Post-parse cap on the user-typed text — defends against chunked
+  // bodies that bypass the Content-Length pre-check above.
+  if (Buffer.byteLength(body, "utf8") > MAX_BODY_TEXT_BYTES) {
+    return NextResponse.json({ error: "body_too_long" }, { status: 413 });
   }
   if (!["frontend", "backend", "other"].includes(category)) {
     return NextResponse.json({ error: "invalid_category" }, { status: 400 });

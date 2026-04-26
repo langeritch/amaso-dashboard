@@ -7,6 +7,10 @@ import {
   readHeartbeat,
   writeHeartbeat,
 } from "@/lib/heartbeat";
+import {
+  MAX_HEARTBEAT_BYTES,
+  tooLargeByContentLength,
+} from "@/lib/body-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +36,8 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const me = await getCurrentUser();
   if (!me) return new Response("unauthorized", { status: 401 });
+  const tooLarge = tooLargeByContentLength(req, MAX_HEARTBEAT_BYTES);
+  if (tooLarge) return tooLarge;
   let json: { userId?: number; body?: string } | null = null;
   try {
     json = await req.json();
@@ -46,6 +52,11 @@ export async function PUT(req: NextRequest) {
     return new Response("forbidden", { status: 403 });
   }
   const body = typeof json?.body === "string" ? json.body : "";
+  // Re-check post-parse: Content-Length is absent on chunked transfers,
+  // so the byte length of the parsed string is the only reliable cap.
+  if (Buffer.byteLength(body, "utf8") > MAX_HEARTBEAT_BYTES) {
+    return new Response("payload_too_large", { status: 413 });
+  }
   writeHeartbeat(ownerId, body);
   return Response.json({ userId: ownerId, bytes: body.length });
 }

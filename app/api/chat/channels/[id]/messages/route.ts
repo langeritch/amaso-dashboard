@@ -14,6 +14,12 @@ import {
   attachmentsByRemark,
   saveChatAttachment,
 } from "@/lib/attachments";
+import {
+  MAX_BODY_TEXT_BYTES,
+  MAX_MULTIPART_UPLOAD_BYTES,
+  MAX_TEXT_JSON_BYTES,
+  tooLargeByContentLength,
+} from "@/lib/body-limit";
 import { getDb } from "@/lib/db";
 import { pushToUsers } from "@/lib/push";
 
@@ -120,6 +126,12 @@ export async function POST(
   }
 
   const contentType = req.headers.get("content-type") ?? "";
+  const isMultipart = contentType.startsWith("multipart/form-data");
+  const tooLarge = tooLargeByContentLength(
+    req,
+    isMultipart ? MAX_MULTIPART_UPLOAD_BYTES : MAX_TEXT_JSON_BYTES,
+  );
+  if (tooLarge) return tooLarge;
 
   let body = "";
   let kind: "text" | "ai_session" = "text";
@@ -127,7 +139,7 @@ export async function POST(
   let files: File[] = [];
   let attachmentErrors: string[] = [];
 
-  if (contentType.startsWith("multipart/form-data")) {
+  if (isMultipart) {
     let form: FormData;
     try {
       form = await req.formData();
@@ -168,6 +180,12 @@ export async function POST(
     }
     kind = json.kind === "ai_session" ? "ai_session" : "text";
     meta = json.meta && typeof json.meta === "object" ? json.meta : null;
+  }
+
+  // Post-parse cap on the user-typed text — defends against chunked
+  // bodies that bypass the Content-Length pre-check above.
+  if (Buffer.byteLength(body, "utf8") > MAX_BODY_TEXT_BYTES) {
+    return NextResponse.json({ error: "body_too_long" }, { status: 413 });
   }
 
   const msg = insertMessage(channelId, auth.user.id, body, kind, meta);
