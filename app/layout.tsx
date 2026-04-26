@@ -5,6 +5,7 @@ import ShareIngress from "../components/ShareIngress";
 import SparProvider from "../components/SparProvider";
 import SparMiniOverlay from "../components/SparMiniOverlay";
 import DemoOverlay from "../components/DemoOverlay";
+import SplashScreen from "../components/SplashScreen";
 import UserTracker from "../components/UserTracker";
 import { getCurrentUser } from "../lib/auth";
 import { isSuperUser, readHeartbeat } from "../lib/heartbeat";
@@ -213,6 +214,7 @@ export default async function RootLayout({
           children
         )}
         <DemoOverlay />
+        <SplashScreen />
       </body>
     </html>
   );
