@@ -297,11 +297,12 @@ async function main() {
     // Allow the Amaso portfolio (prod, Cloudflare Pages preview, and local
     // dev) to iframe the dashboard. Without frame-ancestors, Chrome blocks
     // the embed with its "content blocked / contact the site owner" page
-    // even though we never set X-Frame-Options.
-    res.setHeader(
-      "Content-Security-Policy",
-      "frame-ancestors 'self' https://amaso.nl https://*.amaso.nl https://amaso-git.pages.dev http://localhost:* http://127.0.0.1:*",
-    );
+    // even though we never set X-Frame-Options. localhost is dev-only so a
+    // hostile page on a user's machine can't frame a prod session.
+    const frameAncestors = dev
+      ? "frame-ancestors 'self' https://amaso.nl https://*.amaso.nl https://amaso-git.pages.dev http://localhost:* http://127.0.0.1:*"
+      : "frame-ancestors 'self' https://amaso.nl https://*.amaso.nl https://amaso-git.pages.dev";
+    res.setHeader("Content-Security-Policy", frameAncestors);
     // Defence-in-depth headers. Set on every response (HTML, JSON, WS
     // upgrade fall-through, static assets) — cheap, no per-route opt-in
     // needed.
