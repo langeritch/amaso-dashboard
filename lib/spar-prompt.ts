@@ -32,6 +32,36 @@ export const SPAR_TOOLS = [
   "update_heartbeat",
   "read_graph",
   "write_graph",
+  // Chat
+  "list_channels",
+  "read_messages",
+  "send_message",
+  "create_dm",
+  // Project actions
+  "deploy_project",
+  "start_terminal",
+  "stop_terminal",
+  // Admin
+  "list_users",
+  "get_presence",
+  "get_activity",
+  // Recordings
+  "list_recordings",
+  "start_recording",
+  "stop_recording",
+  // Telegram voice
+  "telegram_status",
+  "telegram_call",
+  "telegram_hangup",
+  "telegram_speak",
+  // Automations
+  "list_automations",
+  "create_automation",
+  "update_automation",
+  // Utility
+  "companion_status",
+  "send_push",
+  "speak_tts",
 ];
 
 export const SPAR_SYSTEM_PROMPT = `You are Santi's sparring partner — a fast, conversational

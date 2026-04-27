@@ -28,7 +28,16 @@ const POLL_INTERVAL_MS = 3_000;
 
 export default function WorkerStatusPanel() {
   const [workers, setWorkers] = useState<WorkerStatus[] | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  // Default collapsed on mobile: the inline pill header stays in flow
+  // (compact summary, harmless), but the full list would otherwise
+  // grow down into the centered audio ring and obscure the listening
+  // indicator, timer, and interim transcript. When expanded on mobile
+  // the list opens as a left-side drawer (see below) so it never
+  // overlaps the ring; on ≥md screens it expands inline as before.
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(max-width: 767px)").matches;
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -85,7 +94,7 @@ export default function WorkerStatusPanel() {
   const totalRunning = workers.filter((w) => w.running).length;
 
   return (
-    <section className="max-w-sm px-4 py-2">
+    <section className="relative z-30 max-w-sm px-4 py-2">
       <div className="rounded-lg border border-neutral-800 bg-neutral-950/70 backdrop-blur">
         <header className="flex items-center justify-between gap-3 px-3 py-2">
           <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-neutral-500">
@@ -113,7 +122,7 @@ export default function WorkerStatusPanel() {
           </button>
         </header>
         {!collapsed && (
-          <ul className="divide-y divide-neutral-800/70 border-t border-neutral-800/70">
+          <ul className="max-h-[28vh] divide-y divide-neutral-800/70 overflow-y-auto border-t border-neutral-800/70 md:max-h-none md:overflow-visible">
             {busy.map((w) => (
               <WorkerRow key={w.id} w={w} />
             ))}

@@ -436,6 +436,370 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // ---- Chat -------------------------------------------------------------
+  {
+    name: "list_channels",
+    description:
+      "List every chat channel the user can see — the global 'general' room, every project channel they have access to, and any DMs they're in. Each entry includes id, kind ('general'|'project'|'dm'), display name, projectId (project channels only), peer (DMs only), createdAt, and unread count from the user's last-seen timestamp. Use when the user asks 'what's new in chat' / 'any new messages' / 'who's pinged me' so you can prioritise channels with unread > 0.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_messages",
+    description:
+      "Read messages from a chat channel. Returns up to `limit` (default 20, max 100) most-recent messages in chronological order (oldest first), each with id, userId, userName, kind ('text'|'ai_session'|'system'), body, meta, createdAt. To page back through history, pass `before` = the id of the earliest message you saw and call again. `hasMore` and `nextBefore` in the response let you decide whether to keep paging. Requires that the user can access the channel (project channels gated on project access, DMs gated on membership).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "integer", description: "Numeric channel id from list_channels." },
+        limit: { type: "integer", description: "Max messages to return (default 20, max 100)." },
+        before: {
+          type: "integer",
+          description:
+            "Optional cursor — if provided, only messages with id < before are returned. Use the `nextBefore` from a previous response to walk further back.",
+        },
+      },
+      required: ["channel_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send_message",
+    description:
+      "Post a text message to a chat channel as the current user. Pushes a notification to the channel's recipients (everyone in 'general', project members in project channels, the peer in a DM) and broadcasts over the live WebSocket so open clients see it instantly. Use when the user explicitly asks you to send a message — describe what you'll post in plain prose first and only fire after they confirm. No attachments or AI-session kinds; plain text only, max 10 000 chars.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "integer", description: "Numeric channel id." },
+        text: {
+          type: "string",
+          description: "Message body. Plain text, up to 10 000 chars.",
+        },
+      },
+      required: ["channel_id", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_dm",
+    description:
+      "Open a direct-message channel with another dashboard user (or return the existing one if you already have one). Returns { channelId, peer: { id, name } } so you can immediately follow up with send_message. The user must exist and not be the current user. Use when the user says 'message Sander', 'DM the team lead', etc.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_id: {
+          type: "integer",
+          description: "Target user's numeric id (from list_users).",
+        },
+      },
+      required: ["user_id"],
+      additionalProperties: false,
+    },
+  },
+  // ---- Project actions --------------------------------------------------
+  {
+    name: "deploy_project",
+    description:
+      "Stage all changes in a project, commit them with the given message (or a default 'Deploy from spar @ <iso>'), and push to origin. Vercel-connected repos auto-deploy on push, so a successful return = deploy triggered. Admin-only: pushing to a public remote is a destructive shared-state action. Fails if the working tree has unresolved conflicts, no remote, or no branch. Always describe what you'll deploy aloud and get an explicit yes before firing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Project id, e.g. 'neva17'." },
+        message: {
+          type: "string",
+          description:
+            "Optional commit message (max 500 chars). Defaults to 'Deploy from spar @ <iso-timestamp>'.",
+        },
+      },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "start_terminal",
+    description:
+      "Spawn a Claude Code PTY for the project if one isn't running already. Idempotent — returns the existing session if it's already up (alreadyRunning=true). Use when the user wants to start working on a project that has no live terminal, or when dispatch_to_project failed because no session exists yet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Project id." },
+      },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "stop_terminal",
+    description:
+      "Kill the running Claude Code PTY for a project. Use when the user explicitly asks to stop, restart, or free up a project's terminal. Returns { stopped, running } — `stopped:false` means no PTY was running.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Project id." },
+      },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+  },
+  // ---- Admin ------------------------------------------------------------
+  {
+    name: "list_users",
+    description:
+      "List every dashboard user with id, email, name, role ('admin'|'team'|'client'), createdAt, and project access list. Admin-only — mirrors /api/admin/users. Use when the user asks 'who's on the dashboard', 'who has access to project X', or before create_dm so you can resolve a name to an id.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_presence",
+    description:
+      "List currently-online users — anyone with a tab heartbeat in the last 90 s. Each entry includes liveSessions (tab count), oldestConnectedAt, latestSeenAt, and a per-tab breakdown with current path. Super-user-only (matches /api/admin/activity). Use when the user asks 'who's online', 'is anyone in the app', or 'what is X looking at right now'.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_activity",
+    description:
+      "Recent user-activity feed — page visits and recorded actions (calls started, dispatches fired, deploys run, etc), newest first. Super-user-only. Use when the user asks 'what's been happening on the dashboard' or wants a recent-action audit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "integer",
+          description: "How many entries (default 50, max 500).",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  // ---- Recordings -------------------------------------------------------
+  {
+    name: "list_recordings",
+    description:
+      "List the user's recent browser-recording sessions (newest first), plus the active session if one is running. Each entry includes id, status ('active'|'ended'), startedAt, endedAt, eventCount, and any attached automation. Use when the user asks 'what did I record yesterday' or before stop_recording to find the active session id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "integer",
+          description: "How many sessions to return (default 20, max 100).",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "start_recording",
+    description:
+      "Allocate a new recording session for the current user. Returns the session row; the actual headless Chromium capturing events is launched on demand by the browser viewer. Use when the user says 'start recording' / 'capture this flow'.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "stop_recording",
+    description:
+      "End an active recording session and tear down its headless Chromium if one is running. Returns the updated session row.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description:
+            "Session id from list_recordings or start_recording (UUID).",
+        },
+      },
+      required: ["session_id"],
+      additionalProperties: false,
+    },
+  },
+  // ---- Telegram voice ---------------------------------------------------
+  {
+    name: "telegram_status",
+    description:
+      "Report the Telegram voice bridge state — call state ('idle'|'dialing'|'ringing'|'connected'|'hanging_up'|'starting'), peer phone, started_at, last_event, last_error. Returns {state:'offline'} if the Python service isn't running. Use to check whether a Telegram leg is active before deciding to call/hang up.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "telegram_call",
+    description:
+      "Initiate a Telegram voice call to either a phone number or a Telegram user_id. Admin-only. With no args, calls the default TARGET_PHONE configured on the Python service. Always describe who you're calling aloud and get a verbal yes first — this rings a real phone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        phone: {
+          type: "string",
+          description:
+            "Phone number in international format (e.g. '+31612345678'). Optional — falls back to the service default.",
+        },
+        user_id: {
+          type: "integer",
+          description: "Telegram user id to call instead of a phone.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "telegram_hangup",
+    description:
+      "End the current Telegram call (no-op if not connected). Admin-only. Use when the user says 'hang up', 'end the call', or after the conversation has clearly wrapped.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "telegram_speak",
+    description:
+      "Synthesize text via Kokoro and play it through the active Telegram call so the person on the other end hears it. Admin-only. Use only while the call is connected — if state isn't 'connected', call telegram_status first to confirm. Plain prose only, max 4000 chars.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "What to say aloud. Plain prose." },
+        voice: { type: "string", description: "Optional Kokoro voice id." },
+        speed: {
+          type: "number",
+          description: "Optional speech speed (1.0 = normal).",
+        },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  // ---- Automations ------------------------------------------------------
+  {
+    name: "list_automations",
+    description:
+      "List every saved automation with its run stats (lastRunAt, runCount, failedRuns, clarificationsNeeded). Today's automations are URL-kind — a saved navigation target paired with optional description. Use when the user asks 'what automations do I have' or before update_automation.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_automation",
+    description:
+      "Create a new URL-kind automation. `name` is the user-facing label; `url` (or the alias `action`) is what the recorded flow navigates to; `description` (or the alias `trigger`) is an optional one-line note. Returns the new row with empty stats.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Display name for the automation (max 200 chars).",
+        },
+        url: {
+          type: "string",
+          description: "Target URL. Alias: `action`.",
+        },
+        action: {
+          type: "string",
+          description: "Alias for `url` — the navigation target.",
+        },
+        trigger: {
+          type: "string",
+          description:
+            "Alias for `description` — a free-form note describing when to run it.",
+        },
+        description: {
+          type: "string",
+          description: "Optional human-readable description.",
+        },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "update_automation",
+    description:
+      "Patch an existing automation. Pass any subset of name / description / url / enabled — omitted fields stay unchanged. `action`/`trigger` are accepted as aliases for url/description. Returns the updated row with current stats.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "Automation id." },
+        name: { type: "string", description: "New display name." },
+        description: {
+          type: "string",
+          description: "New description (empty string clears it).",
+        },
+        url: { type: "string", description: "New target URL." },
+        action: { type: "string", description: "Alias for `url`." },
+        trigger: { type: "string", description: "Alias for `description`." },
+        enabled: {
+          type: "boolean",
+          description: "Toggle the automation on/off.",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  // ---- Utility ----------------------------------------------------------
+  {
+    name: "companion_status",
+    description:
+      "Report whether the user's companion app (the desktop bridge that keeps a Chromium browser session synced to the dashboard) is currently connected. Returns { connected: boolean }.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send_push",
+    description:
+      "Send a Web-Push notification to the current user's own subscribed devices (phone, desktop, etc). Useful for nudges that should survive the dashboard tab being closed. Title + body required, optional deep-link URL inside the app. Only fans out to the calling user — can't ping arbitrary users.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Notification title (max 200 chars)." },
+        body: { type: "string", description: "Notification body (max 1000 chars)." },
+        url: {
+          type: "string",
+          description:
+            "Optional in-app deep link the notification opens on click (e.g. '/projects/foo').",
+        },
+      },
+      required: ["title", "body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "speak_tts",
+    description:
+      "Synthesize text via the local Kokoro sidecar (the dashboard's TTS engine). Returns synthesised byte count. Note: the audio bytes don't currently auto-play in the browser via this tool — synthesis runs server-side and primes Kokoro's caches. For audible playback, prefer letting your conversational reply ride the normal TTS reply path; reach for this tool when the user explicitly wants you to pre-warm or test the voice pipeline.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to synthesize. Plain prose, max 4000 chars." },
+        voice: { type: "string", description: "Optional Kokoro voice id." },
+        speed: {
+          type: "number",
+          description: "Optional speech speed (1.0 = normal).",
+        },
+        lang: { type: "string", description: "Optional language hint, e.g. 'en'." },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function callTool(name, args) {

@@ -6,14 +6,54 @@
 import fs from "node:fs/promises";
 import { getProject, resolveInProject } from "./config";
 import { visibleProjects, canAccessProject } from "./access";
-import { readHeartbeat, writeHeartbeat } from "./heartbeat";
+import { readHeartbeat, writeHeartbeat, isSuperUser } from "./heartbeat";
 import { getHistory } from "./history";
-import { getSession, write as writeTerminal } from "./terminal";
+import {
+  getSession,
+  write as writeTerminal,
+  start as startTerminal,
+  stop as stopTerminalSession,
+  getStatus as getTerminalStatus,
+} from "./terminal";
 import { getDb, type User } from "./db";
 import { dispatchToProject } from "./spar-dispatch";
 import { readGraph, writeGraph, type SparGraph } from "./spar-graph";
-import { broadcastRemark } from "./ws";
+import { broadcastRemark, broadcastChatMessage } from "./ws";
 import { deleteAttachmentsOfRemark } from "./attachments";
+import {
+  listChannelsForUser,
+  canUseChannel,
+  listMessages,
+  insertMessage,
+  recipientsForChannel,
+  getOrCreateDm,
+  getUnreadForUser,
+} from "./chat";
+import { listOnlineUsers, listRecentActivity } from "./presence";
+import {
+  createSession as createRecordingSession,
+  listSessions as listRecordingSessions,
+  endSession as endRecordingSession,
+  findActiveSession as findActiveRecordingSession,
+} from "./recording";
+import { stopSession as stopLiveBrowserSession } from "./browser-stream";
+import {
+  getStatus as getTelegramStatusUpstream,
+  startCall as startTelegramCall,
+  hangup as hangupTelegramCall,
+  speak as speakTelegram,
+  TelegramVoiceUnavailable,
+} from "./telegram-voice";
+import {
+  createAutomation,
+  listAutomationsWithStats,
+  patchAutomation,
+  getAutomationStats,
+} from "./automations";
+import { commitAndPush } from "./git";
+import { isCompanionConnected } from "./companion-ws";
+import { pushToUsers } from "./push";
+import { getKokoroPort } from "./kokoro";
 
 const MAX_SCROLLBACK_TAIL = 262_144; // 256 KB — enough for any session the PTY ring holds
 const DEFAULT_SCROLLBACK_TAIL = 16_000;
@@ -90,17 +130,37 @@ export function detectTerminalState(
         "If they approve, send '1' via send_keys_to_project.",
     };
   }
-  if (/cogitat|baking|thinking|churning|processing/i.test(lower)) {
-    return {
-      state: "thinking",
-      hint: "Claude Code is still processing — let it run, don't narrate the status line.",
-    };
-  }
-  const lastLine = tailLines.map((l) => l.trim()).filter(Boolean).pop() ?? "";
-  if (/^[>│▌]\s*$/.test(lastLine) || /^\s*>\s*$/.test(lastLine)) {
+  // At-prompt check runs before "thinking" so a stale completion line
+  // ("✻ Cogitated for 1m 16s") above the live "❯" can't outrank the
+  // prompt sitting below it.
+  const nonEmpty = tailLines.map((l) => l.trim()).filter(Boolean);
+  const lastLine = nonEmpty[nonEmpty.length - 1] ?? "";
+  if (/^\s*[>│▌❯]\s*$/.test(lastLine)) {
     return {
       state: "at_prompt",
       hint: "Claude Code is idle at its input prompt.",
+    };
+  }
+  // Active "-ing" forms only. Past tense ("Cogitated for 1m 16s",
+  // "Baked for…") is a completion line, not in-progress work — so the
+  // old `cogitat` stem produced false positives every time a task
+  // finished.
+  //
+  // Two-pronged match. The first regex catches Claude Code's full
+  // verb vocabulary structurally — any "-ing" word followed by a
+  // parenthesised seconds timer like "(28s · …)". That's the shape of
+  // every live status row regardless of which verb the TUI happened
+  // to roll for this turn (Elucidating, Deliberating, Building, …).
+  // The fallback word list keeps coverage for the rare line that has
+  // a verb but no timer yet (first ~1s of a new task) so we don't
+  // bounce to "unknown" mid-rotation.
+  if (
+    /\b[a-z]+ing\b[^\n]{0,80}\(\s*(?:\d+\s*m\s*)?\d+\s*s\b/i.test(tailText) ||
+    /\b(cogitating|baking|thinking|churning|processing)\b/i.test(lower)
+  ) {
+    return {
+      state: "thinking",
+      hint: "Claude Code is still processing — let it run, don't narrate the status line.",
     };
   }
   return {
@@ -927,6 +987,508 @@ async function youtubeStatusTool(ctx: SparContext) {
   };
 }
 
+// ---- Extended tool surface ------------------------------------------------
+//
+// Coverage tools so the spar persona can reach the rest of the dashboard:
+// chat, project actions, admin/presence, recordings, telegram voice,
+// automations, push, and TTS. Each handler mirrors the corresponding
+// `app/api/*` route's auth gate exactly so the spar surface can never
+// grant access the HTTP route doesn't.
+
+function requireAdminCtx(ctx: SparContext): void {
+  if (ctx.user.role !== "admin") {
+    throw new Error("forbidden: admin only");
+  }
+}
+
+function requireSuperUserCtx(ctx: SparContext): void {
+  if (!isSuperUser(ctx.user)) {
+    throw new Error("forbidden: super-user only");
+  }
+}
+
+// ---- Chat -----------------------------------------------------------------
+
+function listChannelsTool(ctx: SparContext) {
+  const channels = listChannelsForUser(ctx.user);
+  const { byChannel: unreadByChannel } = getUnreadForUser(ctx.user);
+  return channels.map((c) => ({
+    id: c.id,
+    kind: c.kind,
+    name: c.name,
+    projectId: c.projectId,
+    projectName: c.projectName ?? null,
+    peer: c.peer ?? null,
+    createdAt: c.createdAt,
+    unread: unreadByChannel[c.id] ?? 0,
+  }));
+}
+
+function readMessagesTool(ctx: SparContext, args: Record<string, unknown>) {
+  const channelId = Math.floor(getOptNum(args, "channel_id") ?? NaN);
+  if (!Number.isFinite(channelId) || channelId <= 0) {
+    throw new Error("channel_id must be a positive integer");
+  }
+  const channel = canUseChannel(ctx.user, channelId);
+  if (!channel) throw new Error("forbidden: no access to this channel");
+  const limit = Math.min(
+    100,
+    Math.max(1, Math.floor(getOptNum(args, "limit") ?? 20)),
+  );
+  const before = Math.floor(getOptNum(args, "before") ?? 0);
+
+  // Inline cursor query so `before` actually paginates back through full
+  // history. listMessages() caps at the most-recent N which is the wrong
+  // shape for "give me the page before this id".
+  const db = getDb();
+  type Row = {
+    id: number;
+    channel_id: number;
+    user_id: number;
+    kind: "text" | "ai_session" | "system";
+    body: string;
+    meta: string | null;
+    created_at: number;
+    user_name: string;
+  };
+  const rows = (
+    before > 0
+      ? db
+          .prepare(
+            `SELECT m.id, m.channel_id, m.user_id, m.kind, m.body, m.meta, m.created_at,
+                    u.name AS user_name
+               FROM chat_messages m JOIN users u ON u.id = m.user_id
+              WHERE m.channel_id = ? AND m.id < ?
+              ORDER BY m.id DESC
+              LIMIT ?`,
+          )
+          .all(channelId, before, limit)
+      : db
+          .prepare(
+            `SELECT m.id, m.channel_id, m.user_id, m.kind, m.body, m.meta, m.created_at,
+                    u.name AS user_name
+               FROM chat_messages m JOIN users u ON u.id = m.user_id
+              WHERE m.channel_id = ?
+              ORDER BY m.id DESC
+              LIMIT ?`,
+          )
+          .all(channelId, limit)
+  ) as Row[];
+  // Return chronological so the assistant reads them top-to-bottom.
+  const chronological = rows.slice().reverse();
+  return {
+    channelId,
+    channelKind: channel.kind,
+    messages: chronological.map((r) => {
+      let meta: unknown = null;
+      if (r.meta) {
+        try {
+          meta = JSON.parse(r.meta);
+        } catch {
+          meta = null;
+        }
+      }
+      return {
+        id: r.id,
+        userId: r.user_id,
+        userName: r.user_name,
+        kind: r.kind,
+        body: r.body,
+        meta,
+        createdAt: r.created_at,
+      };
+    }),
+    hasMore: rows.length === limit,
+    nextBefore: chronological.length > 0 ? chronological[0].id : null,
+  };
+}
+
+function sendMessageTool(ctx: SparContext, args: Record<string, unknown>) {
+  const channelId = Math.floor(getOptNum(args, "channel_id") ?? NaN);
+  if (!Number.isFinite(channelId) || channelId <= 0) {
+    throw new Error("channel_id must be a positive integer");
+  }
+  const text = getStr(args, "text").trim();
+  if (!text) throw new Error("text must not be empty");
+  if (text.length > 10_000) throw new Error("text too long (>10000 chars)");
+  const channel = canUseChannel(ctx.user, channelId);
+  if (!channel) throw new Error("forbidden: no access to this channel");
+
+  const msg = insertMessage(channelId, ctx.user.id, text, "text", null);
+  broadcastChatMessage(channelId, msg);
+
+  // Mirror the chat POST route's notification fan-out so a spar-sent
+  // message wakes up the same recipients a user-typed one would.
+  const recipients = recipientsForChannel(channelId, ctx.user.id);
+  if (recipients.length > 0) {
+    const preview = text.length > 140 ? text.slice(0, 140) + "…" : text;
+    void pushToUsers(recipients, {
+      title: msg.userName,
+      body: preview,
+      url: `/?channel=${channelId}`,
+      tag: `chat-${channelId}`,
+      data: { kind: "chat", channelId },
+    });
+  }
+  return {
+    id: msg.id,
+    channelId: msg.channelId,
+    userId: msg.userId,
+    userName: msg.userName,
+    body: msg.body,
+    createdAt: msg.createdAt,
+  };
+}
+
+function createDmTool(ctx: SparContext, args: Record<string, unknown>) {
+  const userId = Math.floor(getOptNum(args, "user_id") ?? NaN);
+  if (!Number.isFinite(userId) || userId <= 0) {
+    throw new Error("user_id must be a positive integer");
+  }
+  if (userId === ctx.user.id) throw new Error("cannot DM yourself");
+  const target = getDb()
+    .prepare("SELECT id, name FROM users WHERE id = ?")
+    .get(userId) as { id: number; name: string } | undefined;
+  if (!target) throw new Error(`user ${userId} not found`);
+  const channelId = getOrCreateDm(ctx.user.id, userId);
+  return { channelId, peer: { id: target.id, name: target.name } };
+}
+
+// ---- Project actions ------------------------------------------------------
+
+async function deployProjectTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  // /api/projects/[id]/git/deploy is admin-only; mirror that here. The
+  // push lands in a public remote, so spar can't deploy on behalf of a
+  // non-admin even with an authenticated session.
+  requireAdminCtx(ctx);
+  const projectId = getStr(args, "project_id");
+  if (!getProject(projectId)) throw new Error(`unknown project: ${projectId}`);
+  const messageRaw = getOptStr(args, "message");
+  const message =
+    messageRaw && messageRaw.length <= 500
+      ? messageRaw
+      : `Deploy from spar @ ${new Date().toISOString()}`;
+  const result = await commitAndPush(projectId, message);
+  return { projectId, ...result };
+}
+
+function startTerminalTool(ctx: SparContext, args: Record<string, unknown>) {
+  const projectId = getStr(args, "project_id");
+  if (!canAccessProject(ctx.user, projectId)) {
+    throw new Error("forbidden: no access to this project");
+  }
+  if (!getProject(projectId)) throw new Error(`unknown project: ${projectId}`);
+  // Idempotent — startTerminal returns the existing session if one is
+  // already running. Mirrors the WS-driven flow from the project page.
+  const session = startTerminal(projectId);
+  return {
+    projectId,
+    running: true,
+    pid: session.proc.pid ?? null,
+    startedAt: session.startedAt,
+    cols: session.cols,
+    rows: session.rows,
+    alreadyRunning: session.startedAt < Date.now() - 1000,
+  };
+}
+
+function stopTerminalTool(ctx: SparContext, args: Record<string, unknown>) {
+  const projectId = getStr(args, "project_id");
+  if (!canAccessProject(ctx.user, projectId)) {
+    throw new Error("forbidden: no access to this project");
+  }
+  const stopped = stopTerminalSession(projectId);
+  const status = getTerminalStatus(projectId);
+  return { projectId, stopped, running: status.running };
+}
+
+// ---- Admin ----------------------------------------------------------------
+
+function listUsersTool(ctx: SparContext) {
+  // Match /api/admin/users GET — admin role gate.
+  requireAdminCtx(ctx);
+  const rows = getDb()
+    .prepare(
+      "SELECT id, email, name, role, created_at FROM users ORDER BY created_at DESC",
+    )
+    .all() as Array<{
+    id: number;
+    email: string;
+    name: string;
+    role: "admin" | "team" | "client";
+    created_at: number;
+  }>;
+  const accessRows = getDb()
+    .prepare("SELECT user_id, project_id FROM project_access")
+    .all() as { user_id: number; project_id: string }[];
+  const accessByUser = new Map<number, string[]>();
+  for (const r of accessRows) {
+    const arr = accessByUser.get(r.user_id) ?? [];
+    arr.push(r.project_id);
+    accessByUser.set(r.user_id, arr);
+  }
+  return rows.map((r) => ({
+    id: r.id,
+    email: r.email,
+    name: r.name,
+    role: r.role,
+    createdAt: r.created_at,
+    projects: accessByUser.get(r.id) ?? [],
+  }));
+}
+
+function getPresenceTool(ctx: SparContext) {
+  // /api/admin/activity GET (which exposes online users alongside
+  // recent activity) is super-user-only. Stay aligned with that.
+  requireSuperUserCtx(ctx);
+  return { online: listOnlineUsers(), now: Date.now() };
+}
+
+function getActivityTool(ctx: SparContext, args: Record<string, unknown>) {
+  requireSuperUserCtx(ctx);
+  const limit = Math.min(
+    500,
+    Math.max(1, Math.floor(getOptNum(args, "limit") ?? 50)),
+  );
+  return { recent: listRecentActivity(limit), now: Date.now() };
+}
+
+// ---- Recordings -----------------------------------------------------------
+
+function listRecordingsTool(ctx: SparContext, args: Record<string, unknown>) {
+  const limit = Math.min(
+    100,
+    Math.max(1, Math.floor(getOptNum(args, "limit") ?? 20)),
+  );
+  const sessions = listRecordingSessions(ctx.user.id, limit);
+  const active = findActiveRecordingSession(ctx.user.id);
+  return { sessions, active };
+}
+
+function startRecordingTool(ctx: SparContext) {
+  const session = createRecordingSession(ctx.user.id);
+  return { session };
+}
+
+async function stopRecordingTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const sessionId = getStr(args, "session_id");
+  const session = endRecordingSession(sessionId, ctx.user.id);
+  if (!session) throw new Error(`recording session ${sessionId} not found`);
+  // Best-effort headless-browser teardown, matching the route handler.
+  await stopLiveBrowserSession(ctx.user.id).catch(() => {});
+  return { session };
+}
+
+// ---- Telegram -------------------------------------------------------------
+
+function explainTelegramError(err: unknown): never {
+  if (err instanceof TelegramVoiceUnavailable) {
+    throw new Error(`telegram-voice service unavailable: ${err.message}`);
+  }
+  throw err instanceof Error ? err : new Error(String(err));
+}
+
+async function telegramStatusTool(ctx: SparContext) {
+  // Status is readable by any logged-in user, matching the route.
+  void ctx;
+  try {
+    const status = await getTelegramStatusUpstream();
+    return status;
+  } catch (err) {
+    if (err instanceof TelegramVoiceUnavailable) {
+      return { state: "offline", detail: err.message };
+    }
+    throw err;
+  }
+}
+
+async function telegramCallTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  requireAdminCtx(ctx);
+  const phone = getOptStr(args, "phone") ?? undefined;
+  const userIdRaw = getOptNum(args, "user_id");
+  const userId = userIdRaw && Number.isFinite(userIdRaw)
+    ? Math.floor(userIdRaw)
+    : undefined;
+  try {
+    return await startTelegramCall({ phone, user_id: userId });
+  } catch (err) {
+    explainTelegramError(err);
+  }
+}
+
+async function telegramHangupTool(ctx: SparContext) {
+  requireAdminCtx(ctx);
+  try {
+    return await hangupTelegramCall();
+  } catch (err) {
+    explainTelegramError(err);
+  }
+}
+
+async function telegramSpeakTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  requireAdminCtx(ctx);
+  const text = getStr(args, "text").trim();
+  if (!text) throw new Error("text must not be empty");
+  if (text.length > 4_000) throw new Error("text too long (>4000 chars)");
+  const voice = getOptStr(args, "voice") ?? undefined;
+  const speed = getOptNum(args, "speed");
+  try {
+    return await speakTelegram({ text, voice, speed });
+  } catch (err) {
+    explainTelegramError(err);
+  }
+}
+
+// ---- Automations ----------------------------------------------------------
+
+function listAutomationsTool(ctx: SparContext) {
+  void ctx;
+  return { automations: listAutomationsWithStats() };
+}
+
+function createAutomationTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  void ctx;
+  const name = getStr(args, "name").trim();
+  if (!name) throw new Error("name must not be empty");
+  if (name.length > 200) throw new Error("name too long (>200 chars)");
+  // The dashboard's only automation kind today is "url" — a saved
+  // navigation target. Mirror /api/automations POST: the `url` arg
+  // becomes the payload, `description` is optional. We accept the
+  // user-facing `trigger` / `action` arg names from the spec but map
+  // them onto the existing schema rather than inventing a new kind.
+  const url =
+    getOptStr(args, "url") ?? getOptStr(args, "action") ?? "";
+  if (!url) throw new Error("url (or action) is required");
+  if (url.length > 2_000) throw new Error("url too long (>2000 chars)");
+  const description =
+    getOptStr(args, "description") ?? getOptStr(args, "trigger");
+  const automation = createAutomation({
+    name,
+    description,
+    kind: "url",
+    payload: { url },
+  });
+  return {
+    automation: {
+      ...automation,
+      stats: {
+        lastRunAt: null,
+        runCount: 0,
+        failedRuns: 0,
+        clarificationsNeeded: 0,
+      },
+    },
+  };
+}
+
+function updateAutomationTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  void ctx;
+  const id = Math.floor(getOptNum(args, "id") ?? NaN);
+  if (!Number.isFinite(id) || id <= 0) {
+    throw new Error("id must be a positive integer");
+  }
+  const patch: Parameters<typeof patchAutomation>[1] = {};
+  const name = getOptStr(args, "name");
+  if (name !== null) patch.name = name;
+  if (args.description !== undefined) {
+    const d = getOptStr(args, "description");
+    patch.description = d ?? null;
+  }
+  const url = getOptStr(args, "url") ?? getOptStr(args, "action");
+  if (url !== null) patch.payload = { url };
+  if (typeof args.enabled === "boolean") patch.enabled = args.enabled;
+  const updated = patchAutomation(id, patch);
+  if (!updated) throw new Error(`automation ${id} not found`);
+  return { automation: { ...updated, stats: getAutomationStats(id) } };
+}
+
+// ---- Utility --------------------------------------------------------------
+
+function companionStatusTool(ctx: SparContext) {
+  return { connected: isCompanionConnected(ctx.user.id) };
+}
+
+async function sendPushTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const title = getStr(args, "title").trim();
+  if (!title) throw new Error("title must not be empty");
+  if (title.length > 200) throw new Error("title too long (>200 chars)");
+  const body = getStr(args, "body").trim();
+  if (!body) throw new Error("body must not be empty");
+  if (body.length > 1_000) throw new Error("body too long (>1000 chars)");
+  const url = getOptStr(args, "url") ?? undefined;
+  // Only fan out to the calling user's own subscribed devices —
+  // avoids the spar surface becoming a way to ping arbitrary users.
+  await pushToUsers([ctx.user.id], { title, body, url });
+  return { ok: true, userId: ctx.user.id };
+}
+
+async function speakTtsTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  void ctx;
+  // Mirrors /api/tts POST: synthesises through the local Kokoro sidecar
+  // and returns metadata. Audio bytes don't round-trip through MCP, so
+  // this is most useful when paired with a future WS broadcast that
+  // plays the result on the dashboard. The synthesis itself still
+  // succeeds and primes Kokoro's caches, which keeps subsequent reply-
+  // path TTS warm.
+  const text = getStr(args, "text").trim();
+  if (!text) throw new Error("text must not be empty");
+  if (text.length > 4_000) throw new Error("text too long (>4000 chars)");
+  const voice = getOptStr(args, "voice") ?? undefined;
+  const speed = getOptNum(args, "speed");
+  const lang = getOptStr(args, "lang") ?? undefined;
+  const payload: Record<string, unknown> = { text };
+  if (voice) payload.voice = voice;
+  if (typeof speed === "number") payload.speed = speed;
+  if (lang) payload.lang = lang;
+  const port = getKokoroPort();
+  let upstream: Response;
+  try {
+    upstream = await fetch(`http://127.0.0.1:${port}/synth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+  } catch (err) {
+    throw new Error(
+      `kokoro sidecar unreachable: ${String(err).slice(0, 120)}`,
+    );
+  }
+  if (!upstream.ok) {
+    const msg = await upstream.text().catch(() => "synth failed");
+    throw new Error(`kokoro synth failed (${upstream.status}): ${msg.slice(0, 200)}`);
+  }
+  const bytes = Number(upstream.headers.get("Content-Length") ?? 0);
+  // Drain the body so the connection can close cleanly even though we
+  // throw the audio away.
+  await upstream.arrayBuffer().catch(() => {});
+  return { ok: true, bytes, voice: voice ?? null };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -956,4 +1518,34 @@ export const TOOL_HANDLERS: Record<
   youtube_status: (ctx) => youtubeStatusTool(ctx),
   filler_set_mode: (ctx, a) => fillerSetModeTool(ctx, a),
   filler_get_mode: (ctx) => fillerGetModeTool(ctx),
+  // Chat
+  list_channels: (ctx) => listChannelsTool(ctx),
+  read_messages: (ctx, a) => readMessagesTool(ctx, a),
+  send_message: (ctx, a) => sendMessageTool(ctx, a),
+  create_dm: (ctx, a) => createDmTool(ctx, a),
+  // Project actions
+  deploy_project: (ctx, a) => deployProjectTool(ctx, a),
+  start_terminal: (ctx, a) => startTerminalTool(ctx, a),
+  stop_terminal: (ctx, a) => stopTerminalTool(ctx, a),
+  // Admin
+  list_users: (ctx) => listUsersTool(ctx),
+  get_presence: (ctx) => getPresenceTool(ctx),
+  get_activity: (ctx, a) => getActivityTool(ctx, a),
+  // Recordings
+  list_recordings: (ctx, a) => listRecordingsTool(ctx, a),
+  start_recording: (ctx) => startRecordingTool(ctx),
+  stop_recording: (ctx, a) => stopRecordingTool(ctx, a),
+  // Telegram
+  telegram_status: (ctx) => telegramStatusTool(ctx),
+  telegram_call: (ctx, a) => telegramCallTool(ctx, a),
+  telegram_hangup: (ctx) => telegramHangupTool(ctx),
+  telegram_speak: (ctx, a) => telegramSpeakTool(ctx, a),
+  // Automations
+  list_automations: (ctx) => listAutomationsTool(ctx),
+  create_automation: (ctx, a) => createAutomationTool(ctx, a),
+  update_automation: (ctx, a) => updateAutomationTool(ctx, a),
+  // Utility
+  companion_status: (ctx) => companionStatusTool(ctx),
+  send_push: (ctx, a) => sendPushTool(ctx, a),
+  speak_tts: (ctx, a) => speakTtsTool(ctx, a),
 };

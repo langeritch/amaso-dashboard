@@ -35,6 +35,22 @@ const TAIL_BYTES = 8_192;
 // useful surfaces.
 const SUMMARY_SCAN_LINES = 8;
 
+// How far up the partially-cleaned tail to look for a live activity
+// line when state === "thinking". Status lines always sit at the
+// bottom of the TUI; 40 is plenty.
+const ACTIVITY_SCAN_LINES = 40;
+
+// "Active status" line shape: a verb in "-ing" form anywhere on the
+// line plus a parenthesised timer. Examples:
+//   "✢ Elucidating… (28s · ↓ 1.0k tokens · still thinking)"
+//   "* Cogitating (4s · esc to interrupt)"
+//   "✻ Cogitating… (1m 11s · ↓ 2.4k tokens · still thinking)"
+// The optional "Nm " prefix matches Claude Code's switch from "(Ns"
+// to "(Nm Ms" once the timer crosses 60 seconds — without it the
+// status line stops being recognised at the one-minute mark.
+const ACTIVITY_LINE_REGEX =
+  /\b[A-Za-z]+ing\b[^\n]{0,80}\(\s*(?:\d+\s*m\s*)?\d+\s*s\b/i;
+
 interface WorkerStatus {
   id: string;
   name: string;
@@ -61,8 +77,35 @@ function pickSummaryLine(clean: string): string {
     const line = tail[i];
     if (!line) continue;
     if (/^[>│▌$›]\s*$/.test(line)) continue;
+    if (/^>/.test(line)) continue;
     // Trim very long lines so the panel layout stays sane.
     return line.length > 140 ? line.slice(0, 137) + "…" : line;
+  }
+  return "";
+}
+
+// Pulls the live "Elucidating… (28s · …)" status row out of the partially
+// cleaned tail. Operates on `forState` (ANSI + TUI-chrome stripped, but
+// carriage-return overwrites and noise lines preserved) so the row Claude
+// Code rewrites in place is still visible. cleanScrollback drops these
+// rows on purpose — for the MCP scrollback tool you don't want spinners
+// — but the workers panel's whole job is to surface them.
+function pickActivityLine(forState: string): string {
+  const lines = forState.split(/\n/);
+  const start = Math.max(0, lines.length - ACTIVITY_SCAN_LINES);
+  for (let i = lines.length - 1; i >= start; i--) {
+    // Each logical line may contain \r-overwritten variants where the
+    // TUI rewrote the same row repeatedly. Only the segment after the
+    // final \r is what the user actually sees on screen — so walk
+    // those right-to-left and pick the first non-empty match.
+    const segs = lines[i].split("\r");
+    for (let j = segs.length - 1; j >= 0; j--) {
+      const seg = segs[j].trim();
+      if (!seg) continue;
+      if (ACTIVITY_LINE_REGEX.test(seg)) {
+        return seg.length > 140 ? seg.slice(0, 137) + "…" : seg;
+      }
+    }
   }
   return "";
 }
@@ -97,7 +140,16 @@ export async function GET() {
       .replace(TUI_CHROME_REGEX, "");
     const { state, hint } = detectTerminalState(forState);
     const cleaned = cleanScrollback(rawTail);
-    const lastLine = pickSummaryLine(cleaned);
+    // Always try the live activity row first, regardless of state.
+    // Claude Code's TUI renders a `❯` prompt character below the
+    // status line even while it's still thinking, which makes
+    // `detectTerminalState` return "at_prompt" — so gating the
+    // activity-line lookup on state === "thinking" hides the row in
+    // exactly the case we want it most. The activity regex requires
+    // both an "-ing" verb and a parenthesised timer, so a stale row
+    // from a finished turn won't false-positive here.
+    let lastLine = pickActivityLine(forState);
+    if (!lastLine) lastLine = pickSummaryLine(cleaned);
     return {
       id: p.id,
       name: p.name,

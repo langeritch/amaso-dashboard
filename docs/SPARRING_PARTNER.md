@@ -164,7 +164,26 @@ Runs every 30 s. Each tick, in order:
      drop a `build.lock` and run `npm run build` ourselves.
    - `Fix-DetectFatalLoop` — scan tail of `app.log` for ≥3 `[env] FATAL`
      lines and re-assert the env file once if so.
-3. **`Tick-Component dashboard / tunnel / kokoro`** — HTTP probe each.
+3. **Cron-style periodic checks** (every Nth tick on top of the 30 s probes):
+   - **5-min health check** (`Cron-FiveMinHealthCheck`) — explicit
+     "is it really alive?" probe that **bypasses** the `FailureThreshold`
+     counter. If the dashboard refuses connections AND no build is in
+     progress AND we're not in cooldown, force `schtasks /End /Run`
+     immediately. Catches GC-stutter cases where two 30 s probes time
+     out, the third just barely succeeds, and the threshold counter
+     resets while the operator-facing state is dead.
+   - **30-min auto-rebuild** (`Cron-RebuildIfStale`) — scans the
+     watched source roots (`app/`, `lib/`, `components/`, `public/`,
+     `scripts/`, `types/`, `server.ts`, `package*.json`, `next.config.ts`,
+     `tsconfig.json`), takes the max `LastWriteTime`, and compares to
+     `.next/BUILD_ID`'s mtime. If anything is newer, drops `build.lock`,
+     runs `npm run build` (logged to `app.log`), and on success
+     restarts the App task so the new bundle is live. If the build
+     fails, it logs ERROR and leaves the previous bundle in place;
+     the next 30-min tick retries. **This means the operator no longer
+     needs to manually `npm run build` after editing source — code
+     changes go live within 30 min automatically.**
+4. **`Tick-Component dashboard / tunnel / kokoro`** — HTTP probe each.
    3 consecutive fails (~90 s) trigger a repair (`schtasks /End` then
    `/Run`). Cooldown after repair: 120 s for dashboard, 60 s for
    tunnel/kokoro. Probes during a `build.lock` window are skipped.
@@ -172,6 +191,71 @@ Runs every 30 s. Each tick, in order:
    model server hangs; this kills any non-listener kokoro pythons.
 
 Every action is logged to `logs/watchdog.log` with UTC ISO timestamps.
+
+## AI-driven self-heal (`scripts/ai-heal.ps1`)
+
+A last-resort escalation layer. When the rule-based watchdog runs out
+of moves, it invokes `claude -p` headlessly with the current crash
+context and lets Claude diagnose + patch the code.
+
+**Triggers — any one of these fires the escalation:**
+
+1. **Dashboard thrash** — the App task has been restarted ≥3 times in
+   the last 15 minutes. The probe layer is doing its job (restart on
+   fail) but the underlying cause isn't going away. This is the
+   pattern that means "human-level reasoning required."
+2. **Persistent `[env] FATAL` loop** — `Fix-DetectFatalLoop` already
+   alerted >10 min ago, the env-asserter ran, but FATAL lines are
+   still accumulating in `app.log`. (E.g. some other env var the
+   asserter doesn't know about is missing.)
+
+**Safety rails inside `ai-heal.ps1`:**
+
+- **Rate limit:** at most 1 invocation per hour (`logs/ai-heal.last`
+  mtime gate). API calls cost money and a flap loop that keeps
+  invoking Claude is worse than the original outage. Pass `-Force`
+  for operator-run manual heals.
+- **Git checkpoint:** before invocation, tag HEAD as
+  `ai-heal-<UTC-timestamp>`. Any change is one
+  `git reset --hard <tag>` away.
+- **Dollar budget:** `--max-budget-usd 1.0` per call (override with
+  `-MaxBudgetUsd`).
+- **Wall-clock timeout:** 600 s default; the PS Process is killed if
+  Claude hangs past that.
+- **Tool allowlist:** `Read,Grep,Glob,Edit,Write,TodoWrite` plus
+  scoped Bash (`Bash(git status:*)`, `Bash(npm run build:*)`,
+  `Bash(schtasks:*)`, etc.). The agent cannot run arbitrary bash.
+- **System prompt is binding:** instructs Claude to read this very
+  document FIRST before changing anything, and lists every "do not"
+  rule from above as hard constraints.
+- **Full transcript saved:** every invocation writes a prompt file
+  and a transcript file under `logs/ai-heal-<timestamp>-{prompt,
+  transcript}.txt` for postmortem review.
+
+**Operator-run manual invocation:**
+
+```powershell
+pwsh -File scripts\ai-heal.ps1 -Reason "operator: <what you saw>" -Force
+```
+
+**Rolling back an AI change you don't like:**
+
+```powershell
+git -C C:\Users\santi\Projects\amaso-dashboard reset --hard ai-heal-20260427-123456
+```
+
+(The exact tag name appears in `logs/ai-heal.log` next to every
+invocation.)
+
+**When NOT to expect AI heal to fire:**
+
+- The first 60 minutes after any prior AI heal — the rate limit is
+  hard.
+- During a build window (the 30-min auto-rebuild holds `build.lock`,
+  which suppresses probes, which prevents the thrash counter from
+  incrementing).
+- If `claude` isn't on PATH (logged as ERROR but doesn't break the
+  watchdog tick loop).
 
 ## Rules — things the sparring partner must NOT do
 

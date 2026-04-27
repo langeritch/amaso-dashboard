@@ -118,6 +118,56 @@ $EnvLocalRequiredDefaults = @{
 $AppLogFile = Join-Path $LogDir 'app.log'
 $LastFatalLoopAlertFile = Join-Path $LogDir 'fatal-loop.alerted'
 
+# ── Periodic checks (cron-like, on top of the 30s probe layer) ──────
+# The probe layer reacts in ~90s to a fully-down server. These run on a
+# coarser schedule for things that don't need second-by-second attention:
+#
+#   • Every 5 minutes — explicit "is the dashboard alive?" check that
+#     bypasses the FailureThreshold counter. If the local probe refuses
+#     a connection on a 5-min boundary AND no build is in progress, we
+#     force a restart immediately (vs waiting 90s for the probe layer).
+#     This catches the case where a freeze just barely keeps producing
+#     200s on some path but the operator-facing state is dead.
+#
+#   • Every 30 minutes — auto-rebuild if source code is newer than the
+#     last build. The operator edits source frequently; without this
+#     they have to remember to `npm run build` after every change. We
+#     scan the watched source dirs, compare max mtime to .next/BUILD_ID,
+#     and trigger a rebuild + task restart if anything is newer.
+#
+# Tick interval is 30s, so:
+#   5 min  =  10 ticks  (FiveMinTickInterval)
+#   30 min =  60 ticks  (RebuildTickInterval)
+$FiveMinTickInterval = [int](300 / [Math]::Max(1, $IntervalSeconds))
+$RebuildTickInterval = [int](1800 / [Math]::Max(1, $IntervalSeconds))
+# Source roots we care about for rebuild-detection. Anything else (logs/,
+# node_modules/, .next/ itself, .git/, the syncthing scratch dirs) is
+# either generated or noise.
+$SourceRoots = @('app','lib','components','public','scripts','types','server.ts','package.json','package-lock.json','next.config.ts','tsconfig.json')
+$LastRebuildStampFile = Join-Path $LogDir 'last-rebuild.stamp'
+
+# ── AI escalation ────────────────────────────────────────────────────
+# When the rule-based layer can't fix a problem, we escalate to Claude
+# via scripts/ai-heal.ps1. Triggers (any one fires the escalation):
+#
+#   • Thrash: dashboard repaired ≥3 times in the last 15 min. The probe
+#     layer is doing its job (restart on fail) but the underlying cause
+#     isn't going away — this is the pattern that means "human-level
+#     reasoning required".
+#   • Persistent FATAL: Fix-DetectFatalLoop already alerted >10 min ago
+#     and the FATAL lines are still accumulating.
+#   • Repeated build failure: Cron-RebuildIfStale failed twice in a row.
+#
+# Rate-limited inside ai-heal.ps1 to ≤1 invocation per hour. Each call
+# costs API tokens and a flap-loop that keeps firing Claude is worse
+# than the original outage.
+$AiHealScript = Join-Path $PSScriptRoot 'ai-heal.ps1'
+$RepairHistoryFile = Join-Path $LogDir 'repair-history.json'
+# Sliding window: if dashboard has been repaired this many times in
+# this many seconds, escalate.
+$ThrashCount = 3
+$ThrashWindowSeconds = 900
+
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
 # ── Utilities ────────────────────────────────────────────────────────
@@ -300,6 +350,82 @@ function Run-Repair {
   } catch {
     Write-Log 'ERROR' "schtasks /Run $TaskName failed: $($_.Exception.Message)"
   }
+  # Record the repair so the thrash detector can spot a flap loop. We
+  # store as ISO timestamps in a JSON array; entries older than the
+  # window are pruned on each write so the file stays bounded.
+  Record-Repair -TaskName $TaskName
+}
+
+function Record-Repair {
+  param([string]$TaskName)
+  $history = @()
+  if (Test-Path $RepairHistoryFile) {
+    try {
+      $raw = Get-Content -Raw -Path $RepairHistoryFile -ErrorAction Stop
+      if ($raw) { $history = ConvertFrom-Json $raw -ErrorAction Stop }
+    } catch {
+      # Corrupt history file (concurrent write, partial flush) — start
+      # fresh. A stale empty history just delays escalation; that's
+      # acceptable.
+      Write-Log 'WARN' "repair-history.json unreadable; resetting"
+      $history = @()
+    }
+  }
+  $now = (Get-Date).ToUniversalTime()
+  $cutoff = $now.AddSeconds(-$ThrashWindowSeconds)
+  # Keep only entries inside the window, then append the new one.
+  $kept = @($history | Where-Object {
+    try { ([DateTime]::Parse($_.ts)) -ge $cutoff } catch { $false }
+  })
+  $kept += [pscustomobject]@{ ts = $now.ToString('s') + 'Z'; task = $TaskName }
+  try {
+    $kept | ConvertTo-Json -Compress | Set-Content -Path $RepairHistoryFile -Encoding ASCII
+  } catch {
+    Write-Log 'WARN' "could not persist repair history: $($_.Exception.Message)"
+  }
+}
+
+function Try-AiHeal {
+  param([string]$Reason)
+  if (-not (Test-Path $AiHealScript)) {
+    Write-Log 'WARN' "ai-heal script not found ($AiHealScript) — cannot escalate. Reason: $Reason"
+    return
+  }
+  Write-Log 'ALERT' "ESCALATING to AI heal: $Reason"
+  try {
+    # Run synchronously in-process so we serialise on the watchdog tick.
+    # ai-heal.ps1 has its own rate-limit (60 min) and will exit 2 if
+    # called too soon — we don't double-gate here.
+    # Use powershell.exe (5.1) — pwsh (7+) isn't installed on this box.
+    # The script targets 5.1 syntax so it's compatible; if the operator
+    # later installs pwsh we can switch here.
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $AiHealScript -Reason $Reason 2>&1 | ForEach-Object {
+      Write-Log 'AI' $_
+    }
+  } catch {
+    Write-Log 'ERROR' "ai-heal launch failed: $($_.Exception.Message)"
+  }
+}
+
+function Detect-DashboardThrash {
+  # Returns $true if dashboard has been repaired ≥$ThrashCount times
+  # in the last $ThrashWindowSeconds. Uses the JSON history written by
+  # Record-Repair.
+  if (-not (Test-Path $RepairHistoryFile)) { return $false }
+  try {
+    $raw = Get-Content -Raw -Path $RepairHistoryFile -ErrorAction Stop
+    if (-not $raw) { return $false }
+    $history = ConvertFrom-Json $raw -ErrorAction Stop
+    $cutoff = (Get-Date).ToUniversalTime().AddSeconds(-$ThrashWindowSeconds)
+    $recent = @($history | Where-Object {
+      $_.task -eq $DashboardTask -and (
+        try { ([DateTime]::Parse($_.ts)) -ge $cutoff } catch { $false }
+      )
+    })
+    return ($recent.Count -ge $ThrashCount)
+  } catch {
+    return $false
+  }
 }
 
 # ── Failure counters + repair cooldowns ─────────────────────────────
@@ -418,6 +544,10 @@ function Fix-DetectFatalLoop {
     Write-Log 'ALERT' "FATAL crash-loop detected ($fatalCount FATAL lines in tail) — re-asserting env + rebuilding env file"
     Fix-EnvLocalMissingKeys | Out-Null
     Get-UtcIso | Set-Content -Path $LastFatalLoopAlertFile -Encoding ASCII
+    # Persistent FATAL loops are a strong signal the rule-based fixer
+    # isn't enough — escalate to AI. ai-heal.ps1 will rate-limit
+    # internally if we already called it within the last hour.
+    Try-AiHeal -Reason "persistent [env] FATAL loop ($fatalCount lines in app.log tail) — env-fixer ran but didn't resolve"
   } catch {
     Write-Log 'ERROR' "Fix-DetectFatalLoop threw: $($_.Exception.Message)"
   }
@@ -429,6 +559,130 @@ function Tick-AutoFix {
   try { Fix-EnvLocalMissingKeys | Out-Null } catch { Write-Log 'ERROR' "env-fixer: $($_.Exception.Message)" }
   try { Fix-MissingBuildId      | Out-Null } catch { Write-Log 'ERROR' "build-fixer: $($_.Exception.Message)" }
   try { Fix-DetectFatalLoop                 } catch { Write-Log 'ERROR' "fatal-loop-detector: $($_.Exception.Message)" }
+}
+
+# ── Periodic cron-style checks ───────────────────────────────────────
+
+function Cron-FiveMinHealthCheck {
+  # Explicit deeper "is it really alive?" probe on a 5-min boundary.
+  # Bypasses FailureThreshold: if the dashboard refuses connections
+  # AND no build is in progress AND we're not in cooldown, force a
+  # restart immediately. This is on top of (not instead of) the 30s
+  # probe layer — it catches the "GC stutter caused 1-2 timeouts but
+  # the threshold counter reset before the third" case.
+  if (Test-BuildInProgress) {
+    Write-Log 'CRON5' "skip — build in progress"
+    return
+  }
+  if ((Get-Date) -lt $cooldownUntil['dashboard']) {
+    Write-Log 'CRON5' "skip — dashboard in cooldown"
+    return
+  }
+  $alive = $false
+  try {
+    $r = Invoke-WebRequest -Uri $DashboardUrl -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+    if ($r.StatusCode -eq 200) { $alive = $true }
+  } catch {
+    $alive = $false
+  }
+  if ($alive) {
+    Write-Log 'CRON5' "dashboard healthy"
+    return
+  }
+  Write-Log 'ALERT' "5-min check: dashboard NOT responding — forcing restart (bypassing failure threshold)"
+  Run-Repair $DashboardTask
+  $cooldownUntil['dashboard'] = (Get-Date).AddSeconds(120)
+  $cooldownUntil['kokoro']    = (Get-Date).AddSeconds(60)
+  $fails['dashboard'] = 0
+}
+
+function Get-MaxSourceMtime {
+  # Returns the most recent LastWriteTime across all $SourceRoots. We
+  # explicitly exclude generated/vendored dirs even when they live
+  # inside a source root (e.g. app/.next-cache shouldn't trigger a
+  # rebuild). Cheap enough to run every 30 min — typical scan is
+  # <500ms because we skip node_modules/.next/.git up front.
+  $excluded = @('node_modules','.next','.git','.gstack','.claude','dist','build','coverage','logs','.stfolder','.stversions','electron\dist-local')
+  $latest = [DateTime]::MinValue
+  foreach ($rel in $SourceRoots) {
+    $p = Join-Path $RepoRoot $rel
+    if (-not (Test-Path $p)) { continue }
+    try {
+      $item = Get-Item $p -ErrorAction Stop
+      if ($item.PSIsContainer) {
+        # Directory walk with prune. Get-ChildItem -Recurse can't
+        # natively prune, so we filter the FullName for excluded
+        # path segments. This is fast because the matching is on
+        # already-enumerated entries; the alternative (a manual
+        # recursive function) was 3x slower in measurement.
+        $files = Get-ChildItem -Path $p -Recurse -File -Force -ErrorAction SilentlyContinue
+        foreach ($f in $files) {
+          $skip = $false
+          foreach ($x in $excluded) {
+            if ($f.FullName -match [regex]::Escape("\$x\")) { $skip = $true; break }
+          }
+          if ($skip) { continue }
+          if ($f.LastWriteTime -gt $latest) { $latest = $f.LastWriteTime }
+        }
+      } else {
+        if ($item.LastWriteTime -gt $latest) { $latest = $item.LastWriteTime }
+      }
+    } catch {
+      Write-Log 'ERROR' "Get-MaxSourceMtime: $($_.Exception.Message) at $p"
+    }
+  }
+  return $latest
+}
+
+function Cron-RebuildIfStale {
+  # Auto-rebuild + restart task if any source file is newer than
+  # `.next/BUILD_ID`. The operator edits source frequently — without
+  # this they'd need to remember `npm run build` after every change.
+  if (Test-BuildInProgress) {
+    Write-Log 'CRON30' "skip rebuild — build already in progress"
+    return
+  }
+  if (-not (Test-Path $BuildIdFile)) {
+    # The auto-fixer (Fix-MissingBuildId) handles the no-build case;
+    # don't double-fire from here.
+    Write-Log 'CRON30' "skip rebuild — BUILD_ID missing (auto-fixer handles this)"
+    return
+  }
+  $buildMtime = (Get-Item $BuildIdFile).LastWriteTime
+  $sourceMtime = Get-MaxSourceMtime
+  if ($sourceMtime -le $buildMtime) {
+    Write-Log 'CRON30' "no rebuild needed (newest source $($sourceMtime.ToString('s')) <= BUILD_ID $($buildMtime.ToString('s')))"
+    return
+  }
+  Write-Log 'ACT' "rebuild triggered — newest source $($sourceMtime.ToString('s')) > BUILD_ID $($buildMtime.ToString('s'))"
+  # Drop build.lock FIRST so our own probe-suppression and the run-loop
+  # both honour it. The lock is also what prevents Tick-Component from
+  # killing the App task while we're mid-build.
+  "watchdog cron rebuild $(Get-UtcIso)" | Set-Content -Path $BuildLockFile -Encoding ASCII
+  $buildOk = $false
+  try {
+    Push-Location $RepoRoot
+    & npm.cmd run build *>> $AppLogFile
+    $buildOk = ($LASTEXITCODE -eq 0) -and (Test-Path $BuildIdFile) -and ((Get-Item $BuildIdFile).LastWriteTime -gt $buildMtime)
+  } catch {
+    Write-Log 'ERROR' "rebuild threw: $($_.Exception.Message)"
+  } finally {
+    Pop-Location
+    Remove-Item -Path $BuildLockFile -ErrorAction SilentlyContinue
+  }
+  if (-not $buildOk) {
+    Write-Log 'ERROR' "rebuild FAILED — leaving previous bundle in place; will retry next 30-min tick"
+    return
+  }
+  Write-Log 'INFO' "rebuild OK — restarting App task to pick up new bundle"
+  # End + Run the App task so the running process drops the old bundle
+  # and the run-loop respawns into the freshly-built `.next`.
+  schtasks /End /TN $DashboardTask 2>&1 | Out-Null
+  Start-Sleep -Milliseconds 800
+  schtasks /Run /TN $DashboardTask 2>&1 | Out-Null
+  $cooldownUntil['dashboard'] = (Get-Date).AddSeconds(120)
+  $cooldownUntil['kokoro']    = (Get-Date).AddSeconds(60)
+  Get-UtcIso | Set-Content -Path $LastRebuildStampFile -Encoding ASCII
 }
 
 function Tick-Component {
@@ -501,6 +755,18 @@ while ($true) {
     # spotting a crash that we could have prevented.
     Tick-AutoFix
 
+    # Cron-style periodic checks layered on top of the 30s probes.
+    # FiveMinTickInterval (10 ticks) — explicit health check that
+    # bypasses FailureThreshold; restarts immediately if down.
+    # RebuildTickInterval (60 ticks) — auto-rebuild + restart if any
+    # source file is newer than .next/BUILD_ID.
+    if (($tickCount % $FiveMinTickInterval) -eq 0) {
+      try { Cron-FiveMinHealthCheck } catch { Write-Log 'ERROR' "cron-5min: $($_.Exception.Message)" }
+    }
+    if (($tickCount % $RebuildTickInterval) -eq 0) {
+      try { Cron-RebuildIfStale } catch { Write-Log 'ERROR' "cron-30min: $($_.Exception.Message)" }
+    }
+
     Tick-Component 'dashboard' `
       -Probe  { Probe-Http $DashboardUrl } `
       -Repair { Run-Repair $DashboardTask }
@@ -522,6 +788,14 @@ while ($true) {
       }
 
     Stop-KokoroDuplicates
+
+    # Escalation: if rule-based repairs aren't sticking (dashboard has
+    # been restarted ≥$ThrashCount times in the last $ThrashWindowSeconds),
+    # call in the AI. ai-heal.ps1 self-rate-limits so this won't
+    # double-fire.
+    if (Detect-DashboardThrash) {
+      Try-AiHeal -Reason "dashboard thrash: $ThrashCount+ repairs in last $($ThrashWindowSeconds)s — rule-based layer can't keep it up"
+    }
   }
   catch {
     Write-Log 'ERROR' "tick threw: $($_.Exception.Message)"
