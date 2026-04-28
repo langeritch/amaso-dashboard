@@ -105,7 +105,14 @@ jobs:
             echo "::error::sign=true but required secrets missing:$missing"
             exit 1
           fi
-          npx electron-builder --mac --publish=never
+          # hardenedRuntime + entitlements are intentionally OFF in
+          # package.json so unsigned builds don't trip Gatekeeper's
+          # "damaged" check. Re-enable them here via CLI overrides — a
+          # hardened runtime is required for notarization.
+          npx electron-builder --mac --publish=never \
+            -c.mac.hardenedRuntime=true \
+            -c.mac.entitlements=entitlements.mac.plist \
+            -c.mac.entitlementsInherit=entitlements.mac.plist
 
       - name: List build output
         working-directory: electron

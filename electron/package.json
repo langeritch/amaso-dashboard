@@ -46,10 +46,7 @@
         "LSUIElement": true,
         "NSMicrophoneUsageDescription": "Amaso Companion listens to your mic locally to detect when you're talking, so it can mute other apps while you speak."
       },
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "entitlements.mac.plist",
-      "entitlementsInherit": "entitlements.mac.plist"
+      "gatekeeperAssess": false
     },
     "dmg": {
       "writeUpdateInfo": true
