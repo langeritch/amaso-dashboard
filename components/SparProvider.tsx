@@ -1652,78 +1652,140 @@ export default function SparProvider({
         ? [...messagesRef.current, userMsg]
         : messagesRef.current;
       try {
-        let r: Response;
-        try {
-          r = await fetch("/api/spar", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              autopilot: autopilotRef.current,
-              messages: priorHistory
-                .slice(-MAX_TRANSCRIPT)
-                .map((m) => ({ role: m.role, content: m.content })),
-            }),
-          });
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsg.id
-                ? { ...m, content: `[network: ${detail.slice(0, 160)}]` }
-                : m,
-            ),
-          );
-          return;
-        }
-        if (!r.ok || !r.body) {
-          const errText = await r.text().catch(() => "spar failed");
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsg.id
-                ? { ...m, content: `[error: ${errText.slice(0, 200)}]` }
-                : m,
-            ),
-          );
-          return;
-        }
-        const reader = r.body.getReader();
-        const decoder = new TextDecoder();
+        // Network blips and TLS resets used to surface as
+        // "[stream dropped: ...]" right in the chat. Retry up to 3
+        // times silently — the user only sees a friendly message if
+        // every attempt fails. Two rules keep retries safe:
+        //   1. HTTP errors (4xx/5xx) are NOT retried. The server
+        //      already retries the CLI 3x before responding (see
+        //      lib/spar-claude retry loop in app/api/spar/route.ts),
+        //      so a non-OK status here is deterministic.
+        //   2. We track "have any *visible* tokens been streamed?" by
+        //      stripping the ZWSP keepalive (server flushes one
+        //      immediately to keep Cloudflare from closing the
+        //      origin). A drop after only ZWSPs is still safe to
+        //      retry. A drop after real content is NOT — the server
+        //      regenerates from scratch and the user would see
+        //      duplicated tokens. In that case we keep the partial
+        //      reply and stop, no error suffix.
+        const RETRY_DELAYS_MS = [0, 500, 1500];
+        let realChunksEmitted = false;
+        let httpFailureText: string | null = null;
+        let allAttemptsFailed = false;
         let accumulated = "";
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            accumulated += decoder.decode(value, { stream: true });
-            const soFar = accumulated;
+
+        for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+          if (RETRY_DELAYS_MS[attempt] > 0) {
+            await new Promise<void>((r) =>
+              setTimeout(r, RETRY_DELAYS_MS[attempt]),
+            );
+            // Reset between attempts — only reachable when no real
+            // content was emitted, so this is just keepalive bytes.
+            accumulated = "";
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantMsg.id ? { ...m, content: soFar } : m,
+                m.id === assistantMsg.id ? { ...m, content: "" } : m,
               ),
             );
-            flushSpokenText(soFar, false);
           }
-          accumulated += decoder.decode();
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          accumulated += `\n[stream dropped: ${detail.slice(0, 160)}]`;
+
+          let r: Response;
+          try {
+            r = await fetch("/api/spar", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                autopilot: autopilotRef.current,
+                messages: priorHistory
+                  .slice(-MAX_TRANSCRIPT)
+                  .map((m) => ({ role: m.role, content: m.content })),
+              }),
+            });
+          } catch (err) {
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[spar] fetch failed (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+              continue;
+            }
+            allAttemptsFailed = true;
+            break;
+          }
+
+          if (!r.ok || !r.body) {
+            httpFailureText = await r.text().catch(() => "spar failed");
+            break;
+          }
+
+          const reader = r.body.getReader();
+          const decoder = new TextDecoder();
+          let streamFailed = false;
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              accumulated += decoder.decode(value, { stream: true });
+              if (!realChunksEmitted) {
+                // ZWSP-only output is keepalive, not visible content —
+                // a drop here can still be retried without duplication.
+                const visible = accumulated.replace(/​/g, "").trim();
+                if (visible.length > 0) realChunksEmitted = true;
+              }
+              const soFar = accumulated;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsg.id ? { ...m, content: soFar } : m,
+                ),
+              );
+              flushSpokenText(soFar, false);
+            }
+            accumulated += decoder.decode();
+          } catch (err) {
+            streamFailed = true;
+            if (realChunksEmitted) {
+              // Mid-stream drop after visible content — keep what we
+              // have, no retry (would duplicate), no error suffix.
+              break;
+            }
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[spar] stream dropped (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+              continue;
+            }
+            allAttemptsFailed = true;
+            break;
+          }
+
+          if (!streamFailed) break;
         }
+
+        const finalContent = httpFailureText
+          ? `[error: ${httpFailureText.slice(0, 200)}]`
+          : allAttemptsFailed
+            ? "Connection lost after 3 attempts — please try again."
+            : accumulated;
+
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantMsg.id ? { ...m, content: accumulated } : m,
+            m.id === assistantMsg.id ? { ...m, content: finalContent } : m,
           ),
         );
-        flushSpokenText(accumulated, true);
+        flushSpokenText(finalContent, true);
         // Fire-and-forget: feed the turn into the learning pipeline so
         // the user-profile store on the server gets updated. Skipped
-        // for kickoff (no user turn yet) and for network/stream error
-        // replies (we'd be teaching the extractor to store error
-        // strings, which is noise). Never awaited — the POST returns
-        // 202 immediately and extraction runs in the background.
-        const replyForLearn = accumulated.replace(/​/g, "").trim();
+        // for kickoff (no user turn yet) and for error replies (we'd
+        // be teaching the extractor to store error strings, which is
+        // noise). Never awaited — the POST returns 202 immediately and
+        // extraction runs in the background.
+        const replyForLearn = finalContent.replace(/​/g, "").trim();
         const looksLikeError =
           replyForLearn.startsWith("[error:") ||
           replyForLearn.startsWith("[network:") ||
-          replyForLearn.startsWith("[stream dropped:");
+          replyForLearn.startsWith("[stream dropped:") ||
+          replyForLearn.startsWith("Connection lost");
         if (!opts?.kickoff && text && replyForLearn && !looksLikeError) {
           void fetch("/api/knowledge/learn", {
             method: "POST",
