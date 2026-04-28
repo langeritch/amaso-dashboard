@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
         typeof m.content === "string" &&
         m.content.trim().length > 0,
     )
-    .slice(-30);
+    .slice(-50);
 
   const heartbeat = readHeartbeat(user.id);
 
@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
   // then drops the section entirely.
   const recentUserText = msgs
     .filter((m) => m.role === "user")
-    .slice(-4)
+    .slice(-10)
     .map((m) => m.content)
     .join(" ")
     .slice(0, 800);
@@ -86,14 +86,40 @@ export async function POST(req: NextRequest) {
     .split(/\s+/)
     .map((w) => w.replace(/[^\p{L}\p{N}-]/gu, ""))
     .filter((w) => w.length >= 4);
+  // Retry transient graph-read failures (e.g. a concurrent write
+  // mid-rename) up to 3 times. queryGraph rarely throws — loadGraphSync
+  // already swallows parse/read errors and returns an empty graph — so
+  // a thrown error here usually means something genuinely unexpected
+  // (locked file, fs permissions). We still log per attempt so a real
+  // outage shows up clearly rather than masquerading as "no profile".
   let profile = "";
-  try {
-    const result = await queryGraph(user.id, { keywords, limit: 60 });
-    profile = formatGraphForPrompt(result);
-  } catch (err) {
+  const GRAPH_RETRY_DELAYS_MS = [0, 50, 150];
+  let graphErr: unknown = null;
+  for (let attempt = 0; attempt < GRAPH_RETRY_DELAYS_MS.length; attempt++) {
+    if (GRAPH_RETRY_DELAYS_MS[attempt] > 0) {
+      await new Promise<void>((r) =>
+        setTimeout(r, GRAPH_RETRY_DELAYS_MS[attempt]),
+      );
+    }
+    try {
+      const result = await queryGraph(user.id, { keywords, limit: 60 });
+      profile = formatGraphForPrompt(result);
+      graphErr = null;
+      break;
+    } catch (err) {
+      graphErr = err;
+      if (attempt < GRAPH_RETRY_DELAYS_MS.length - 1) {
+        console.warn(
+          `[spar] queryGraph failed (attempt ${attempt + 1}/${GRAPH_RETRY_DELAYS_MS.length}); retrying:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+  if (graphErr) {
     console.warn(
-      "[spar] queryGraph failed — continuing without profile:",
-      err instanceof Error ? err.message : String(err),
+      "[spar] queryGraph failed after retries — continuing without profile:",
+      graphErr instanceof Error ? graphErr.message : String(graphErr),
     );
   }
 
