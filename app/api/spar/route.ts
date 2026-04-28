@@ -196,31 +196,77 @@ export async function POST(req: NextRequest) {
       // to the shared voice-session once the CLI finishes streaming.
       let replyBuffer = "";
 
+      // Network blips and transient CLI failures used to surface as
+      // "[error: claude cli exit=1]" and the user had to type "proceed"
+      // to retry. Up to 3 attempts with a short backoff. We only retry
+      // when nothing real has been streamed to the client yet — once
+      // the user has seen partial tokens, retrying would duplicate
+      // output, so we surface the error instead and keep the partial
+      // reply (the finally block records it).
+      const RETRY_DELAYS_MS = [0, 400, 1200];
+      let realChunksEmitted = false;
+
       try {
-        await streamFromClaudeCli(
-          {
-            systemPrompt: autopilot
-              ? SPAR_SYSTEM_PROMPT + SPAR_AUTOPILOT_SUFFIX
-              : SPAR_SYSTEM_PROMPT,
-            heartbeat,
-            profile,
-            history: msgs,
-            model: SPAR_MODEL,
-            signal: abort.signal,
-            tools: {
-              token,
-              dashboardUrl,
-              allowedTools: SPAR_TOOLS,
-            },
-          },
-          (chunk) => {
-            replyBuffer += chunk;
-            flush(chunk);
-          },
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        flush(`\n[error: ${msg.slice(0, 200)}]`);
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+          if (abort.signal.aborted) {
+            lastError = null;
+            break;
+          }
+          if (RETRY_DELAYS_MS[attempt] > 0) {
+            await new Promise<void>((r) =>
+              setTimeout(r, RETRY_DELAYS_MS[attempt]),
+            );
+            if (abort.signal.aborted) {
+              lastError = null;
+              break;
+            }
+            replyBuffer = "";
+          }
+          try {
+            await streamFromClaudeCli(
+              {
+                systemPrompt: autopilot
+                  ? SPAR_SYSTEM_PROMPT + SPAR_AUTOPILOT_SUFFIX
+                  : SPAR_SYSTEM_PROMPT,
+                heartbeat,
+                profile,
+                history: msgs,
+                model: SPAR_MODEL,
+                signal: abort.signal,
+                tools: {
+                  token,
+                  dashboardUrl,
+                  allowedTools: SPAR_TOOLS,
+                },
+              },
+              (chunk) => {
+                realChunksEmitted = true;
+                replyBuffer += chunk;
+                flush(chunk);
+              },
+            );
+            lastError = null;
+            break;
+          } catch (err) {
+            lastError = err;
+            if (abort.signal.aborted) break;
+            if (realChunksEmitted) break;
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[spar] CLI failed (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+            }
+          }
+        }
+
+        if (lastError) {
+          const msg =
+            lastError instanceof Error ? lastError.message : String(lastError);
+          console.warn("[spar] CLI error after retries:", msg);
+          flush(`\n[error: ${msg.slice(0, 200)}]`);
+        }
       } finally {
         clearInterval(keepaliveTimer);
         revokeToken(token);
