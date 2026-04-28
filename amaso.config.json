@@ -78,6 +78,20 @@
       "visibility": "team",
       "previewUrl": "https://woonklasse.amaso.nl",
       "devPort": 1721
+    },
+    {
+      "id": "amaso-pty-service",
+      "name": "PTY Service",
+      "path": "C:/Users/santi/projects/amaso-pty-service",
+      "visibility": "team"
+    },
+    {
+      "id": "superskunk",
+      "name": "SUPERSKUNK Coffeeshop",
+      "path": "C:/Users/santi/projects/superskunk",
+      "visibility": "public",
+      "previewUrl": "https://superskunk.amaso.nl",
+      "devPort": 1723
     }
   ],
   "ignore": [
