@@ -1,12 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowDown,
-  ArrowUp,
-  ChevronDown,
-  ChevronLeft,
-  ListMusic,
   Loader,
   Mic,
   Music,
@@ -17,16 +12,13 @@ import {
   Radio,
   SkipForward,
   Sparkles,
-  Square,
   Volume2,
   VolumeX,
-  Wind,
-  X,
 } from "lucide-react";
 import { useSpar } from "./SparContext";
-import type { FillerNow, YoutubeQueueItem } from "./SparContext";
-
-const HIDDEN_KEY = "spar:miniPlayerHidden:v1";
+import type { FillerNow } from "./SparContext";
+import MediaDrawer from "./MediaDrawer";
+import { useSparFooter } from "./SparFooterContext";
 
 export default function SparMiniPlayer() {
   const {
@@ -37,38 +29,30 @@ export default function SparMiniPlayer() {
     youtubePlay,
     youtubePause,
     youtubeSkip,
-    youtubeStop,
-    youtubeClearQueue,
-    youtubeRemoveFromQueue,
-    youtubeReorderQueue,
+    newsUpcoming,
+    newsPause,
+    newsResume,
+    newsSkip,
   } = useSpar();
 
   const [volumeOpen, setVolumeOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  // Hidden = the player has been dismissed by the user. Renders as a
-  // tiny restore tab on the left edge instead of the full card. Persist
-  // to localStorage so the choice survives a reload — the dashboard
-  // shouldn't keep popping the panel back up after the user closed it.
-  const [hidden, setHidden] = useState<boolean>(false);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      setHidden(window.localStorage.getItem(HIDDEN_KEY) === "1");
-    } catch {
-      /* localStorage may be blocked; default to visible */
-    }
-  }, []);
-  const setHiddenPersisted = (value: boolean) => {
-    setHidden(value);
-    if (typeof window === "undefined") return;
-    try {
-      if (value) window.localStorage.setItem(HIDDEN_KEY, "1");
-      else window.localStorage.removeItem(HIDDEN_KEY);
-    } catch {
-      /* ignore — in-memory state still flips */
-    }
-  };
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // When a caller (currently SparFullView) claims the footer, the bar
+  // stretches across the full bottom and exposes a right-side slot for
+  // injected controls. Otherwise it renders as the standalone pill in
+  // the bottom-left.
+  const footerCtx = useSparFooter();
+  const footerMode = footerCtx?.footerActive ?? false;
+  const setSlotEl = footerCtx?.setSlotEl;
+  const setFooterHeight = footerCtx?.setFooterHeight;
+  const slotRefCallback = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (setSlotEl) setSlotEl(el);
+    },
+    [setSlotEl],
+  );
 
   // Track the last non-zero volume so the mute toggle restores a
   // sensible level — without this, hitting unmute after dragging the
@@ -88,9 +72,15 @@ export default function SparMiniPlayer() {
   };
 
   const isYoutube = fillerNow.kind === "youtube";
+  const isNews = fillerNow.kind === "news";
+  // Either YouTube or News surfaces the full transport controls
+  // (play/pause/skip) and the expandable up-next card. Telegram /
+  // speaking / listening / thinking / idle render the dot indicator
+  // instead.
+  const isMedia = isYoutube || isNews;
   const isPlayingYt = isYoutube && fillerNow.status === "playing";
-  const ytThumb = isYoutube ? thumbForFiller(fillerNow) : null;
-  const ytTitle = isYoutube ? fillerNow.title : null;
+  const isPlayingNews = isNews && !fillerNow.paused;
+  const isPlaying = isPlayingYt || isPlayingNews;
 
   // Click-outside collapse so a casual click anywhere on the page
   // closes the expanded card. Only attached while expanded — listening
@@ -107,58 +97,125 @@ export default function SparMiniPlayer() {
     return () => document.removeEventListener("mousedown", handler);
   }, [expanded]);
 
-  // Auto-collapse when the now-playing track switches off YouTube
-  // (e.g. user hit stop, or the queue ran dry). Leaving the expanded
-  // card up showing a "nothing playing" art slot is jarring.
-  useEffect(() => {
-    if (!isYoutube) setExpanded(false);
-  }, [isYoutube]);
-
+  // The pill is always a drawer toggle now — even when nothing is
+  // playing the user can open it to search for music or paste a URL.
+  // We deliberately do NOT auto-collapse on media-state changes; the
+  // drawer is the user's own modal and they decide when it goes away.
   const handleNowPlayingClick = () => {
-    if (!isYoutube) return;
     setExpanded((v) => !v);
   };
 
-  // Auto-hide: when nothing is happening AND the queue is empty, the
-  // mini-player has nothing useful to render — drop it entirely
-  // (including the restore tab — there's nothing to restore TO). The
-  // moment a track plays, the queue grows, or any non-idle filler
-  // state lights up (telegram phase, thinking, listening, etc.), this
-  // gate flips and the player re-appears.
-  //
-  // Deliberately gated on `kind === "idle"` rather than just
-  // `!isYoutube` because the player also serves as the live filler
-  // status indicator — hiding it during a Telegram call or thinking
-  // window would lose that signal. Idle means the SparProvider
-  // priority chain found nothing audible AND nothing pending; only
-  // then is "no UI" the right call.
-  if (fillerNow.kind === "idle" && youtubeQueue.length === 0) {
-    return null;
-  }
+  // Unified play/pause dispatch — picks YouTube or News path based
+  // on the current filler kind so the same button works for both.
+  const handlePlayPause = () => {
+    if (isYoutube) {
+      if (isPlayingYt) youtubePause();
+      else youtubePlay();
+      return;
+    }
+    if (isNews) {
+      if (isPlayingNews) newsPause();
+      else newsResume();
+    }
+  };
+  const handleSkip = () => {
+    if (isYoutube) youtubeSkip();
+    else if (isNews) newsSkip();
+  };
 
-  // Hidden state: render a tiny restore tab on the bottom-left edge.
-  // Visual is intentionally minimal — a single rounded icon button —
-  // so a dismissed player isn't visually intrusive but is one click
-  // from coming back. Doesn't render the queue ExpandedCard at all.
-  if (hidden) {
+  // The player serves as both a transport surface AND a live filler-
+  // status indicator, so it stays visible on every authenticated page
+  // — see app/layout.tsx, where it's mounted inside SparProvider and
+  // therefore not rendered on /login or /setup (no user → no
+  // provider). When `kind === "idle"` and the queue is empty the bar
+  // collapses to a minimal "music · ready" pill; otherwise it expands
+  // to the full transport. There is no user-dismissable hidden state
+  // — the affordance must always be one click away.
+  const idleEmpty = fillerNow.kind === "idle" && youtubeQueue.length === 0;
+
+  // Publish the rendered footer's height as a CSS variable on the
+  // document and into context so SparFullView can pad its bottom edge
+  // dynamically. Hardcoding a fixed reserve let the bar overlap chat
+  // inputs whenever portaled controls or the safe-area inset pushed
+  // the footer above the assumed height.
+  useEffect(() => {
+    if (!footerMode) {
+      document.documentElement.style.removeProperty("--spar-footer-h");
+      if (setFooterHeight) setFooterHeight(0);
+      return;
+    }
+    const el = containerRef.current;
+    if (!el) return;
+    const publish = (h: number) => {
+      const px = Math.ceil(h);
+      document.documentElement.style.setProperty(
+        "--spar-footer-h",
+        `${px}px`,
+      );
+      if (setFooterHeight) setFooterHeight(px);
+    };
+    publish(el.getBoundingClientRect().height);
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        // borderBoxSize includes border + padding so it matches the
+        // visual footer height; fall back to contentRect when older
+        // browsers don't expose it.
+        const box = entry.borderBoxSize?.[0];
+        const h = box ? box.blockSize : entry.contentRect.height;
+        publish(h);
+      }
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--spar-footer-h");
+      if (setFooterHeight) setFooterHeight(0);
+    };
+  }, [footerMode, setFooterHeight, idleEmpty]);
+
+  if (idleEmpty) {
+    if (footerMode) {
+      return (
+        <div
+          ref={containerRef}
+          className="pointer-events-auto pb-safe fixed inset-x-0 bottom-0 z-30 border-t border-neutral-800 bg-neutral-900/85 backdrop-blur-md shadow-[0_-8px_24px_rgba(0,0,0,0.45)]"
+        >
+          <MediaDrawer open={expanded} onClose={() => setExpanded(false)} />
+          <div className="mx-auto flex w-full items-center gap-2 px-3 py-1">
+            <button
+              type="button"
+              onClick={handleNowPlayingClick}
+              aria-label={expanded ? "close media drawer" : "open media drawer"}
+              aria-expanded={expanded}
+              className="flex min-w-0 items-center gap-2 rounded-lg px-1 py-0.5 text-left transition hover:bg-neutral-800/40"
+            >
+              <Music className="h-4 w-4 text-neutral-400" aria-hidden="true" />
+              <span className="truncate text-[10px] uppercase tracking-[0.18em] text-neutral-500">
+                music · ready
+              </span>
+            </button>
+            <div ref={slotRefCallback} className="ml-auto flex items-center gap-2" />
+          </div>
+        </div>
+      );
+    }
     return (
-      // Mobile: sit above the call dock + input form (~140px tall) so
-      // the restore tab doesn't cover the type-here field. Desktop:
-      // bottom-4 since the dock is comfortably narrower than the
-      // viewport and there's no overlap.
-      <div className="pointer-events-auto fixed bottom-44 left-4 z-30 sm:bottom-4">
+      <div
+        ref={containerRef}
+        className="pointer-events-auto fixed bottom-44 left-4 z-30 max-w-[calc(100vw-2rem)] sm:bottom-4"
+      >
+        <MediaDrawer open={expanded} onClose={() => setExpanded(false)} />
         <button
           type="button"
-          onClick={() => setHiddenPersisted(false)}
-          aria-label="show audio player"
-          title="show audio player"
-          className="flex h-10 w-10 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900/85 text-neutral-300 shadow-[0_8px_32px_rgba(0,0,0,0.55)] backdrop-blur-md transition hover:bg-neutral-800 hover:text-neutral-100"
+          onClick={handleNowPlayingClick}
+          aria-label={expanded ? "close media drawer" : "open media drawer"}
+          aria-expanded={expanded}
+          className="flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/85 py-1.5 px-3 shadow-[0_8px_32px_rgba(0,0,0,0.55)] backdrop-blur-md transition hover:bg-neutral-800/80"
         >
-          {isYoutube ? (
-            <Music className="h-4 w-4" />
-          ) : (
-            <ListMusic className="h-4 w-4" />
-          )}
+          <Music className="h-4 w-4 text-neutral-400" aria-hidden="true" />
+          <span className="text-[10px] uppercase tracking-[0.18em] text-neutral-500">
+            music · ready
+          </span>
         </button>
       </div>
     );
@@ -167,123 +224,133 @@ export default function SparMiniPlayer() {
   return (
     <div
       ref={containerRef}
-      // Mobile: lifted to bottom-44 (~176px) so the opaque card sits
-      // ABOVE the call dock + input form instead of covering them.
-      // Desktop: bottom-4 since the dock is centered and narrower than
-      // the viewport — no collision with the 300px-wide player.
-      className="pointer-events-auto fixed bottom-44 left-4 z-30 w-[300px] max-w-[calc(100vw-2rem)] sm:bottom-4"
+      // Two layouts share this body. In footer mode (claimed by a
+      // consumer like SparFullView) the bar stretches across the full
+      // bottom and exposes a right-side slot for injected controls. In
+      // standalone mode it stays a 300px pill in the bottom-left, lifted
+      // above the spar dock on mobile.
+      className={
+        footerMode
+          ? "pointer-events-auto pb-safe fixed inset-x-0 bottom-0 z-30 border-t border-neutral-800 bg-neutral-900/85 backdrop-blur-md shadow-[0_-8px_24px_rgba(0,0,0,0.45)]"
+          : "pointer-events-auto fixed bottom-44 left-4 z-30 w-[300px] max-w-[calc(100vw-2rem)] sm:bottom-4"
+      }
     >
-      {expanded && isYoutube && (
-        <ExpandedCard
-          thumbnailUrl={ytThumb}
-          title={ytTitle}
-          status={fillerNow.status}
-          queue={youtubeQueue}
-          onClose={() => setExpanded(false)}
-          onStop={() => {
-            // Collapse first so the next render — which sees idle
-            // state — doesn't briefly show a stale "now playing"
-            // tile before the auto-hide gate kicks in.
-            setExpanded(false);
-            youtubeStop();
-          }}
-          onClearQueue={youtubeClearQueue}
-          onRemove={youtubeRemoveFromQueue}
-          onReorder={youtubeReorderQueue}
-        />
-      )}
-      <div className="flex items-center gap-3 rounded-2xl border border-neutral-800 bg-neutral-900/85 px-2.5 py-2 shadow-[0_8px_32px_rgba(0,0,0,0.55)] backdrop-blur-md">
+      <MediaDrawer open={expanded} onClose={() => setExpanded(false)} />
+      <div
+        className={
+          footerMode
+            ? "mx-auto flex w-full items-center gap-2 px-3 py-1"
+            : "flex items-center gap-3 rounded-2xl border border-neutral-800 bg-neutral-900/85 px-2.5 py-2 shadow-[0_8px_32px_rgba(0,0,0,0.55)] backdrop-blur-md"
+        }
+      >
         <button
           type="button"
           onClick={handleNowPlayingClick}
-          disabled={!isYoutube}
-          className={`flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left transition ${
-            isYoutube
-              ? "cursor-pointer hover:bg-neutral-800/40"
-              : "cursor-default"
-          }`}
-          aria-label={isYoutube ? (expanded ? "collapse player" : "expand player") : undefined}
-          aria-expanded={isYoutube ? expanded : undefined}
+          className={
+            footerMode
+              ? "flex min-w-0 cursor-pointer items-center gap-2 rounded-lg text-left transition hover:bg-neutral-800/40"
+              : "flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg text-left transition hover:bg-neutral-800/40"
+          }
+          aria-label={expanded ? "close media drawer" : "open media drawer"}
+          aria-expanded={expanded}
         >
-          <ArtSlot fillerNow={fillerNow} />
-          <div className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-[12px] leading-tight font-medium text-neutral-100">
+          <ArtSlot fillerNow={fillerNow} compact={footerMode} />
+          <div className="flex min-w-0 flex-col">
+            <span
+              className={
+                footerMode
+                  ? "max-w-[12rem] truncate text-[11px] leading-tight font-medium text-neutral-100 sm:max-w-[18rem]"
+                  : "truncate text-[12px] leading-tight font-medium text-neutral-100"
+              }
+            >
               {primaryLabel(fillerNow)}
             </span>
-            <span className="text-[10px] uppercase tracking-[0.18em] text-neutral-500">
-              {secondaryLabel(fillerNow, youtubeQueue.length)}
+            <span
+              className={
+                footerMode
+                  ? "hidden text-[9px] uppercase tracking-[0.18em] text-neutral-500 sm:block"
+                  : "text-[10px] uppercase tracking-[0.18em] text-neutral-500"
+              }
+            >
+              {secondaryLabel(
+                fillerNow,
+                youtubeQueue.length,
+                newsUpcoming.length,
+              )}
             </span>
           </div>
         </button>
         <div className="flex items-center gap-0.5">
-          {isYoutube ? (
+          {isMedia ? (
             <>
               <IconButton
-                label={isPlayingYt ? "pause" : "play"}
-                onClick={isPlayingYt ? youtubePause : youtubePlay}
+                label={isPlaying ? "pause" : "play"}
+                onClick={handlePlayPause}
               >
-                {isPlayingYt ? (
+                {isPlaying ? (
                   <Pause className="h-4 w-4" />
                 ) : (
                   <Play className="h-4 w-4" />
                 )}
               </IconButton>
-              <IconButton label="skip" onClick={youtubeSkip}>
+              <IconButton label="skip" onClick={handleSkip}>
                 <SkipForward className="h-4 w-4" />
               </IconButton>
-              <div
-                className="relative"
-                onMouseEnter={() => setVolumeOpen(true)}
-                onMouseLeave={() => setVolumeOpen(false)}
-              >
-                <IconButton
-                  label={muted ? "unmute" : "mute"}
-                  onClick={handleMuteToggle}
-                  onFocus={() => setVolumeOpen(true)}
-                  onBlur={() => setVolumeOpen(false)}
+              {/* Volume slider only applies to YouTube — news plays
+                  through Web Audio with its own gain envelope and the
+                  user doesn't have a per-clip slider for it. */}
+              {isYoutube && (
+                <div
+                  className="relative"
+                  onMouseEnter={() => setVolumeOpen(true)}
+                  onMouseLeave={() => setVolumeOpen(false)}
                 >
-                  {muted ? (
-                    <VolumeX className="h-4 w-4" />
-                  ) : (
-                    <Volume2 className="h-4 w-4" />
-                  )}
-                </IconButton>
-                {volumeOpen && (
-                  <div
-                    className="absolute right-0 bottom-full mb-2 flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/95 px-3 py-1.5 shadow-lg"
-                    onMouseEnter={() => setVolumeOpen(true)}
-                    onMouseLeave={() => setVolumeOpen(false)}
+                  <IconButton
+                    label={muted ? "unmute" : "mute"}
+                    onClick={handleMuteToggle}
+                    onFocus={() => setVolumeOpen(true)}
+                    onBlur={() => setVolumeOpen(false)}
                   >
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={youtubeVolume}
-                      onChange={(e) => setYoutubeVolume(Number(e.target.value))}
-                      aria-label="volume"
-                      className="amaso-mini-slider h-1 w-28 cursor-pointer appearance-none rounded-full bg-neutral-700 outline-none"
-                    />
-                    <span className="w-7 text-right font-mono text-[10px] tabular-nums text-neutral-400">
-                      {youtubeVolume}
-                    </span>
-                  </div>
-                )}
-              </div>
+                    {muted ? (
+                      <VolumeX className="h-4 w-4" />
+                    ) : (
+                      <Volume2 className="h-4 w-4" />
+                    )}
+                  </IconButton>
+                  {volumeOpen && (
+                    <div
+                      className="absolute right-0 bottom-full mb-2 flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/95 px-3 py-1.5 shadow-lg"
+                      onMouseEnter={() => setVolumeOpen(true)}
+                      onMouseLeave={() => setVolumeOpen(false)}
+                    >
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={youtubeVolume}
+                        onChange={(e) => setYoutubeVolume(Number(e.target.value))}
+                        aria-label="volume"
+                        className="amaso-mini-slider h-1 w-28 cursor-pointer appearance-none rounded-full bg-neutral-700 outline-none"
+                      />
+                      <span className="w-7 text-right font-mono text-[10px] tabular-nums text-neutral-400">
+                        {youtubeVolume}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           ) : (
             <ActivityDot fillerNow={fillerNow} />
           )}
-          <IconButton
-            label="hide player"
-            onClick={() => {
-              setExpanded(false);
-              setHiddenPersisted(true);
-            }}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </IconButton>
         </div>
+        {footerMode && (
+          <div
+            ref={slotRefCallback}
+            className="ml-auto flex items-center gap-2 border-l border-neutral-800/80 pl-2"
+          />
+        )}
       </div>
       <style jsx>{`
         .amaso-mini-slider::-webkit-slider-thumb {
@@ -309,193 +376,6 @@ export default function SparMiniPlayer() {
   );
 }
 
-function ExpandedCard({
-  thumbnailUrl,
-  title,
-  status,
-  queue,
-  onClose,
-  onStop,
-  onClearQueue,
-  onRemove,
-  onReorder,
-}: {
-  thumbnailUrl: string | null;
-  title: string | null;
-  status: "playing" | "paused";
-  queue: YoutubeQueueItem[];
-  onClose: () => void;
-  onStop: () => void;
-  onClearQueue: () => void;
-  onRemove: (videoId: string) => void;
-  onReorder: (fromIdx: number, toIdx: number) => void;
-}) {
-  return (
-    <div
-      className="mb-2 w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/95 shadow-[0_12px_40px_rgba(0,0,0,0.7)] backdrop-blur-md"
-      role="dialog"
-      aria-label="now playing"
-    >
-      <div className="relative aspect-video w-full overflow-hidden bg-neutral-950">
-        {thumbnailUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={thumbnailUrl}
-            alt={title ?? "now playing"}
-            className="h-full w-full object-cover"
-            loading="lazy"
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-neutral-700">
-            <Music className="h-10 w-10" />
-          </div>
-        )}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/85 via-black/10 to-transparent" />
-        <div className="absolute right-2 top-2">
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="close"
-            title="close"
-            className="flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-neutral-300 backdrop-blur transition hover:bg-black/70 hover:text-neutral-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="absolute inset-x-3 bottom-2 flex items-end justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-neutral-300/80">
-              {status === "playing" ? "now playing" : "paused"}
-            </div>
-            <div className="mt-0.5 line-clamp-2 text-[13px] font-medium leading-tight text-neutral-50">
-              {title ?? "Untitled video"}
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="flex items-center justify-between gap-2 border-t border-neutral-800 px-3 py-2">
-        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-neutral-500">
-          <ListMusic className="h-3.5 w-3.5" />
-          <span>
-            up next ·{" "}
-            <span className="font-mono text-neutral-300">{queue.length}</span>
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          {queue.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearQueue}
-              className="rounded-full px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-neutral-500 transition hover:bg-neutral-800 hover:text-neutral-200"
-            >
-              clear
-            </button>
-          )}
-          {/* Stop is the destructive end-this action: clears the
-              now-playing selection AND wipes any queue, returning
-              the filler mode to news. Distinct from the X close
-              button on the thumbnail (which only collapses the
-              card) and from clear (which leaves now-playing intact). */}
-          <button
-            type="button"
-            onClick={onStop}
-            aria-label="stop playback"
-            title="stop playback"
-            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-rose-300 transition hover:bg-rose-900/30 hover:text-rose-100"
-          >
-            <Square className="h-3 w-3" />
-            stop
-          </button>
-        </div>
-      </div>
-      <div className="max-h-[260px] overflow-y-auto px-2 pb-2">
-        {queue.length === 0 ? (
-          <div className="flex items-center gap-2 px-2 py-3 text-[11px] text-neutral-500">
-            <ChevronDown className="h-3.5 w-3.5 opacity-40" />
-            <span>Queue is empty.</span>
-          </div>
-        ) : (
-          <ul className="flex flex-col">
-            {queue.map((item, idx) => {
-              const canMoveUp = idx > 0;
-              const canMoveDown = idx < queue.length - 1;
-              return (
-                <li
-                  key={`${item.videoId}-${idx}`}
-                  className="group flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-neutral-800/40"
-                >
-                  <span className="w-4 shrink-0 text-right font-mono text-[10px] tabular-nums text-neutral-600">
-                    {idx + 1}
-                  </span>
-                  <QueueArt item={item} />
-                  <div className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-[12px] leading-tight text-neutral-200">
-                      {item.title ?? item.videoId}
-                    </span>
-                    <span className="text-[10px] text-neutral-500">
-                      {formatDuration(item.durationSec)}
-                    </span>
-                  </div>
-                  {/* Per-row controls. Hidden until row hover/focus so
-                      the resting state stays clean — keyboard users still
-                      get focus-visible outlines because the buttons are
-                      tab-reachable, just visually de-emphasised at rest. */}
-                  <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-                    <RowButton
-                      label="move up"
-                      disabled={!canMoveUp}
-                      onClick={() => onReorder(idx, idx - 1)}
-                    >
-                      <ArrowUp className="h-3.5 w-3.5" />
-                    </RowButton>
-                    <RowButton
-                      label="move down"
-                      disabled={!canMoveDown}
-                      onClick={() => onReorder(idx, idx + 1)}
-                    >
-                      <ArrowDown className="h-3.5 w-3.5" />
-                    </RowButton>
-                    <RowButton
-                      label="remove"
-                      onClick={() => onRemove(item.videoId)}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </RowButton>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function QueueArt({ item }: { item: YoutubeQueueItem }) {
-  const url =
-    item.thumbnailUrl ??
-    `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`;
-  return (
-    <div className="relative h-9 w-14 shrink-0 overflow-hidden rounded bg-neutral-800">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={url}
-        alt={item.title ?? "queued track"}
-        className="h-full w-full object-cover"
-        loading="lazy"
-      />
-    </div>
-  );
-}
-
-function formatDuration(durationSec: number | null): string {
-  if (!durationSec || durationSec <= 0) return "—";
-  const m = Math.floor(durationSec / 60);
-  const s = Math.floor(durationSec % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
 function thumbForFiller(
   fillerNow: Extract<FillerNow, { kind: "youtube" }>,
 ): string | null {
@@ -506,12 +386,22 @@ function thumbForFiller(
   return null;
 }
 
-function ArtSlot({ fillerNow }: { fillerNow: FillerNow }) {
+function ArtSlot({
+  fillerNow,
+  compact = false,
+}: {
+  fillerNow: FillerNow;
+  compact?: boolean;
+}) {
+  const sizeCls = compact ? "h-7 w-7" : "h-10 w-10";
+  const iconCls = compact ? "h-4 w-4" : "h-5 w-5";
   if (fillerNow.kind === "youtube") {
     const thumb = thumbForFiller(fillerNow);
     if (thumb) {
       return (
-        <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-md bg-neutral-800">
+        <div
+          className={`relative ${sizeCls} shrink-0 overflow-hidden rounded-md bg-neutral-800`}
+        >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={thumb}
@@ -523,8 +413,10 @@ function ArtSlot({ fillerNow }: { fillerNow: FillerNow }) {
       );
     }
     return (
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-500">
-        <Music className="h-5 w-5" />
+      <div
+        className={`flex ${sizeCls} shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-500`}
+      >
+        <Music className={iconCls} />
       </div>
     );
   }
@@ -540,9 +432,9 @@ function ArtSlot({ fillerNow }: { fillerNow: FillerNow }) {
     fillerNow.kind === "telegram";
   return (
     <div
-      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-md ${tint}`}
+      className={`flex ${sizeCls} shrink-0 items-center justify-center rounded-md ${tint}`}
     >
-      <Icon className={`h-5 w-5 ${animate ? "animate-pulse" : ""}`} />
+      <Icon className={`${iconCls} ${animate ? "animate-pulse" : ""}`} />
     </div>
   );
 }
@@ -598,9 +490,9 @@ function primaryLabel(fillerNow: FillerNow): string {
     case "youtube":
       return fillerNow.title ?? "playing";
     case "news":
-      return "Reading the news";
-    case "hum":
-      return "Windchime hum";
+      // Show the headline as the track title; fall back when the
+      // sidecar metadata is missing for an older cached clip.
+      return fillerNow.title ?? "News headline";
     case "speaking":
       return "Sparring partner speaking";
     case "listening":
@@ -622,7 +514,11 @@ function primaryLabel(fillerNow: FillerNow): string {
   }
 }
 
-function secondaryLabel(fillerNow: FillerNow, queueLength: number): string {
+function secondaryLabel(
+  fillerNow: FillerNow,
+  queueLength: number,
+  newsUpcomingLength: number,
+): string {
   switch (fillerNow.kind) {
     case "youtube": {
       const base = fillerNow.status === "playing" ? "now playing" : "paused";
@@ -631,10 +527,15 @@ function secondaryLabel(fillerNow: FillerNow, queueLength: number): string {
       }
       return base;
     }
-    case "news":
-      return "filler · news clip";
-    case "hum":
-      return "filler · ambient";
+    case "news": {
+      const state = fillerNow.paused ? "paused" : "now playing";
+      const tail =
+        fillerNow.source ??
+        (newsUpcomingLength > 0
+          ? `+${newsUpcomingLength} headlines`
+          : "headlines");
+      return `${state} · ${tail}`;
+    }
     case "speaking":
       return "tts · live";
     case "listening":
@@ -666,8 +567,6 @@ function artForFiller(fillerNow: Exclude<FillerNow, { kind: "youtube" }>): {
   switch (fillerNow.kind) {
     case "news":
       return { icon: Newspaper, tint: "bg-amber-900/30 text-amber-200" };
-    case "hum":
-      return { icon: Wind, tint: "bg-sky-900/30 text-sky-200" };
     case "speaking":
       return { icon: Radio, tint: "bg-emerald-900/30 text-emerald-200" };
     case "listening":
@@ -726,31 +625,3 @@ function IconButton({
   );
 }
 
-// Smaller variant used for per-queue-row reorder/remove. Sized down
-// (h-6 w-6) so three of them sit comfortably to the right of the
-// thumbnail without crowding the title. Disabled state is a true
-// disabled button so keyboard nav skips it at the endpoints.
-function RowButton({
-  children,
-  onClick,
-  label,
-  disabled,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  label: string;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      title={label}
-      className="flex h-6 w-6 items-center justify-center rounded-md text-neutral-500 transition hover:bg-neutral-800 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-neutral-500"
-    >
-      {children}
-    </button>
-  );
-}

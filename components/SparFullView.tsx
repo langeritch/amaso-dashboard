@@ -1,27 +1,383 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
+import { createPortal } from "react-dom";
+import {
+  AlertCircle,
+  Check,
+  ChevronRight,
+  FileText,
+  Loader2,
+  Menu,
   MessageSquare,
   Mic,
   MicOff,
+  Paperclip,
+  Pencil,
   Phone,
   PhoneOff,
   Radio,
   Save,
   Send,
+  Trash2,
   Volume2,
   VolumeX,
   X,
   Zap,
 } from "lucide-react";
-import { useSpar, MAX_TRANSCRIPT, type Dispatch } from "./SparContext";
+import {
+  useSpar,
+  MAX_TRANSCRIPT,
+  type Attachment,
+  type Dispatch,
+  type ToolStep,
+} from "./SparContext";
 import SparAudioVisualizer from "./SparAudioVisualizer";
-import SparMiniPlayer from "./SparMiniPlayer";
 import WorkerStatusPanel from "./WorkerStatusPanel";
 import { useVoiceChannel } from "./useVoiceChannel";
+import { useClaimSparFooter, useSparFooter } from "./SparFooterContext";
 
 type Mode = "text" | "voice";
+
+/**
+ * Slash-command registry. Single source of truth for the chat
+ * autocomplete dropdown and for `submitDraft`'s recognition of typed
+ * commands. Adding a new command is a one-liner: append an entry with
+ * a `name`, `description`, and `action`.
+ *
+ *  - `action.kind === "insert"` → selecting the command in the
+ *    dropdown replaces the input with `text` and leaves the cursor
+ *    at the end so the user can type arguments. Submit semantics
+ *    (e.g. parsing a YouTube URL out of the rest of the line) live
+ *    in `submitDraft` and stay local to the consumer.
+ *  - `action.kind === "execute"` → selecting (or submitting bare)
+ *    the command runs `run(ctx)` immediately and clears the draft.
+ *    No further input is needed.
+ */
+type SlashFillerMode = "news" | "quiet" | "fun-facts" | "calendar";
+
+interface SlashCommandContext {
+  setFillerMode: (mode: SlashFillerMode) => Promise<void>;
+}
+
+interface SlashCommand {
+  name: string;
+  description: string;
+  action:
+    | { kind: "insert"; text: string }
+    | {
+        kind: "execute";
+        run: (ctx: SlashCommandContext) => void | Promise<void>;
+      };
+}
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    name: "/youtube",
+    description: "play a YouTube URL or video ID",
+    action: { kind: "insert", text: "/youtube " },
+  },
+  {
+    name: "/queue",
+    description: "queue a YouTube URL or video ID",
+    action: { kind: "insert", text: "/queue " },
+  },
+  {
+    name: "/news",
+    description: "filler mode: news headline clips",
+    action: { kind: "execute", run: (ctx) => ctx.setFillerMode("news") },
+  },
+  {
+    name: "/quiet",
+    description: "filler mode: ambient chime only",
+    action: { kind: "execute", run: (ctx) => ctx.setFillerMode("quiet") },
+  },
+  // /off intentionally removed — the speaker toggle in the media
+  // drawer is the user-facing way to silence assistant speech.
+  // Legacy persisted "off" values normalise to "quiet" on read
+  // (see lib/filler-mode.ts) so old configs keep working.
+  {
+    name: "/fun-facts",
+    description: "filler mode: trivia spoken via TTS",
+    action: { kind: "execute", run: (ctx) => ctx.setFillerMode("fun-facts") },
+  },
+  {
+    name: "/calendar",
+    description: "filler mode: agenda items spoken via TTS",
+    action: { kind: "execute", run: (ctx) => ctx.setFillerMode("calendar") },
+  },
+];
+
+/**
+ * A draft is "in slash-completion territory" while it starts with `/`
+ * and the user hasn't typed a separator yet (space or newline). Once
+ * the user types past the command name (e.g. `/youtube <url>`), the
+ * dropdown should close — they're typing arguments.
+ */
+function matchSlashCommands(draft: string): SlashCommand[] {
+  if (!draft.startsWith("/")) return [];
+  if (/\s/.test(draft)) return [];
+  const lower = draft.toLowerCase();
+  return SLASH_COMMANDS.filter((c) => c.name.toLowerCase().startsWith(lower));
+}
+
+// Pulls the 11-char video ID out of any common YouTube URL shape, or
+// accepts a bare ID. Returns null when the input doesn't look like a
+// YouTube reference at all so callers can fall through to normal
+// message handling instead of triggering on noise.
+function parseYoutubeVideoId(raw: string): string | null {
+  const input = raw.trim();
+  if (!input) return null;
+  const idPattern = /^[A-Za-z0-9_-]{11}$/;
+  if (idPattern.test(input)) return input;
+  let url: URL;
+  try {
+    url = new URL(input.includes("://") ? input : `https://${input}`);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (host === "youtu.be") {
+    const id = url.pathname.replace(/^\/+/, "").split("/")[0];
+    return idPattern.test(id) ? id : null;
+  }
+  if (host === "youtube.com" || host === "m.youtube.com") {
+    const v = url.searchParams.get("v");
+    if (v && idPattern.test(v)) return v;
+    // /shorts/<id> and /embed/<id> are common alternates worth picking
+    // up since the parser otherwise feels surprisingly strict.
+    const segs = url.pathname.split("/").filter(Boolean);
+    if (segs[0] === "shorts" || segs[0] === "embed") {
+      const id = segs[1] ?? "";
+      return idPattern.test(id) ? id : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * One step the agent took inside its tool-using loop. Renders as a
+ * small inline card just above the assistant's text bubble — running
+ * steps animate, completed ones flatten into a quiet badge so the
+ * user can scan past steps after reading the final answer.
+ */
+function ToolStepCard({ step }: { step: ToolStep }) {
+  const tone =
+    step.status === "running"
+      ? "border-sky-700/50 bg-sky-950/40 text-sky-100"
+      : step.status === "ok"
+        ? "border-neutral-800/80 bg-neutral-900/60 text-neutral-300"
+        : "border-rose-800/60 bg-rose-950/40 text-rose-100";
+  const Icon =
+    step.status === "running"
+      ? Loader2
+      : step.status === "ok"
+        ? Check
+        : AlertCircle;
+  const iconClass =
+    step.status === "running"
+      ? "animate-spin text-sky-300"
+      : step.status === "ok"
+        ? "text-emerald-300/80"
+        : "text-rose-300";
+  return (
+    <div
+      className={`flex items-start gap-2 rounded-lg border px-2.5 py-1.5 text-[12px] leading-snug ${tone}`}
+    >
+      <Icon className={`mt-0.5 h-3.5 w-3.5 flex-shrink-0 ${iconClass}`} />
+      <div className="min-w-0 flex-1">
+        <div className="break-words">
+          <span className="font-medium">{step.label}</span>
+          {step.detail ? (
+            <span className="ml-1 text-neutral-400">{step.detail}</span>
+          ) : null}
+        </div>
+        {step.summary ? (
+          <div className="mt-0.5 break-words text-[11px] text-neutral-400">
+            {step.summary}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ToolStepList({ steps }: { steps: ToolStep[] }) {
+  if (!steps.length) return null;
+  return (
+    <div className="mb-1 flex flex-col gap-1">
+      {steps.map((s) => (
+        <ToolStepCard key={s.id} step={s} />
+      ))}
+    </div>
+  );
+}
+
+function AttachmentPreviewBar({
+  attachments,
+  onRemove,
+}: {
+  attachments: Attachment[];
+  onRemove: (id: string) => void;
+}) {
+  if (!attachments.length) return null;
+  return (
+    <div className="flex gap-2 overflow-x-auto px-1 pb-2">
+      {attachments.map((a) => (
+        <div
+          key={a.id}
+          className="group relative flex-shrink-0 rounded-lg border border-neutral-700 bg-neutral-800/60 p-1"
+        >
+          <button
+            type="button"
+            onClick={() => onRemove(a.id)}
+            className="absolute -right-1.5 -top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-neutral-700 text-neutral-300 opacity-0 transition group-hover:opacity-100 hover:bg-red-600 hover:text-white"
+          >
+            <X className="h-3 w-3" />
+          </button>
+          {a.type.startsWith("image/") ? (
+            <img
+              src={a.dataUrl}
+              alt={a.name}
+              className="h-16 w-16 rounded object-cover"
+            />
+          ) : (
+            <div className="flex h-16 w-16 flex-col items-center justify-center gap-1 text-neutral-400">
+              <FileText className="h-5 w-5" />
+              <span className="max-w-full truncate px-1 text-[9px]">
+                {a.name}
+              </span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function InlineAttachments({ attachments }: { attachments: Attachment[] }) {
+  const [enlarged, setEnlarged] = useState<string | null>(null);
+  if (!attachments.length) return null;
+  return (
+    <>
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
+        {attachments.map((a) =>
+          a.type.startsWith("image/") ? (
+            <img
+              key={a.id}
+              src={a.dataUrl}
+              alt={a.name}
+              onClick={() => setEnlarged(a.dataUrl)}
+              className="h-20 max-w-[160px] cursor-pointer rounded-lg border border-neutral-700 object-cover transition hover:border-neutral-500"
+            />
+          ) : (
+            <div
+              key={a.id}
+              className="flex items-center gap-1.5 rounded-lg border border-neutral-700 bg-neutral-800/50 px-2 py-1 text-[11px] text-neutral-300"
+            >
+              <FileText className="h-3.5 w-3.5 flex-shrink-0" />
+              <span className="max-w-[120px] truncate">{a.name}</span>
+            </div>
+          ),
+        )}
+      </div>
+      {enlarged && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          onClick={() => setEnlarged(null)}
+        >
+          <img
+            src={enlarged}
+            alt=""
+            className="max-h-[90vh] max-w-[90vw] rounded-lg"
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Compact dropdown that floats above the chat input while the user is
+ * typing a slash command. Positioned via `absolute bottom-full` on
+ * the relatively-positioned form, so it sits flush against the top
+ * edge of the composer regardless of how tall the textarea has grown.
+ *
+ * Mouse handlers use `onMouseDown` + preventDefault so clicking an
+ * item doesn't blur the textarea before the click registers.
+ */
+function SlashCommandDropdown({
+  matches,
+  selectedIndex,
+  onSelect,
+  onHover,
+}: {
+  matches: SlashCommand[];
+  selectedIndex: number;
+  onSelect: (cmd: SlashCommand) => void;
+  onHover: (idx: number) => void;
+}) {
+  if (matches.length === 0) return null;
+  return (
+    <div className="absolute inset-x-0 bottom-full mb-2">
+      <ul
+        role="listbox"
+        className="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/95 shadow-2xl backdrop-blur"
+      >
+        {matches.map((cmd, idx) => {
+          const active = idx === selectedIndex;
+          return (
+            <li key={cmd.name} role="option" aria-selected={active}>
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onSelect(cmd);
+                }}
+                onMouseEnter={() => onHover(idx)}
+                className={`flex w-full items-baseline gap-3 px-3 py-1.5 text-left text-sm transition ${
+                  active
+                    ? "bg-neutral-800/80 text-neutral-100"
+                    : "text-neutral-200 hover:bg-neutral-800/40"
+                }`}
+              >
+                <span className="font-mono text-[13px]">{cmd.name}</span>
+                <span className="truncate text-[11px] text-neutral-500">
+                  {cmd.description}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function ThinkingTimer({ startedAt }: { startedAt: number }) {
+  const [elapsed, setElapsed] = useState(
+    Math.round((Date.now() - startedAt) / 1000),
+  );
+  useEffect(() => {
+    const id = setInterval(
+      () => setElapsed(Math.round((Date.now() - startedAt) / 1000)),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [startedAt]);
+  return (
+    <span className="mt-1 block text-[10px] text-neutral-500">
+      {elapsed}s…
+    </span>
+  );
+}
 
 export default function SparFullView() {
   const {
@@ -52,23 +408,89 @@ export default function SparFullView() {
     toggleMicMute,
     toggleTtsMute,
     toggleAutopilot,
+    pendingAttachments,
+    addAttachments,
+    removeAttachment,
     sendMessage,
     saveHeartbeat,
     loadHeartbeatFor,
     clearTranscript,
+    fillerNow,
+    youtubePlay,
+    youtubePause,
+    appendNotice,
   } = useSpar();
   void _currentUser;
 
   const [draft, setDraft] = useState("");
+  // Slash-command autocomplete state. `slashIndex` is the highlighted
+  // row in the dropdown; `slashDismissed` latches when the user hits
+  // Escape so the dropdown stays hidden until the next text edit.
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  // Pending messages the user submitted while the agent is thinking
+  // or TTS is still speaking. Drained FIFO once both go idle so the
+  // user can keep typing without waiting on a reply.
+  const [queue, setQueue] = useState<{ id: number; text: string }[]>([]);
+  const queueIdRef = useRef(0);
+  // Latches between "we picked the next queued message" and
+  // "sendMessage finished". Without it, a re-render mid-drain (queue
+  // shifted but busy hasn't flipped yet, or React firing child effects
+  // before the provider's busyRef sync) could double-send the same
+  // entry or skip a guard.
+  const drainingRef = useRef(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [heartbeatOpen, setHeartbeatOpen] = useState(false);
+  // Mobile-only bottom sheet that holds the secondary controls
+  // (autopilot, heartbeat, transcript, speaker, telegram, workers).
+  // The desktop header keeps showing them inline; on small screens the
+  // header reduces to mode toggle + a hamburger that opens this sheet.
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Tracks viewport so the workers panel can render in exactly one
+  // place (desktop overlay vs. mobile sheet) instead of two — otherwise
+  // both instances poll /api/spar/worker-status independently.
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
   // Default to text mode — the page now opens like a normal chat app
   // and lets the user toggle into voice mode (which keeps the existing
   // ring + call dock UI verbatim). State is local to this view; the
   // underlying call/audio infrastructure in SparContext doesn't care
   // which mode is rendered, so toggling never disturbs an active call.
   const [mode, setMode] = useState<Mode>("text");
+
+  // Claim the unified footer for as long as this view is mounted, so
+  // the SparMiniPlayer expands across the bottom and exposes the right-
+  // side slot we portal our mode/autopilot/heartbeat/menu buttons into.
+  useClaimSparFooter();
+  const sparFooter = useSparFooter();
+  const footerSlotEl = sparFooter?.slotEl ?? null;
+  // Read the live footer height from context (state-driven, forces a
+  // re-render when SparMiniPlayer's ResizeObserver publishes a new
+  // value). The earlier setup leaned on a CSS var with a `3.75rem`
+  // fallback, but on mobile the footer easily exceeds that once
+  // portaled controls + the safe-area inset stack — leaving the chat
+  // input hidden behind the bar on first paint and any time the
+  // footer grew. The 80px floor covers the brief moment before the
+  // first measurement lands; 16px buffer keeps the input visually
+  // clear of the footer instead of flush-against it.
+  const measuredFooterHeight = sparFooter?.footerHeight ?? 0;
+  const bottomReserve = (measuredFooterHeight || 80) + 16;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const dragCountRef = useRef(0);
+  // Tracks whether the speaker toggle (not the user's own mini-player
+  // pause) is what stopped YouTube. Lets unmute resume only what we
+  // ourselves paused — if the user paused the track manually before
+  // muting TTS, hitting unmute shouldn't reach in and start playback.
+  const pausedYoutubeRef = useRef(false);
   const voice = useVoiceChannel();
   const onTelegram = voice.channel === "telegram";
   const phase: "speaking" | "thinking" | "listening" | null = !ttsIdle
@@ -108,144 +530,249 @@ export default function SparFullView() {
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }, [draft, mode]);
 
+  // POST to the filler-mode endpoint and surface a transcript notice
+  // so the user has a visible confirmation that their /news, /quiet,
+  // etc. command landed. Fire-and-forget — the underlying writer in
+  // `lib/filler-mode.ts` is the source of truth, and the next filler
+  // tick picks up the new mode.
+  const setFillerModeRemote = useCallback(
+    async (mode: SlashFillerMode) => {
+      try {
+        const res = await fetch("/api/spar/filler-mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode }),
+          cache: "no-store",
+        });
+        if (res.ok) {
+          appendNotice(`Filler mode → ${mode}`);
+        } else {
+          appendNotice(`Failed to set filler mode (${mode})`);
+        }
+      } catch {
+        appendNotice(`Failed to set filler mode (${mode})`);
+      }
+    },
+    [appendNotice],
+  );
+
+  const slashCtx: SlashCommandContext = useMemo(
+    () => ({ setFillerMode: setFillerModeRemote }),
+    [setFillerModeRemote],
+  );
+
+  const slashMatches = useMemo(() => matchSlashCommands(draft), [draft]);
+  const slashOpen = slashMatches.length > 0 && !slashDismissed;
+
+  // Keep the highlighted row inside the current match set. Without
+  // this, narrowing the matches (e.g. typing another character) could
+  // leave `slashIndex` pointing past the array end.
+  useEffect(() => {
+    if (slashIndex >= slashMatches.length) setSlashIndex(0);
+  }, [slashMatches, slashIndex]);
+
+  function applySlashCommand(cmd: SlashCommand) {
+    setSlashIndex(0);
+    setSlashDismissed(false);
+    if (cmd.action.kind === "insert") {
+      const text = cmd.action.text;
+      setDraft(text);
+      // Defer focus + caret placement until React has rendered the new
+      // value, otherwise setSelectionRange runs against the stale text.
+      setTimeout(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(text.length, text.length);
+      }, 0);
+    } else {
+      setDraft("");
+      void Promise.resolve(cmd.action.run(slashCtx)).catch(() => {
+        /* notice already surfaced inside the runner */
+      });
+    }
+  }
+
+  function handleDragEnter(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCountRef.current += 1;
+    if (e.dataTransfer.types.includes("Files")) setDragOver(true);
+  }
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCountRef.current -= 1;
+    if (dragCountRef.current <= 0) {
+      dragCountRef.current = 0;
+      setDragOver(false);
+    }
+  }
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCountRef.current = 0;
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) addAttachments(files);
+  }
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length) addAttachments(files);
+    e.target.value = "";
+  }
+
   function submitDraft() {
     const text = draft.trim();
-    if (!text || busy) return;
+    if (!text && !pendingAttachments.length) return;
+    // Slash-command interception runs before queueing so a /youtube
+    // typed mid-reply doesn't get held behind a long TTS stream — the
+    // command is local-only and doesn't compete with the AI turn.
+    //
+    // Execute-type commands (e.g. /news) are bare names — match them
+    // first so the user can hit Enter directly on a typed-out command
+    // without going through the dropdown.
+    const bareExecute = SLASH_COMMANDS.find(
+      (c) => c.action.kind === "execute" && c.name === text.toLowerCase(),
+    );
+    if (bareExecute && bareExecute.action.kind === "execute") {
+      const run = bareExecute.action.run;
+      setDraft("");
+      void Promise.resolve(run(slashCtx)).catch(() => {
+        /* notice already surfaced inside the runner */
+      });
+      return;
+    }
+    const ytMatch = text.match(/^\/youtube\s+(.+)$/i);
+    // Skip the /queue regex if /youtube already matched. Was previously
+    // `!ytMatch && text.match(...)` which typed queueMatch as
+    // `false | RegExpMatchArray | null` and broke the build at
+    // `match![1]`. Using a ternary keeps the same short-circuit semantics
+    // but gives queueMatch the clean `RegExpMatchArray | null` type.
+    const queueMatch = ytMatch ? null : text.match(/^\/queue\s+(.+)$/i);
+    const match = ytMatch ?? queueMatch;
+    if (match) {
+      const isQueue = !ytMatch;
+      const videoId = parseYoutubeVideoId(match[1]);
+      if (videoId) {
+        void fetch("/api/youtube/state", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: isQueue ? "enqueue" : "play", video_id: videoId }),
+          cache: "no-store",
+        }).catch(() => {
+          /* non-fatal — server poll re-syncs eventually */
+        });
+        appendNotice(`${isQueue ? "Queued" : "Playing"} YouTube video: https://youtu.be/${videoId}`);
+        setDraft("");
+        return;
+      }
+    }
     setDraft("");
-    void sendMessage(text);
+    const canSendNow =
+      !busy && ttsIdle && queue.length === 0 && !drainingRef.current;
+    if (canSendNow) {
+      void sendMessage(text);
+    } else {
+      queueIdRef.current += 1;
+      const id = queueIdRef.current;
+      setQueue((q) => [...q, { id, text }]);
+    }
   }
+
+  function handleSpeakerToggle() {
+    const willMute = !ttsMuted;
+    if (willMute) {
+      if (fillerNow.kind === "youtube" && fillerNow.status === "playing") {
+        pausedYoutubeRef.current = true;
+        youtubePause();
+      }
+    } else if (pausedYoutubeRef.current) {
+      pausedYoutubeRef.current = false;
+      youtubePlay();
+    }
+    toggleTtsMute();
+  }
+
+  function editQueued(id: number) {
+    const item = queue.find((x) => x.id === id);
+    if (!item) return;
+    setQueue((q) => q.filter((x) => x.id !== id));
+    setDraft((d) => (d ? d + "\n" + item.text : item.text));
+    // Defer focus so the textarea has the new value when we land on it.
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function removeQueued(id: number) {
+    setQueue((q) => q.filter((x) => x.id !== id));
+  }
+
+  // Drain the queue once the agent is idle AND TTS has finished. We
+  // intentionally check both — busy alone goes false the moment the
+  // model finishes streaming text, but TTS often keeps speaking for
+  // several seconds afterwards and we don't want to talk over it.
+  useEffect(() => {
+    if (drainingRef.current) return;
+    if (busy || !ttsIdle) return;
+    if (queue.length === 0) return;
+    const next = queue[0];
+    drainingRef.current = true;
+    setQueue((q) => q.slice(1));
+    void sendMessage(next.text).finally(() => {
+      drainingRef.current = false;
+    });
+  }, [busy, ttsIdle, queue, sendMessage]);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-gradient-to-b from-neutral-950 via-neutral-900 to-black text-neutral-100">
-      {/* Header chrome — present in both modes */}
-      <div className="pt-safe pl-safe pr-safe flex items-center gap-2 px-4 py-3">
-        <div className="flex flex-col">
-          <span className="text-[11px] uppercase tracking-[0.18em] text-neutral-500">
-            sparring partner
-          </span>
-          <span className="text-sm text-neutral-300">
-            Opus 4.6 · {mode === "voice" ? "voice mode" : "text mode"}
-          </span>
-        </div>
-        <div className="ml-auto flex items-center gap-2 text-neutral-400">
-          {onTelegram && (
-            <span
-              title={
-                voice.previousChannel
-                  ? `call is on Telegram (continued from ${voice.previousChannel})`
-                  : "call is on Telegram — same session, speakerphone swapped for the phone"
-              }
-              className="inline-flex items-center gap-1.5 rounded-full border border-sky-400/60 bg-sky-500/15 px-3 py-1 text-[11px] font-medium text-sky-200 shadow-[0_0_18px_rgba(56,189,248,0.3)]"
-            >
-              <Radio className="h-3 w-3 animate-pulse" />
-              <span>{phase ? `${phase} on Telegram` : "on Telegram"}</span>
-              <span
-                aria-hidden
-                className={`inline-block h-1.5 w-1.5 rounded-full ${phaseDot} ${phase ? "animate-pulse" : ""}`}
-              />
-            </span>
-          )}
-          {/* In-call hangup pill — only surfaces in text mode so the
-              user can end an active call without switching back. Voice
-              mode already exposes the big red end-call button. */}
-          {mode === "text" && inCall && (
-            <button
-              type="button"
-              onClick={endCall}
-              title={`live · ${callTimeLabel} · click to end`}
-              className="inline-flex items-center gap-1.5 rounded-full border border-rose-400/60 bg-rose-500/15 px-3 py-1 text-[11px] font-medium text-rose-100 shadow-[0_0_18px_rgba(244,63,94,0.25)] hover:bg-rose-500/25"
-            >
-              <PhoneOff className="h-3 w-3" />
-              <span className="font-mono tabular-nums">{callTimeLabel}</span>
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setMode((m) => (m === "text" ? "voice" : "text"))}
-            aria-pressed={mode === "voice"}
-            title={
-              mode === "text" ? "switch to voice mode" : "switch to text mode"
-            }
-            className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900/60 px-3 py-1 text-[11px] hover:border-neutral-700 hover:text-neutral-200"
-          >
-            {mode === "text" ? (
-              <Mic className="h-3 w-3" />
-            ) : (
-              <MessageSquare className="h-3 w-3" />
-            )}
-            <span>{mode === "text" ? "voice" : "text"}</span>
-          </button>
-          <button
-            type="button"
-            onClick={toggleAutopilot}
-            aria-pressed={autopilot}
-            title={
-              autopilot
-                ? "autopilot on — spar handles permission gates itself"
-                : "autopilot off — spar asks before acting"
-            }
-            className={`group flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] transition ${
-              autopilot
-                ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200 shadow-[0_0_18px_rgba(16,185,129,0.45)] hover:border-emerald-300/80"
-                : "border-neutral-800 bg-neutral-900/60 hover:border-neutral-700 hover:text-neutral-200"
-            }`}
-          >
-            <Zap
-              className={`h-3 w-3 ${
-                autopilot
-                  ? "fill-emerald-300 text-emerald-300 animate-pulse"
-                  : "text-neutral-500 group-hover:text-neutral-300"
-              }`}
-            />
-            autopilot
-          </button>
-          {/* Transcript button is only useful in voice mode — in text
-              mode the transcript is the page itself. */}
-          {mode === "voice" && (
-            <button
-              type="button"
-              onClick={() => setTranscriptOpen(true)}
-              className="rounded-full border border-neutral-800 bg-neutral-900/60 px-3 py-1 text-[11px] hover:border-neutral-700 hover:text-neutral-200"
-            >
-              transcript
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setHeartbeatOpen(true)}
-            className="rounded-full border border-neutral-800 bg-neutral-900/60 px-3 py-1 text-[11px] hover:border-neutral-700 hover:text-neutral-200"
-          >
-            heartbeat
-          </button>
-        </div>
-      </div>
-
       {lastDispatch && Date.now() - lastDispatch.confirmedAt < 30_000 && (
         <DispatchBanner dispatch={lastDispatch} />
       )}
-
-      <SparMiniPlayer />
-
-      {/* Mission-control feed for active workers — visible in both
-          modes. Sits above the mode-switching area so it pins to the
-          top of the page regardless of whether the body is showing
-          chat or the central ring. */}
-      <WorkerStatusPanel />
 
       {/* Mode-switching body. Both views are kept mounted and
           crossfaded via opacity so the audio analyser, ring animation,
           and chat scroll position never re-mount when toggling. */}
       <div className="relative min-h-0 flex-1 overflow-hidden">
+        {/* Mission-control feed for active workers — overlaid on the
+            chat area so it never eats into the chat's vertical space.
+            Pinned to the top-left, max-w-sm, defaults to a collapsed
+            pill so the chat fills the page from top to bottom.
+            Desktop only — on mobile the panel lives inside the bottom
+            sheet, since overlaying it on the chat there made the
+            layout chaotic. */}
+        {!isMobile && (
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-30 hidden md:flex">
+            <div className="pointer-events-auto">
+              <WorkerStatusPanel />
+            </div>
+          </div>
+        )}
         {/* ── Voice mode ────────────────────────────────────────── */}
         <div
-          className={`absolute inset-0 flex flex-col transition-opacity duration-300 ${
+          className={`absolute inset-0 flex min-h-0 flex-col transition-opacity duration-300 ${
             mode === "voice" ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
           aria-hidden={mode !== "voice"}
+          style={{
+            paddingTop: "var(--spar-chrome-h)",
+            // Reserve space at the bottom of the column so the call
+            // dock + input form sit above the unified footer strip
+            // rendered by SparMiniPlayer (claimed via useClaimSparFooter).
+            // bottomReserve = measured footer height + 16px buffer, so
+            // the call dock and voice input form always clear the
+            // footer regardless of safe-area insets or portaled
+            // controls that grow the bar on mobile.
+            paddingBottom: bottomReserve,
+          }}
         >
           {/* Flex-1 spacer so the dock sits at the bottom of the
-              column and the ring centres in the empty space above. */}
-          <div className="flex-1" />
+              column and the ring centres in the empty space above.
+              `min-h-0` allows it to shrink when the dock grows. */}
+          <div className="min-h-0 flex-1" />
           {/* Ring container is `fixed` at viewport centre via
               transform-centring. `pointer-events-none` so the ring
               never swallows clicks. Opacity inherits from the parent
@@ -277,7 +804,7 @@ export default function SparFullView() {
             </div>
           </div>
           {/* Call control dock at the bottom of the voice column. */}
-          <div className="pb-safe flex flex-col items-center gap-3 px-6 pb-6">
+          <div className="pb-safe flex flex-shrink-0 flex-col items-center gap-3 px-6 pb-6">
             {inCall ? (
               <div className="flex w-full max-w-sm items-center justify-between gap-4">
                 <CallButton
@@ -310,7 +837,7 @@ export default function SparFullView() {
                   <PhoneOff className="h-7 w-7" />
                 </CallButton>
                 <CallButton
-                  onClick={toggleTtsMute}
+                  onClick={handleSpeakerToggle}
                   active={!ttsMuted}
                   tone="neutral"
                   label={ttsMuted ? "speaker off" : "speaker on"}
@@ -333,6 +860,33 @@ export default function SparFullView() {
                 <Phone className="h-7 w-7" />
               </CallButton>
             )}
+            {/* Always-visible speaker toggle. Lives outside the
+                in-call branch so the user can mute TTS (and pause
+                background YouTube) without first picking up the
+                phone. The in-call layout above keeps its own speaker
+                button to balance the mic/end/speaker triad. */}
+            <button
+              type="button"
+              onClick={handleSpeakerToggle}
+              aria-pressed={!ttsMuted}
+              title={ttsMuted ? "unmute speaker" : "mute speaker"}
+              className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900/60 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-700 hover:text-neutral-100"
+            >
+              {ttsMuted ? (
+                <VolumeX className="h-3.5 w-3.5" />
+              ) : (
+                <Volume2 className="h-3.5 w-3.5" />
+              )}
+              <span>{ttsMuted ? "speaker off" : "speaker on"}</span>
+            </button>
+            <QueueList
+              widthClass="w-full max-w-sm"
+              queue={queue}
+              busy={busy}
+              ttsIdle={ttsIdle}
+              onEdit={editQueued}
+              onRemove={removeQueued}
+            />
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -340,16 +894,25 @@ export default function SparFullView() {
               }}
               className="mt-2 flex w-full max-w-sm items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/60 px-3 py-1.5 text-sm"
             >
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach files"
+                className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 hover:text-neutral-200"
+              >
+                <Paperclip className="h-3.5 w-3.5" />
+              </button>
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder={busy ? "thinking…" : "type instead…"}
-                disabled={busy}
+                placeholder={
+                  busy || !ttsIdle ? "type — will queue…" : "type instead…"
+                }
                 className="flex-1 bg-transparent text-neutral-200 placeholder-neutral-500 focus:outline-none"
               />
               <button
                 type="submit"
-                disabled={busy || !draft.trim()}
+                disabled={!draft.trim() && !pendingAttachments.length}
                 className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-700 text-neutral-100 transition disabled:opacity-40"
                 aria-label="Send"
               >
@@ -360,13 +923,51 @@ export default function SparFullView() {
         </div>
 
         {/* ── Text mode ─────────────────────────────────────────── */}
+        {/* `min-h-0` here ensures the inner `flex-1 overflow-y-auto`
+            messages list can actually shrink and clip — without it,
+            flex's default `min-height: auto` lets children push the
+            column past its parent's height, leaving the scroll area
+            stuck at content size and the messages clumped at the
+            bottom of the viewport. The static rows (count bar,
+            phase indicator, input dock) get `flex-shrink-0` so they
+            stay at natural height instead of competing with the
+            list for vertical space. */}
         <div
-          className={`absolute inset-0 flex flex-col transition-opacity duration-300 ${
+          className={`absolute inset-0 flex min-h-0 flex-col transition-opacity duration-300 ${
             mode === "text" ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
           aria-hidden={mode !== "text"}
+          style={{
+            paddingTop: "var(--spar-chrome-h)",
+            // Reserve space at the bottom of the column so the chat
+            // input dock sits above the unified footer strip rendered
+            // by SparMiniPlayer (claimed via useClaimSparFooter).
+            // bottomReserve = measured footer height + 16px buffer.
+            // Reading the React state value (instead of a CSS var
+            // with a small fallback) means we re-render the moment a
+            // new measurement lands, so the input never sits behind
+            // the bar on mobile where portaled controls + safe-area
+            // insets routinely push the footer past 80px.
+            paddingBottom: bottomReserve,
+          }}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
         >
-          <div className="flex items-center gap-2 border-b border-neutral-900/80 px-4 py-2 text-[11px] text-neutral-500">
+          {dragOver && (
+            <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-2xl border-2 border-dashed border-sky-400/60 bg-sky-950/40 backdrop-blur-sm">
+              <span className="text-lg font-medium text-sky-200">Drop files here</span>
+            </div>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+          <div className="flex flex-shrink-0 items-center gap-2 border-b border-neutral-900/80 px-4 py-2 text-[11px] text-neutral-500">
             <span className="font-mono">
               {messages.length} / {MAX_TRANSCRIPT}
             </span>
@@ -379,7 +980,7 @@ export default function SparFullView() {
               clear
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-y-auto">
             <ul className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-6">
               {messages.length === 0 && (
                 <li className="mt-12 text-center text-sm text-neutral-500">
@@ -390,18 +991,76 @@ export default function SparFullView() {
                   to call.
                 </li>
               )}
-              {messages.map((m) => (
-                <li
-                  key={m.id}
-                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
-                    m.role === "user"
-                      ? "self-end bg-emerald-700/30 text-emerald-50"
-                      : "self-start bg-neutral-800/70 text-neutral-100"
-                  }`}
-                >
-                  {m.content || (busy && m.role === "assistant" ? "…" : "")}
-                </li>
-              ))}
+              {messages.map((m) => {
+                const dur =
+                  m.role === "assistant" && m.startedAt && m.completedAt
+                    ? Math.round((m.completedAt - m.startedAt) / 1000)
+                    : null;
+                const isThinking =
+                  m.role === "assistant" &&
+                  m.startedAt &&
+                  !m.completedAt &&
+                  busy;
+                const steps =
+                  m.role === "assistant" && m.steps?.length ? m.steps : null;
+                // Tool steps render as their own track, full-width and
+                // off to the side of the assistant bubble. Wrapping
+                // them in the same list-item as the message keeps the
+                // chronological grouping intact (steps belong to
+                // *this* assistant turn) while letting them break out
+                // of the bubble's max-w-[85%] constraint visually.
+                if (m.role === "assistant" && steps) {
+                  // While steps are running and no visible text has
+                  // arrived yet, suppress the empty "…" bubble so the
+                  // tool cards are the focus. Once any text streams in
+                  // (or the turn completes), the bubble appears below.
+                  const hasText = m.content && m.content.length > 0;
+                  return (
+                    <li
+                      key={m.id}
+                      className="flex max-w-[85%] flex-col self-start"
+                    >
+                      <ToolStepList steps={steps} />
+                      {(hasText || !isThinking) && (
+                        <div className="rounded-2xl bg-neutral-800/70 px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap text-neutral-100">
+                          {m.content || (busy ? "…" : "")}
+                          {dur !== null && (
+                            <span className="mt-1 block text-[10px] text-neutral-500">
+                              {dur}s
+                            </span>
+                          )}
+                          {isThinking && (
+                            <ThinkingTimer startedAt={m.startedAt!} />
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                }
+                return (
+                  <li
+                    key={m.id}
+                    className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                      m.role === "user"
+                        ? "self-end bg-emerald-700/30 text-emerald-50"
+                        : "self-start bg-neutral-800/70 text-neutral-100"
+                    }`}
+                  >
+                    {m.content || (busy && m.role === "assistant" ? "…" : "")}
+                    {m.attachments?.length ? (
+                      <InlineAttachments attachments={m.attachments} />
+                    ) : null}
+                    {dur !== null && (
+                      <span className="mt-1 block text-[10px] text-neutral-500">
+                        {dur}s
+                      </span>
+                    )}
+                    {isThinking && (
+                      <ThinkingTimer startedAt={m.startedAt!} />
+                    )}
+                  </li>
+                );
+              })}
               {/* Live STT preview — shows what the user is saying
                   while a voice call streams into text mode. Faded so
                   it reads as not-yet-committed. */}
@@ -419,7 +1078,7 @@ export default function SparFullView() {
           {/* Subtle phase indicator above the input so users know
               something's happening even without the central ring. */}
           {(busy || !ttsIdle || (inCall && listening && !micMuted)) && (
-            <div className="px-4 pb-1 text-center text-[11px] italic text-neutral-500">
+            <div className="flex-shrink-0 px-4 pb-1 text-center text-[11px] italic text-neutral-500">
               {!ttsIdle
                 ? "speaking…"
                 : busy
@@ -427,23 +1086,96 @@ export default function SparFullView() {
                   : "listening…"}
             </div>
           )}
-          <div className="pb-safe border-t border-neutral-900/80 bg-neutral-950/70 px-4 pb-4 pt-3 backdrop-blur">
+          <div className="pb-safe flex-shrink-0 border-t border-neutral-900/80 bg-neutral-950/70 px-4 pb-4 pt-3 backdrop-blur">
+            <QueueList
+              widthClass="max-w-3xl"
+              queue={queue}
+              busy={busy}
+              ttsIdle={ttsIdle}
+              onEdit={editQueued}
+              onRemove={removeQueued}
+            />
+            <div className="mx-auto max-w-3xl">
+              <AttachmentPreviewBar
+                attachments={pendingAttachments}
+                onRemove={removeAttachment}
+              />
+            </div>
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 submitDraft();
               }}
-              className="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-neutral-800 bg-neutral-900/60 px-3 py-2 transition focus-within:border-neutral-700"
+              className="relative mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-neutral-800 bg-neutral-900/60 px-3 py-2 transition focus-within:border-neutral-700"
             >
+              {slashOpen && (
+                <SlashCommandDropdown
+                  matches={slashMatches}
+                  selectedIndex={Math.min(
+                    slashIndex,
+                    Math.max(slashMatches.length - 1, 0),
+                  )}
+                  onSelect={applySlashCommand}
+                  onHover={setSlashIndex}
+                />
+              )}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach files"
+                title="Attach files"
+                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200"
+              >
+                <Paperclip className="h-4 w-4" />
+              </button>
               <textarea
                 ref={textareaRef}
                 rows={1}
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  // Any edit re-opens a dismissed dropdown so a follow-up
+                  // keystroke (e.g. typing more after Esc) can re-engage
+                  // autocomplete without an explicit re-trigger.
+                  setSlashDismissed(false);
+                }}
                 onKeyDown={(e) => {
-                  // Enter sends; Shift+Enter adds a newline. Skip
-                  // submit while an IME composition is in flight so
-                  // Japanese/Chinese input methods aren't broken.
+                  if (slashOpen) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setSlashIndex(
+                        (i) => (i + 1) % slashMatches.length,
+                      );
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setSlashIndex(
+                        (i) =>
+                          (i - 1 + slashMatches.length) % slashMatches.length,
+                      );
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setSlashDismissed(true);
+                      return;
+                    }
+                    if (
+                      e.key === "Enter" ||
+                      e.key === " " ||
+                      e.key === "Tab"
+                    ) {
+                      e.preventDefault();
+                      const idx = Math.min(
+                        slashIndex,
+                        slashMatches.length - 1,
+                      );
+                      const cmd = slashMatches[idx];
+                      if (cmd) applySlashCommand(cmd);
+                      return;
+                    }
+                  }
                   if (
                     e.key === "Enter" &&
                     !e.shiftKey &&
@@ -454,9 +1186,10 @@ export default function SparFullView() {
                   }
                 }}
                 placeholder={
-                  busy ? "thinking…" : "message your sparring partner…"
+                  busy || !ttsIdle
+                    ? "type — will queue until ready…"
+                    : "message your sparring partner…"
                 }
-                disabled={busy}
                 className="flex-1 resize-none bg-transparent py-1 text-sm leading-relaxed text-neutral-100 placeholder-neutral-500 focus:outline-none"
               />
               <button
@@ -469,8 +1202,22 @@ export default function SparFullView() {
                 <Mic className="h-4 w-4" />
               </button>
               <button
+                type="button"
+                onClick={handleSpeakerToggle}
+                aria-pressed={!ttsMuted}
+                aria-label={ttsMuted ? "unmute speaker" : "mute speaker"}
+                title={ttsMuted ? "unmute speaker" : "mute speaker"}
+                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200"
+              >
+                {ttsMuted ? (
+                  <VolumeX className="h-4 w-4" />
+                ) : (
+                  <Volume2 className="h-4 w-4" />
+                )}
+              </button>
+              <button
                 type="submit"
-                disabled={busy || !draft.trim()}
+                disabled={!draft.trim() && !pendingAttachments.length}
                 className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-neutral-200 text-neutral-900 transition hover:bg-white disabled:opacity-40"
                 aria-label="Send"
               >
@@ -480,6 +1227,32 @@ export default function SparFullView() {
           </div>
         </div>
       </div>
+
+      <MobileControlsSheet
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        mode={mode}
+        inCall={inCall}
+        onTelegram={onTelegram}
+        previousChannel={voice.previousChannel}
+        callTimeLabel={callTimeLabel}
+        phase={phase}
+        phaseDot={phaseDot}
+        autopilot={autopilot}
+        toggleAutopilot={toggleAutopilot}
+        ttsMuted={ttsMuted}
+        onSpeakerToggle={handleSpeakerToggle}
+        endCall={endCall}
+        openTranscript={() => {
+          setTranscriptOpen(true);
+          setMenuOpen(false);
+        }}
+        openHeartbeat={() => {
+          setHeartbeatOpen(true);
+          setMenuOpen(false);
+        }}
+        renderWorkers={isMobile && menuOpen}
+      />
 
       <SideDrawer
         open={transcriptOpen}
@@ -565,6 +1338,89 @@ export default function SparFullView() {
           />
         </div>
       </SideDrawer>
+
+      {/* Footer-slot controls — portaled into the SparMiniPlayer's
+          right-side slot so the mode toggle, autopilot, heartbeat, and
+          mobile hamburger live on the same horizontal strip as the
+          media player. The hamburger picks up a coloured dot when
+          something inside the sheet is active (in-call / Telegram /
+          autopilot) so users know to open it. */}
+      {footerSlotEl &&
+        createPortal(
+          <>
+            <button
+              type="button"
+              onClick={() => setMode((m) => (m === "text" ? "voice" : "text"))}
+              aria-pressed={mode === "voice"}
+              title={
+                mode === "text"
+                  ? "switch to voice mode"
+                  : "switch to text mode"
+              }
+              className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900/80 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
+            >
+              {mode === "text" ? (
+                <Mic className="h-3 w-3" />
+              ) : (
+                <MessageSquare className="h-3 w-3" />
+              )}
+              <span>{mode === "text" ? "voice" : "text"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleAutopilot}
+              aria-pressed={autopilot}
+              title={
+                autopilot
+                  ? "autopilot on — spar handles permission gates itself"
+                  : "autopilot off — spar asks before acting"
+              }
+              className={`group hidden md:flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] transition ${
+                autopilot
+                  ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200 shadow-[0_0_18px_rgba(16,185,129,0.45)] hover:border-emerald-300/80"
+                  : "border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
+              }`}
+            >
+              <Zap
+                className={`h-3 w-3 ${
+                  autopilot
+                    ? "fill-emerald-300 text-emerald-300 animate-pulse"
+                    : "text-neutral-500 group-hover:text-neutral-300"
+                }`}
+              />
+              autopilot
+            </button>
+            <button
+              type="button"
+              onClick={() => setHeartbeatOpen(true)}
+              className="hidden md:inline-block rounded-full border border-neutral-800 bg-neutral-900/80 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
+            >
+              heartbeat
+            </button>
+            <button
+              type="button"
+              onClick={() => setMenuOpen(true)}
+              aria-label="open controls"
+              title="open controls"
+              className="relative md:hidden inline-flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-100"
+            >
+              <Menu className="h-4 w-4" />
+              {(inCall || onTelegram || autopilot) && (
+                <span
+                  aria-hidden
+                  className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ${
+                    inCall
+                      ? "bg-rose-400"
+                      : onTelegram
+                        ? "bg-sky-400"
+                        : "bg-emerald-400"
+                  } animate-pulse shadow-[0_0_8px_currentColor]`}
+                />
+              )}
+            </button>
+          </>,
+          footerSlotEl,
+        )}
     </div>
   );
 }
@@ -594,6 +1450,69 @@ function DispatchBanner({ dispatch }: { dispatch: Dispatch }) {
       {dispatch.error && (
         <div className="mt-1 text-[11px] opacity-80">{dispatch.error}</div>
       )}
+    </div>
+  );
+}
+
+function QueueList({
+  widthClass,
+  queue,
+  busy,
+  ttsIdle,
+  onEdit,
+  onRemove,
+}: {
+  widthClass: string;
+  queue: { id: number; text: string }[];
+  busy: boolean;
+  ttsIdle: boolean;
+  onEdit: (id: number) => void;
+  onRemove: (id: number) => void;
+}) {
+  if (queue.length === 0) return null;
+  const status = !ttsIdle
+    ? "waiting for tts"
+    : busy
+      ? "waiting for agent"
+      : "sending…";
+  return (
+    <div
+      className={`mx-auto mb-2 flex ${widthClass} flex-col gap-1 rounded-xl border border-neutral-800/70 bg-neutral-900/40 px-2 py-1.5`}
+    >
+      <div className="flex items-center justify-between px-1 text-[10px] uppercase tracking-[0.18em] text-neutral-500">
+        <span>queued · {queue.length}</span>
+        <span className="text-[10px] italic tracking-normal normal-case text-neutral-600">
+          {status}
+        </span>
+      </div>
+      {queue.map((item) => (
+        <div
+          key={item.id}
+          className="flex items-start gap-2 rounded-lg bg-neutral-900/70 px-2.5 py-1.5 text-[12px] leading-snug text-neutral-300"
+        >
+          <span className="flex-1 break-words whitespace-pre-wrap">
+            {item.text}
+          </span>
+          <button
+            type="button"
+            onClick={() => onEdit(item.id)}
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+            title="edit"
+            aria-label="edit"
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onRemove(item.id)}
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-rose-300"
+            title="remove"
+            aria-label="remove"
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -640,6 +1559,251 @@ function CallButton({
         </span>
       )}
     </button>
+  );
+}
+
+/**
+ * Mobile-only bottom sheet that holds every secondary control the
+ * desktop header shows inline. Slides up from the bottom over a
+ * dimmed backdrop, full width, rounded top corners. The trigger lives
+ * in the header (hamburger button visible only below md). Keeping the
+ * sheet structurally separate from `SideDrawer` (right slide-in) lets
+ * each animate independently without prop gymnastics.
+ */
+function MobileControlsSheet({
+  open,
+  onClose,
+  mode,
+  inCall,
+  onTelegram,
+  previousChannel,
+  callTimeLabel,
+  phase,
+  phaseDot,
+  autopilot,
+  toggleAutopilot,
+  ttsMuted,
+  onSpeakerToggle,
+  endCall,
+  openTranscript,
+  openHeartbeat,
+  renderWorkers,
+}: {
+  open: boolean;
+  onClose: () => void;
+  mode: "text" | "voice";
+  inCall: boolean;
+  onTelegram: boolean;
+  previousChannel: string | null;
+  callTimeLabel: string;
+  phase: "speaking" | "thinking" | "listening" | null;
+  phaseDot: string;
+  autopilot: boolean;
+  toggleAutopilot: () => void;
+  ttsMuted: boolean;
+  onSpeakerToggle: () => void;
+  endCall: () => void;
+  openTranscript: () => void;
+  openHeartbeat: () => void;
+  renderWorkers: boolean;
+}) {
+  return (
+    <div
+      className={`fixed inset-0 z-50 md:hidden ${open ? "" : "pointer-events-none"}`}
+      aria-hidden={!open}
+    >
+      <button
+        type="button"
+        aria-label="close"
+        tabIndex={-1}
+        onClick={onClose}
+        className={`absolute inset-0 bg-black/60 transition-opacity ${
+          open ? "opacity-100" : "opacity-0"
+        }`}
+      />
+      <div
+        className={`pb-safe absolute inset-x-0 bottom-0 flex max-h-[85vh] flex-col overflow-hidden rounded-t-2xl border-t border-neutral-800 bg-neutral-950 shadow-2xl transition-transform duration-300 ease-out ${
+          open ? "translate-y-0" : "translate-y-full"
+        }`}
+      >
+        {/* Drag handle / title row */}
+        <div className="flex flex-shrink-0 items-center gap-2 px-4 pb-2 pt-3">
+          <span
+            aria-hidden
+            className="mx-auto block h-1 w-10 rounded-full bg-neutral-700"
+          />
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-2 px-4 pb-3">
+          <span className="text-xs uppercase tracking-[0.22em] text-neutral-500">
+            controls
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+            aria-label="close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          <div className="flex flex-col gap-3 px-4 pb-6">
+            {/* Live-call state surfaces first so the user can end the
+                call without scrolling through everything else. */}
+            {(onTelegram || (mode === "text" && inCall)) && (
+              <div className="flex flex-col gap-2 rounded-xl border border-neutral-800 bg-neutral-900/60 p-3">
+                {onTelegram && (
+                  <div
+                    title={
+                      previousChannel
+                        ? `call is on Telegram (continued from ${previousChannel})`
+                        : "call is on Telegram — same session, speakerphone swapped for the phone"
+                    }
+                    className="flex items-center gap-2 rounded-lg border border-sky-400/60 bg-sky-500/15 px-3 py-2 text-xs font-medium text-sky-200"
+                  >
+                    <Radio className="h-3.5 w-3.5 animate-pulse" />
+                    <span>{phase ? `${phase} on Telegram` : "on Telegram"}</span>
+                    <span
+                      aria-hidden
+                      className={`ml-auto inline-block h-1.5 w-1.5 rounded-full ${phaseDot} ${phase ? "animate-pulse" : ""}`}
+                    />
+                  </div>
+                )}
+                {mode === "text" && inCall && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      endCall();
+                      onClose();
+                    }}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-rose-400/60 bg-rose-500/15 px-3 py-2.5 text-sm font-medium text-rose-100 hover:bg-rose-500/25"
+                  >
+                    <PhoneOff className="h-4 w-4" />
+                    <span>End call</span>
+                    <span className="ml-auto font-mono tabular-nums text-xs text-rose-200/80">
+                      {callTimeLabel}
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Toggles section */}
+            <div className="flex flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40">
+              <button
+                type="button"
+                onClick={toggleAutopilot}
+                aria-pressed={autopilot}
+                className="flex items-center gap-3 px-4 py-3 text-left transition hover:bg-neutral-900/80"
+              >
+                <Zap
+                  className={`h-4 w-4 flex-shrink-0 ${
+                    autopilot
+                      ? "fill-emerald-300 text-emerald-300"
+                      : "text-neutral-500"
+                  }`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-neutral-100">Autopilot</div>
+                  <div className="text-[11px] text-neutral-500">
+                    {autopilot
+                      ? "spar handles permission gates itself"
+                      : "spar asks before acting"}
+                  </div>
+                </div>
+                <span
+                  className={`flex h-6 w-10 flex-shrink-0 items-center rounded-full p-0.5 transition ${
+                    autopilot ? "bg-emerald-500/80" : "bg-neutral-700"
+                  }`}
+                >
+                  <span
+                    className={`h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      autopilot ? "translate-x-4" : "translate-x-0"
+                    }`}
+                  />
+                </span>
+              </button>
+              <div className="h-px bg-neutral-800" />
+              <button
+                type="button"
+                onClick={onSpeakerToggle}
+                aria-pressed={!ttsMuted}
+                className="flex items-center gap-3 px-4 py-3 text-left transition hover:bg-neutral-900/80"
+              >
+                {ttsMuted ? (
+                  <VolumeX className="h-4 w-4 flex-shrink-0 text-neutral-500" />
+                ) : (
+                  <Volume2 className="h-4 w-4 flex-shrink-0 text-neutral-300" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-neutral-100">Speaker</div>
+                  <div className="text-[11px] text-neutral-500">
+                    {ttsMuted
+                      ? "TTS muted — replies are silent"
+                      : "TTS on — replies are spoken"}
+                  </div>
+                </div>
+                <span
+                  className={`flex h-6 w-10 flex-shrink-0 items-center rounded-full p-0.5 transition ${
+                    !ttsMuted ? "bg-neutral-300" : "bg-neutral-700"
+                  }`}
+                >
+                  <span
+                    className={`h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      !ttsMuted ? "translate-x-4" : "translate-x-0"
+                    }`}
+                  />
+                </span>
+              </button>
+            </div>
+
+            {/* Drawer entry-points */}
+            <div className="flex flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40">
+              <button
+                type="button"
+                onClick={openTranscript}
+                className="flex items-center gap-3 px-4 py-3 text-left transition hover:bg-neutral-900/80"
+              >
+                <MessageSquare className="h-4 w-4 flex-shrink-0 text-neutral-400" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-neutral-100">Transcript</div>
+                  <div className="text-[11px] text-neutral-500">
+                    full conversation history
+                  </div>
+                </div>
+                <ChevronRight className="h-4 w-4 flex-shrink-0 text-neutral-600" />
+              </button>
+              <div className="h-px bg-neutral-800" />
+              <button
+                type="button"
+                onClick={openHeartbeat}
+                className="flex items-center gap-3 px-4 py-3 text-left transition hover:bg-neutral-900/80"
+              >
+                <FileText className="h-4 w-4 flex-shrink-0 text-neutral-400" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-neutral-100">Heartbeat</div>
+                  <div className="text-[11px] text-neutral-500">
+                    what's on your plate, shared with spar
+                  </div>
+                </div>
+                <ChevronRight className="h-4 w-4 flex-shrink-0 text-neutral-600" />
+              </button>
+            </div>
+
+            {/* Workers panel — rendered inline here on mobile instead
+                of overlaid on the chat. Only mounts while the sheet
+                is open so its 1 s polling loop doesn't run in the
+                background. */}
+            {renderWorkers && (
+              <div className="-mx-4">
+                <WorkerStatusPanel />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
