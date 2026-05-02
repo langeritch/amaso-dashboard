@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { connect as tcpConnect } from "node:net";
 import { resolve } from "node:path";
+import { getActiveApiKey } from "./claude-accounts";
 
 const PYTHON =
   process.env.TELEGRAM_VOICE_PYTHON ??
@@ -42,8 +43,18 @@ export async function startTelegramVoice(): Promise<void> {
     );
     return;
   }
+  // Active-account API key wins over whatever leaked in from .env.local.
+  // When no account is configured, getActiveApiKey() falls back to the
+  // env var so legacy setups behave identically.
+  const activeKey = getActiveApiKey();
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUNBUFFERED: "1",
+  };
+  if (activeKey) childEnv.ANTHROPIC_API_KEY = activeKey;
   child = spawn(PYTHON, [SCRIPT], {
-    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUNBUFFERED: "1" },
+    env: childEnv,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -83,4 +94,36 @@ export async function startTelegramVoice(): Promise<void> {
     cleanup();
     process.exit(0);
   });
+}
+
+/**
+ * Stop the running sidecar (if any) and start a fresh one. Used by the
+ * account-switcher PUT endpoint so the new active API key takes effect
+ * for inbound voice calls without a full dashboard restart. The sidecar
+ * reads ANTHROPIC_API_KEY at startup, so re-spawning is the simplest
+ * correct way to make the switch live.
+ */
+export async function restartTelegramVoice(): Promise<void> {
+  if (child && child.exitCode === null) {
+    if (process.platform === "win32" && child.pid) {
+      try {
+        spawnSync("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
+          windowsHide: true,
+        });
+      } catch {
+        /* ignore */
+      }
+    } else {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+    }
+    child = null;
+    // Give the OS a beat to release the port — pytgcalls' native helper
+    // can take ~500ms to fully relinquish the UDP sockets.
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  await startTelegramVoice();
 }
