@@ -210,10 +210,24 @@ export function WorkerList() {
     [workers],
   );
   if (workers === null) {
+    // Skeleton rows so the panel doesn't blink to "Loading…" then to
+    // a populated list — the shimmer reads as "data is on its way"
+    // and matches the row height of the real workers below.
     return (
-      <div className="px-3 py-2 text-[11px] italic text-neutral-600">
-        Loading workers…
-      </div>
+      <ul className="flex flex-col gap-px divide-y divide-neutral-800/70">
+        {[0, 1, 2].map((i) => (
+          <li
+            key={i}
+            className="amaso-fade-in flex items-center gap-3 px-3 py-2.5"
+          >
+            <span className="amaso-skeleton h-2 w-2 flex-shrink-0 rounded-full" />
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="amaso-skeleton h-3 w-1/2" />
+              <div className="amaso-skeleton h-2.5 w-3/4" />
+            </div>
+          </li>
+        ))}
+      </ul>
     );
   }
   if (workers.length === 0) {
@@ -438,7 +452,7 @@ function WorkerRow({
           href={`/projects/${projectId}${
             showLabel ? `?session=${encodeURIComponent(sessionId)}` : ""
           }`}
-          className="amaso-fx flex flex-1 items-center gap-3 px-3 py-2.5 hover:bg-neutral-900/70"
+          className="amaso-fx amaso-press flex min-h-[52px] flex-1 items-center gap-3 px-3 py-2.5 hover:bg-neutral-900/70 active:bg-neutral-900/90 sm:min-h-0"
         >
           <StatusDot tone={visual.tone} pulsing={visual.pulsing} />
           <div className="min-w-0 flex-1">
@@ -477,7 +491,7 @@ function WorkerRow({
             disabled={killing}
             aria-label={`Stop session ${ordinal}`}
             title={`Stop session #${ordinal}`}
-            className="amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-rose-900/40 hover:text-rose-300 disabled:opacity-40"
+            className="amaso-fx amaso-press flex h-auto w-11 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-rose-900/40 hover:text-rose-300 active:bg-rose-900/60 disabled:opacity-40 sm:w-8"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -492,7 +506,7 @@ function WorkerRow({
           disabled={spawning}
           aria-label={`Spawn another session for ${w.name}`}
           title="Spawn another session for this project"
-          className="amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-orange-900/30 hover:text-orange-300 disabled:opacity-40"
+          className="amaso-fx amaso-press flex h-auto w-11 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-orange-900/30 hover:text-orange-300 active:bg-orange-900/50 disabled:opacity-40 sm:w-8"
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
@@ -506,7 +520,7 @@ function WorkerRow({
           aria-expanded={open}
           aria-label={open ? "Hide worker details" : "Show worker details"}
           title="Worker details"
-          className={`amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-neutral-900/60 hover:text-neutral-300 ${
+          className={`amaso-fx amaso-press flex h-auto w-11 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-neutral-900/60 hover:text-neutral-300 active:bg-neutral-900/90 sm:w-8 ${
             pinned ? "bg-neutral-900/60 text-neutral-300" : ""
           }`}
         >

@@ -134,7 +134,7 @@ export default function SparTodayPanel() {
         <button
           type="button"
           onClick={() => setCollapsed((v) => !v)}
-          className="amaso-fx amaso-press flex h-7 items-center gap-1 rounded-md px-2 text-[11px] text-neutral-500 hover:bg-neutral-900/60 hover:text-neutral-200"
+          className="amaso-fx amaso-press flex h-9 min-w-[44px] items-center gap-1 rounded-md px-2.5 text-[11px] text-neutral-500 hover:bg-neutral-900/60 hover:text-neutral-200 sm:h-7 sm:min-w-0"
           aria-expanded={!collapsed}
           aria-controls="spar-today-content"
         >
@@ -149,20 +149,29 @@ export default function SparTodayPanel() {
           )}
         </button>
       </header>
-      {!collapsed && (
+      <div
+        id="spar-today-content"
+        data-open={collapsed ? "false" : "true"}
+        // Smooth open/close instead of a hard conditional unmount.
+        // max-height caps the panel at a value that comfortably fits
+        // the cards on every breakpoint; when collapsed it eases to
+        // zero. aria-hidden mirrors the visual state for SR/AX.
+        aria-hidden={collapsed}
+        className="amaso-collapse"
+        style={{ maxHeight: collapsed ? 0 : 260 }}
+      >
         <div
-          id="spar-today-content"
           // Mobile: horizontal swipe strip with snap points so all
-          // three cards stay reachable without burning vertical space
-          // (a stacked column would push the chat composer below the
-          // fold on a phone). lg+: 3-column grid.
-          className="flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-3 sm:px-5 sm:pb-4 lg:grid lg:grid-cols-3 lg:overflow-visible lg:snap-none"
+          // three cards stay reachable without burning vertical
+          // space (a stacked column would push the chat composer
+          // below the fold on a phone). lg+: 3-column grid.
+          className="amaso-snap-strip flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-3 sm:px-5 sm:pb-4 lg:grid lg:grid-cols-3 lg:overflow-visible lg:snap-none"
         >
           <TerminalsCard terminals={data?.terminals ?? null} />
           <OpenLoopsCard loops={data?.openLoops ?? null} />
           <RemarksCard remarks={data?.remarks ?? null} />
         </div>
-      )}
+      </div>
     </section>
   );
 }
@@ -180,7 +189,7 @@ function CardFrame({
   children: React.ReactNode;
 }) {
   return (
-    <div className="amaso-fx flex h-[180px] w-[82%] max-w-sm flex-shrink-0 snap-start flex-col overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/50 hover:border-neutral-700/80 sm:w-[60%] lg:h-[200px] lg:w-auto lg:max-w-none lg:flex-shrink">
+    <div className="amaso-fx amaso-fade-in flex h-[180px] w-[82%] max-w-sm flex-shrink-0 snap-start snap-always flex-col overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/50 hover:border-neutral-700/80 sm:w-[60%] lg:h-[200px] lg:w-auto lg:max-w-none lg:flex-shrink">
       <div className="flex items-center gap-2 border-b border-neutral-800/70 px-3 py-2">
         <Icon className="h-3.5 w-3.5 text-neutral-400" />
         <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-neutral-400">
@@ -242,7 +251,7 @@ function TerminalsCard({
             <li key={t.id}>
               <Link
                 href={`/projects/${t.projectId}`}
-                className="amaso-fx flex items-start gap-2 rounded-md px-1.5 py-1 hover:bg-neutral-800/50"
+                className="amaso-fx amaso-press flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-neutral-800/50 active:bg-neutral-800/70"
               >
                 <TerminalStateDot state={t.state} />
                 <div className="min-w-0 flex-1">
@@ -402,7 +411,7 @@ function RemarksCard({ remarks }: { remarks: RemarkSummary[] | null }) {
             <li key={r.id}>
               <Link
                 href={`/projects/${r.projectId}`}
-                className="amaso-fx block rounded-md px-1.5 py-1 hover:bg-neutral-800/50"
+                className="amaso-fx amaso-press block rounded-md px-2 py-1.5 hover:bg-neutral-800/50 active:bg-neutral-800/70"
               >
                 <div className="flex items-baseline gap-2">
                   <CategoryPip category={r.category} />

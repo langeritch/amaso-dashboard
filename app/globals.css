@@ -208,6 +208,51 @@ html.light .amaso-skeleton {
   100% { background-position: -200% 0; }
 }
 
+/* Fade-in (with a hint of upward drift) used by data cards and
+ * skeletons-to-content transitions. Applied via class so the runtime
+ * can opt in / out without managing keyframes per component. */
+@keyframes amasoFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.amaso-fade-in {
+  animation: amasoFadeIn 220ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.amaso-fade-in-slow {
+  animation: amasoFadeIn 320ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* Smooth collapse helper — transitions max-height + opacity for an
+ * eased reveal/hide instead of a jarring conditional unmount. The
+ * caller sets max-height to a generous cap (e.g. 240px); when
+ * `data-open="false"`, both axes go to zero. */
+.amaso-collapse {
+  overflow: hidden;
+  transition: max-height 260ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    margin 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.amaso-collapse[data-open="false"] {
+  max-height: 0 !important;
+  opacity: 0;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+/* Horizontal snap strips (the Today-at-a-glance card row on mobile)
+ * get momentum scrolling on iOS and gutter padding so the leading
+ * card doesn't crash into the safe-area edge. */
+.amaso-snap-strip {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scroll-padding-left: 1rem;
+  scroll-padding-right: 1rem;
+  scrollbar-width: none;
+}
+.amaso-snap-strip::-webkit-scrollbar {
+  display: none;
+}
+
 /* Soft pulse for the "thinking" indicator dot trio in chat surfaces. */
 @keyframes amasoDotPulse {
   0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
