@@ -8,8 +8,10 @@ export default async function LoginPage() {
   if (userCount() === 0) redirect("/setup");
   const user = await getCurrentUser();
   if (user) {
-    // Clients land on the portal; everyone else on the dashboard home.
-    redirect(user.role === "client" ? "/client" : "/");
+    // Clients land on the portal; admin/team land on /spar — the
+    // sparring command center is the post-login home for the
+    // internal dashboard now.
+    redirect(user.role === "client" ? "/client" : "/spar");
   }
   return (
     <main className="flex min-h-[100dvh] items-center justify-center px-4 py-6 sm:px-6">

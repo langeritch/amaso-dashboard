@@ -25,7 +25,9 @@ export default function LoginForm() {
         setErr(body.error === "invalid_credentials" ? "Invalid email or password." : "Login failed.");
         return;
       }
-      router.push("/");
+      // /spar is the home for admin/team. Clients hitting it bounce
+      // through requireUser → /client, so a single push works for both.
+      router.push("/spar");
       router.refresh();
     } finally {
       setPending(false);
