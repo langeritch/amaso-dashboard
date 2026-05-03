@@ -188,7 +188,7 @@ function ToolStepCard({ step }: { step: ToolStep }) {
     step.status === "running"
       ? "animate-spin text-sky-300"
       : step.status === "ok"
-        ? "text-emerald-300/80"
+        ? "text-orange-300/80"
         : "text-rose-300";
   return (
     <div
@@ -967,7 +967,7 @@ export default function SparFullView() {
                 e.preventDefault();
                 submitDraft();
               }}
-              className="mt-2 flex w-full max-w-sm items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/70 px-3 py-1.5 text-sm transition-[border-color,box-shadow] duration-200 ease-out focus-within:border-emerald-500/50 focus-within:shadow-[0_0_0_3px_rgba(16,185,129,0.12)]"
+              className="mt-2 flex w-full max-w-sm items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/70 px-3 py-1.5 text-sm transition-[border-color,box-shadow] duration-200 ease-out focus-within:border-orange-500/50 focus-within:shadow-[0_0_0_3px_rgba(255, 107, 61,0.12)]"
             >
               <button
                 type="button"
@@ -988,7 +988,7 @@ export default function SparFullView() {
               <button
                 type="submit"
                 disabled={!draft.trim() && !pendingAttachments.length}
-                className="amaso-fx amaso-press flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500 text-neutral-950 shadow-[0_2px_8px_rgba(16,185,129,0.35)] hover:bg-emerald-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
+                className="amaso-fx amaso-press flex h-8 w-8 items-center justify-center rounded-full bg-orange-500 text-neutral-950 shadow-[0_2px_8px_rgba(255, 107, 61,0.35)] hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
                 aria-label="Send"
               >
                 <Send className="h-4 w-4" />
@@ -1122,12 +1122,12 @@ export default function SparFullView() {
                       className="flex max-w-[85%] flex-col items-end gap-1 self-end"
                     >
                       <span
-                        className="rounded-full border border-emerald-700/60 bg-emerald-900/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-emerald-300"
+                        className="rounded-full border border-orange-700/60 bg-orange-900/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-orange-300"
                         title="Inserted by the auto-report path after a dispatched terminal finished"
                       >
                         Auto-report
                       </span>
-                      <div className="rounded-2xl rounded-tr-md bg-emerald-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-emerald-50 ring-1 ring-emerald-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
+                      <div className="rounded-2xl rounded-tr-md bg-orange-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-orange-50 ring-1 ring-orange-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
                         {m.content || ""}
                         {m.attachments?.length ? (
                           <InlineAttachments attachments={m.attachments} />
@@ -1141,7 +1141,7 @@ export default function SparFullView() {
                     key={m.id}
                     className={
                       m.role === "user"
-                        ? "max-w-[85%] self-end rounded-2xl rounded-tr-md bg-emerald-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-emerald-50 ring-1 ring-emerald-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
+                        ? "max-w-[85%] self-end rounded-2xl rounded-tr-md bg-orange-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-orange-50 ring-1 ring-orange-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
                         : "flex max-w-[85%] flex-col self-start"
                     }
                   >
@@ -1178,7 +1178,7 @@ export default function SparFullView() {
                   while a voice call streams into text mode. Faded so
                   it reads as not-yet-committed. */}
               {interimText && (
-                <li className="max-w-[85%] self-end rounded-2xl rounded-tr-md bg-emerald-700/15 px-4 py-2.5 text-[14px] italic leading-[1.55] text-emerald-100/70 ring-1 ring-emerald-400/10">
+                <li className="max-w-[85%] self-end rounded-2xl rounded-tr-md bg-orange-700/15 px-4 py-2.5 text-[14px] italic leading-[1.55] text-orange-100/70 ring-1 ring-orange-400/10">
                   {interimText}
                 </li>
               )}
@@ -1223,11 +1223,11 @@ export default function SparFullView() {
           onClick={() => setAutopilotSidebarOpen(true)}
           aria-label="open autopilot panel"
           title="autopilot is on — open panel"
-          className="fixed right-1.5 top-1/2 z-30 flex h-8 w-3 -translate-y-1/2 items-center justify-center rounded-l-md bg-emerald-500/10 transition hover:bg-emerald-500/20"
+          className="fixed right-1.5 top-1/2 z-30 flex h-8 w-3 -translate-y-1/2 items-center justify-center rounded-l-md bg-orange-500/10 transition hover:bg-orange-500/20"
         >
           <span
             aria-hidden
-            className="h-2 w-2 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.85)]"
+            className="h-2 w-2 animate-pulse rounded-full bg-orange-400 shadow-[0_0_8px_rgba(255, 107, 61,0.85)]"
           />
         </button>
       )}
@@ -1284,7 +1284,7 @@ export default function SparFullView() {
               key={m.id}
               className={`max-w-[90%] rounded-2xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
                 m.role === "user"
-                  ? "self-end bg-emerald-700/30 text-emerald-50"
+                  ? "self-end bg-orange-700/30 text-orange-50"
                   : "self-start bg-neutral-800/70 text-neutral-100"
               }`}
             >
@@ -1389,7 +1389,7 @@ export default function SparFullView() {
                   e.preventDefault();
                   submitDraft();
                 }}
-                className="relative mx-auto flex min-w-0 max-w-3xl flex-1 items-end gap-1.5 rounded-2xl border border-neutral-800 bg-neutral-900/70 px-2.5 py-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-[border-color,box-shadow,background-color] duration-200 ease-out focus-within:border-emerald-500/50 focus-within:bg-neutral-900/85 focus-within:shadow-[0_0_0_3px_rgba(16,185,129,0.12),0_1px_2px_rgba(0,0,0,0.25)] sm:w-full sm:flex-none sm:col-start-2"
+                className="relative mx-auto flex min-w-0 max-w-3xl flex-1 items-end gap-1.5 rounded-2xl border border-neutral-800 bg-neutral-900/70 px-2.5 py-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-[border-color,box-shadow,background-color] duration-200 ease-out focus-within:border-orange-500/50 focus-within:bg-neutral-900/85 focus-within:shadow-[0_0_0_3px_rgba(255, 107, 61,0.12),0_1px_2px_rgba(0,0,0,0.25)] sm:w-full sm:flex-none sm:col-start-2"
               >
                 {slashOpen && (
                   <SlashCommandDropdown
@@ -1478,7 +1478,7 @@ export default function SparFullView() {
                 <button
                   type="submit"
                   disabled={!draft.trim() && !pendingAttachments.length}
-                  className="amaso-fx amaso-press flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500 text-neutral-950 shadow-[0_2px_8px_rgba(16,185,129,0.35)] hover:bg-emerald-400 hover:shadow-[0_2px_12px_rgba(16,185,129,0.5)] disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
+                  className="amaso-fx amaso-press flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-orange-500 text-neutral-950 shadow-[0_2px_8px_rgba(255, 107, 61,0.35)] hover:bg-orange-400 hover:shadow-[0_2px_12px_rgba(255, 107, 61,0.5)] disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
                   aria-label="Send"
                 >
                   <Send className="h-4 w-4" />
@@ -1514,14 +1514,14 @@ export default function SparFullView() {
                 }
                 className={`group inline-flex h-8 items-center gap-1.5 rounded-full border px-2 text-[11px] transition sm:px-3 ${
                   autopilot
-                    ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200 shadow-[0_0_18px_rgba(16,185,129,0.45)] hover:border-emerald-300/80"
+                    ? "border-orange-400/60 bg-orange-500/15 text-orange-200 shadow-[0_0_18px_rgba(255, 107, 61,0.45)] hover:border-orange-300/80"
                     : "border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
                 }`}
               >
                 <Zap
                   className={`h-3.5 w-3.5 ${
                     autopilot
-                      ? "fill-emerald-300 text-emerald-300 animate-pulse"
+                      ? "fill-orange-300 text-orange-300 animate-pulse"
                       : "text-neutral-500 group-hover:text-neutral-300"
                   }`}
                 />
@@ -1544,7 +1544,7 @@ export default function SparFullView() {
                 title={heartbeatOpen ? "close heartbeat" : "open heartbeat"}
                 className={`relative inline-flex h-8 items-center gap-1.5 rounded-full border px-2 text-[11px] transition sm:px-3 ${
                   heartbeatOpen
-                    ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-100 shadow-[0_0_18px_rgba(16,185,129,0.35)]"
+                    ? "border-orange-400/60 bg-orange-500/15 text-orange-100 shadow-[0_0_18px_rgba(255, 107, 61,0.35)]"
                     : "border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
                 }`}
               >
@@ -1562,7 +1562,7 @@ export default function SparFullView() {
                     }
                     className={`absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full ${
                       latestTick.status === "ok"
-                        ? "bg-emerald-400"
+                        ? "bg-orange-400"
                         : latestTick.notified
                           ? "bg-amber-400 animate-pulse"
                           : "bg-amber-400/70"
@@ -1611,7 +1611,7 @@ export default function SparFullView() {
                         ? "bg-rose-400"
                         : onTelegram
                           ? "bg-sky-400"
-                          : "bg-emerald-400"
+                          : "bg-orange-400"
                     } animate-pulse shadow-[0_0_8px_currentColor]`}
                   />
                 )}
@@ -1675,7 +1675,7 @@ function DriftHintBanner({
 function DispatchBanner({ dispatch }: { dispatch: Dispatch }) {
   const tone =
     dispatch.status === "sent"
-      ? "border-emerald-500/40 bg-emerald-950/40 text-emerald-100"
+      ? "border-orange-500/40 bg-orange-950/40 text-orange-100"
       : "border-red-500/40 bg-red-950/40 text-red-100";
   const label =
     dispatch.status === "sent" ? "just sent to project" : "dispatch failed";
@@ -1783,7 +1783,7 @@ function CallButton({
     tone === "red"
       ? "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/40"
       : tone === "green"
-        ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/40"
+        ? "bg-orange-600 hover:bg-orange-500 text-white shadow-lg shadow-orange-900/40"
         : active
           ? "bg-neutral-200 text-neutral-900"
           : "bg-neutral-800 text-neutral-400";
@@ -1945,7 +1945,7 @@ function MobileControlsSheet({
                 <Zap
                   className={`h-4 w-4 flex-shrink-0 ${
                     autopilot
-                      ? "fill-emerald-300 text-emerald-300"
+                      ? "fill-orange-300 text-orange-300"
                       : "text-neutral-500"
                   }`}
                 />
@@ -1959,7 +1959,7 @@ function MobileControlsSheet({
                 </div>
                 <span
                   className={`flex h-6 w-10 flex-shrink-0 items-center rounded-full p-0.5 transition ${
-                    autopilot ? "bg-emerald-500/80" : "bg-neutral-700"
+                    autopilot ? "bg-orange-500/80" : "bg-neutral-700"
                   }`}
                 >
                   <span

@@ -116,7 +116,7 @@ export default function NewProjectButton() {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex items-center gap-1.5 rounded-md border border-emerald-700/60 bg-emerald-900/40 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-900/60"
+        className="flex items-center gap-1.5 rounded-md border border-orange-700/60 bg-orange-900/40 px-3 py-1.5 text-sm text-orange-100 hover:bg-orange-900/60"
       >
         <Plus className="h-4 w-4" />
         <span>Nieuw project</span>
@@ -266,7 +266,7 @@ export default function NewProjectButton() {
               <button
                 type="submit"
                 disabled={busy}
-                className="rounded-md border border-emerald-700/60 bg-emerald-900/60 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-800/60 disabled:opacity-50"
+                className="rounded-md border border-orange-700/60 bg-orange-900/60 px-3 py-1.5 text-sm text-orange-100 hover:bg-orange-800/60 disabled:opacity-50"
               >
                 {busy ? "Bezig…" : "Project aanmaken"}
               </button>

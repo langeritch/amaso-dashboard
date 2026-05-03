@@ -662,7 +662,7 @@ export default function TerminalPane({
         theme: {
           background: "#0b0d10",
           foreground: "#e6e8eb",
-          cursor: isTouch ? "rgba(0,0,0,0)" : "#10b981",
+          cursor: isTouch ? "rgba(0,0,0,0)" : "#ff6b3d",
           cursorAccent: isTouch ? "rgba(0,0,0,0)" : "#0b0d10",
           selectionBackground: "#2d3440",
         },
@@ -1698,13 +1698,13 @@ export default function TerminalPane({
         <span
           className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] ${
             running
-              ? "border-emerald-700/60 bg-emerald-900/40 text-emerald-200"
+              ? "border-orange-700/60 bg-orange-900/40 text-orange-200"
               : "border-neutral-700 bg-neutral-900 text-neutral-400"
           }`}
         >
           <span
             className={`inline-block h-1.5 w-1.5 rounded-full ${
-              running ? "bg-emerald-400" : "bg-neutral-500"
+              running ? "bg-orange-400" : "bg-neutral-500"
             }`}
           />
           claude · {status}
@@ -1749,7 +1749,7 @@ export default function TerminalPane({
             }}
             className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
               ttsEnabled
-                ? "border-emerald-500/60 bg-emerald-900/40 text-emerald-100"
+                ? "border-orange-500/60 bg-orange-900/40 text-orange-100"
                 : "border-neutral-800 text-neutral-300 hover:border-neutral-700"
             }`}
             title={ttsEnabled ? "Stop voorlezen" : "Lees antwoorden voor"}
@@ -1841,7 +1841,7 @@ export default function TerminalPane({
           <button
             type="button"
             onClick={jumpToBottom}
-            className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-black/40 hover:bg-emerald-500"
+            className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-full bg-orange-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-black/40 hover:bg-orange-500"
             title="Spring naar beneden"
             aria-label="Spring naar beneden"
             style={kbInset > 0 ? { bottom: kbInset + 12 } : undefined}

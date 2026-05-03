@@ -593,7 +593,7 @@ export default function ChatClient({
               onClick={() => setAiOpen((v) => !v)}
               className={`flex min-h-[40px] flex-shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition sm:min-h-0 sm:px-2 ${
                 aiOpen
-                  ? "border-emerald-700 bg-emerald-900/30 text-emerald-200"
+                  ? "border-orange-700 bg-orange-900/30 text-orange-200"
                   : "border-neutral-800 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
               }`}
               title="Toggle Claude CLI terminal"
@@ -877,7 +877,7 @@ function ChannelRow({
       <ChannelIcon channel={channel} compact />
       <span className="flex-1 truncate">{channel.name}</span>
       {unread > 0 && !active && (
-        <span className="flex-shrink-0 rounded-full bg-emerald-500 px-1.5 py-0.5 text-[10px] font-semibold text-black">
+        <span className="flex-shrink-0 rounded-full bg-orange-500 px-1.5 py-0.5 text-[10px] font-semibold text-black">
           {unread > 99 ? "99+" : unread}
         </span>
       )}
@@ -897,7 +897,7 @@ function ChannelIcon({
   if (channel.kind === "general") return <Hash className={cls} />;
   if (channel.kind === "project")
     return <FolderKanban className={`${cls} text-sky-400`} />;
-  return <MessageCircle className={`${cls} text-emerald-400`} />;
+  return <MessageCircle className={`${cls} text-orange-400`} />;
 }
 
 function MessageBubble({
@@ -915,7 +915,7 @@ function MessageBubble({
       <div
         className={`max-w-[75%] rounded-lg px-3 py-2 text-sm ${
           isOwn
-            ? "bg-emerald-900/40 text-emerald-50"
+            ? "bg-orange-900/40 text-orange-50"
             : "bg-neutral-900 text-neutral-100"
         }`}
       >
@@ -923,7 +923,7 @@ function MessageBubble({
           <span className="font-medium text-neutral-300">{message.userName}</span>
           <span>{relTime(message.createdAt)}</span>
           {message.kind === "ai_session" && (
-            <span className="flex items-center gap-1 rounded-full border border-emerald-700/60 bg-emerald-900/40 px-1.5 text-[9px] text-emerald-200">
+            <span className="flex items-center gap-1 rounded-full border border-orange-700/60 bg-orange-900/40 px-1.5 text-[9px] text-orange-200">
               <Sparkles className="h-2.5 w-2.5" /> AI session
             </span>
           )}
@@ -1060,7 +1060,7 @@ function RemarkCard({ remark }: { remark: ChatRemark }) {
           </span>
         )}
         {remark.resolvedAt && (
-          <span className="ml-auto rounded-full border border-emerald-700 bg-emerald-900/30 px-1.5 py-0.5 text-[9px] text-emerald-200">
+          <span className="ml-auto rounded-full border border-orange-700 bg-orange-900/30 px-1.5 py-0.5 text-[9px] text-orange-200">
             resolved
           </span>
         )}

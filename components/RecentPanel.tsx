@@ -114,7 +114,7 @@ export default function RecentPanel({
 
 function Badge({ type }: { type: RecentEvent["type"] }) {
   const map = {
-    add: "bg-emerald-900/40 text-emerald-300 border-emerald-800/60",
+    add: "bg-orange-900/40 text-orange-300 border-orange-800/60",
     change: "bg-amber-900/40 text-amber-300 border-amber-800/60",
     unlink: "bg-red-900/40 text-red-300 border-red-800/60",
   } as const;
@@ -138,7 +138,7 @@ function DiffView({ patch }: { patch: string }) {
       {lines.map((line, i) => {
         let cls = "text-neutral-400";
         if (line.startsWith("+") && !line.startsWith("+++"))
-          cls = "bg-emerald-900/20 text-emerald-300";
+          cls = "bg-orange-900/20 text-orange-300";
         else if (line.startsWith("-") && !line.startsWith("---"))
           cls = "bg-red-900/20 text-red-300";
         else if (line.startsWith("@@")) cls = "text-sky-400";

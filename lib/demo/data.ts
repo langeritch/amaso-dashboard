@@ -50,7 +50,7 @@ export const DEMO_PROJECTS: DemoProject[] = [
     name: "Horizon Architects",
     client: "Horizon Architects B.V.",
     status: "active",
-    accent: "text-emerald-400",
+    accent: "text-orange-400",
     preview: "Portfolio redesign — case studies module shipping this week.",
     lastActivity: "12m ago",
   },

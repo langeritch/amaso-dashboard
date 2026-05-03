@@ -303,7 +303,7 @@ export default function RemarksPanel({
               onClick={() => setOnlySelected((v) => !v)}
               className={`rounded-full border px-2 py-0.5 text-[10px] transition ${
                 onlySelected
-                  ? "border-emerald-700 bg-emerald-900/40 text-emerald-200"
+                  ? "border-orange-700 bg-orange-900/40 text-orange-200"
                   : "border-neutral-700 text-neutral-400 hover:border-neutral-600 hover:text-neutral-200"
               }`}
               title={
@@ -350,7 +350,7 @@ export default function RemarksPanel({
         </div>
       </div>
 
-      <div className="thin-scroll flex-1 overflow-auto">
+      <div className="thin-scroll min-h-0 flex-1 overflow-auto">
         {filteredRemarks.length === 0 ? (
           <Info>
             {remarks.length === 0
@@ -396,13 +396,13 @@ export default function RemarksPanel({
         onSubmit={submit}
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDrop}
-        className="pb-safe pl-safe pr-safe space-y-2 border-t border-neutral-800 p-3"
+        className="pb-safe pl-safe pr-safe max-h-[55vh] shrink-0 space-y-2 overflow-y-auto border-t border-neutral-800 bg-neutral-950/40 p-3"
       >
         {/* Prominent target banner — always visible, always obvious */}
         <div
           className={`flex items-center gap-2 rounded border px-2.5 py-1.5 text-xs ${
             target === "item" && selected
-              ? "border-emerald-700/60 bg-emerald-900/20"
+              ? "border-orange-700/60 bg-orange-900/20"
               : "border-neutral-800 bg-neutral-900"
           }`}
         >
@@ -410,12 +410,12 @@ export default function RemarksPanel({
           {target === "item" && selected ? (
             <>
               {isDir ? (
-                <FolderIcon className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
+                <FolderIcon className="h-3.5 w-3.5 flex-shrink-0 text-orange-400" />
               ) : (
-                <FileIcon className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
+                <FileIcon className="h-3.5 w-3.5 flex-shrink-0 text-orange-400" />
               )}
               <span
-                className="flex-1 truncate font-mono text-emerald-200"
+                className="flex-1 truncate font-mono text-orange-200"
                 title={selected.path}
               >
                 {selected.path}
@@ -438,7 +438,7 @@ export default function RemarksPanel({
                 <button
                   type="button"
                   onClick={() => setTarget("item")}
-                  className="flex items-center gap-1 rounded bg-emerald-700 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-600"
+                  className="flex items-center gap-1 rounded bg-orange-700 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-orange-600"
                   title={`Use ${selected.path} as target`}
                 >
                   use {selected.type === "dir" ? "folder" : "file"} →
@@ -455,10 +455,10 @@ export default function RemarksPanel({
           target === "item" &&
           selected &&
           selected.path === localContext.path && (
-            <div className="rounded border border-emerald-800/50 bg-emerald-900/10 p-2 text-[11px]">
+            <div className="rounded border border-orange-800/50 bg-orange-900/10 p-2 text-[11px]">
               <div className="flex items-center gap-1.5">
-                <MousePointerClick className="h-3 w-3 text-emerald-400" />
-                <span className="text-emerald-300">Element captured</span>
+                <MousePointerClick className="h-3 w-3 text-orange-400" />
+                <span className="text-orange-300">Element captured</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -648,7 +648,7 @@ function RemarkItem({
         resolved
           ? "opacity-50 [&_p]:line-through"
           : highlighted
-            ? "border-l-2 border-emerald-500 bg-emerald-900/10"
+            ? "border-l-2 border-orange-500 bg-orange-900/10"
             : ""
       }`}
     >
@@ -682,8 +682,8 @@ function RemarkItem({
               onClick={onToggleResolved}
               className={`rounded p-0.5 transition ${
                 resolved
-                  ? "text-emerald-400 hover:text-neutral-400"
-                  : "text-neutral-600 hover:text-emerald-400"
+                  ? "text-orange-400 hover:text-neutral-400"
+                  : "text-neutral-600 hover:text-orange-400"
               }`}
               title={resolved ? "Mark as open again" : "Mark as resolved"}
             >
@@ -698,7 +698,7 @@ function RemarkItem({
             <button
               type="button"
               onClick={() => onJump(remark.path!, remark.line)}
-              className="text-neutral-500 hover:text-emerald-400"
+              className="text-neutral-500 hover:text-orange-400"
               title={`Jump to ${remark.path}${
                 remark.line !== null ? `:${remark.line}` : ""
               }`}
@@ -725,7 +725,7 @@ function RemarkItem({
           <button
             type="button"
             onClick={() => setExpandContext((v) => !v)}
-            className="flex items-center gap-1 rounded border border-emerald-800/50 bg-emerald-900/10 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-900/20"
+            className="flex items-center gap-1 rounded border border-orange-800/50 bg-orange-900/10 px-1.5 py-0.5 text-[10px] text-orange-300 hover:bg-orange-900/20"
             title="Element captured from the preview at post time"
           >
             <MousePointerClick className="h-3 w-3" />
@@ -784,7 +784,7 @@ function ContextPreview({ ctx }: { ctx: RemarkContext }) {
     <div className="mt-1 space-y-0.5 font-mono text-[10px] text-neutral-300">
       {(tag || id || classes?.length) && (
         <div className="truncate">
-          <span className="text-emerald-300">&lt;{tag ?? "?"}&gt;</span>
+          <span className="text-orange-300">&lt;{tag ?? "?"}&gt;</span>
           {id && <span className="text-amber-300"> #{id}</span>}
           {classes && classes.length > 0 && (
             <span className="text-neutral-500">

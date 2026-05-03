@@ -97,7 +97,7 @@ export default function Topbar({ user }: { user: User }) {
           {unreadTotal > 0 && (
             <span
               aria-hidden
-              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.7)]"
+              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-orange-500 shadow-[0_0_6px_rgba(255, 107, 61,0.7)]"
             />
           )}
         </Link>
@@ -185,7 +185,7 @@ export default function Topbar({ user }: { user: User }) {
         >
           {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           {!menuOpen && unreadTotal > 0 && (
-            <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-neutral-950" />
+            <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-orange-500 ring-2 ring-neutral-950" />
           )}
         </button>
       </nav>
@@ -377,7 +377,7 @@ function DrawerLink({
       {active && (
         <span
           aria-hidden
-          className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-emerald-500"
+          className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-orange-500"
         />
       )}
       <Icon className={`${iconSize} transition-colors duration-200 ${iconClass}`} />
@@ -443,7 +443,7 @@ function UnreadDot({ count, className = "" }: { count: number; className?: strin
   if (count <= 0) return null;
   return (
     <span
-      className={`inline-flex min-w-[18px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[10px] font-semibold text-black shadow-[0_0_0_1px_rgba(16,185,129,0.25),0_0_8px_rgba(16,185,129,0.4)] ${className}`}
+      className={`inline-flex min-w-[18px] items-center justify-center rounded-full bg-orange-500 px-1.5 text-[10px] font-semibold text-black shadow-[0_0_0_1px_rgba(255, 107, 61,0.25),0_0_8px_rgba(255, 107, 61,0.4)] ${className}`}
       aria-label={`${count} unread`}
     >
       {count > 99 ? "99+" : count}

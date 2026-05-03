@@ -551,7 +551,7 @@ export default function ProjectView({
         <span
           className={`ml-2 hidden flex-shrink-0 items-center gap-1 rounded px-2 py-0.5 text-[11px] md:flex ${
             selected
-              ? "bg-emerald-900/50 text-emerald-200"
+              ? "bg-orange-900/50 text-orange-200"
               : "bg-neutral-800 text-neutral-500"
           }`}
           title={
@@ -569,7 +569,7 @@ export default function ProjectView({
               <button
                 type="button"
                 onClick={() => pickSelection(null)}
-                className="ml-1 rounded px-1 text-emerald-300 hover:bg-emerald-800/50"
+                className="ml-1 rounded px-1 text-orange-300 hover:bg-orange-800/50"
                 title="Clear selection"
               >
                 ×
@@ -735,7 +735,7 @@ function TabBtn({
 function StatusDot({ status }: { status: WsStatus }) {
   const colour =
     status === "open"
-      ? "bg-emerald-500"
+      ? "bg-orange-500"
       : status === "connecting"
         ? "bg-amber-500"
         : status === "unreachable"

@@ -84,7 +84,7 @@ const CONFIDENCE_TONE: Record<Confidence, string> = {
   // Greens for facts the user stated directly. Amber for what we
   // guessed (so the user can spot-correct it). Sky for corrections,
   // since they outrank explicit and we want the eye to find them.
-  explicit: "border-emerald-700/60 bg-emerald-900/30 text-emerald-300",
+  explicit: "border-orange-700/60 bg-orange-900/30 text-orange-300",
   inferred: "border-amber-700/60 bg-amber-900/30 text-amber-300",
   corrected: "border-sky-700/60 bg-sky-900/30 text-sky-300",
 };
@@ -456,7 +456,7 @@ function PropertiesView({ entity }: { entity: Entity }) {
           </p>
         )}
         {typeof props.workingSolution === "string" && (
-          <p className="flex items-start gap-1.5 text-emerald-300">
+          <p className="flex items-start gap-1.5 text-orange-300">
             <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
             <span>{props.workingSolution}</span>
           </p>
@@ -572,7 +572,7 @@ function EditRow({
               ...({ replaceProperties: true } as Partial<Entity>),
             });
           }}
-          className="flex items-center gap-1.5 rounded-md border border-emerald-800 bg-emerald-900/40 px-3 py-1.5 text-sm text-emerald-200 transition hover:bg-emerald-900/60"
+          className="flex items-center gap-1.5 rounded-md border border-orange-800 bg-orange-900/40 px-3 py-1.5 text-sm text-orange-200 transition hover:bg-orange-900/60"
         >
           <Save className="h-3.5 w-3.5" />
           Save

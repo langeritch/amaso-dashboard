@@ -102,8 +102,8 @@ export default async function ProjectsPage() {
                             aria-label="Terminal running"
                             title="Terminal running"
                           >
-                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-                            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]" />
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-60" />
+                            <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_6px_rgba(255, 107, 61,0.6)]" />
                           </span>
                         )}
                       </div>

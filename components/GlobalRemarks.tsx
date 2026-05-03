@@ -139,13 +139,13 @@ export default function GlobalRemarks({
                 <span className="text-neutral-500">·</span>
                 <span>{relTime(r.createdAt)}</span>
                 {r.resolvedAt && (
-                  <span className="ml-auto rounded-full border border-emerald-700 bg-emerald-900/30 px-1.5 py-0.5 text-[10px] text-emerald-200">
+                  <span className="ml-auto rounded-full border border-orange-700 bg-orange-900/30 px-1.5 py-0.5 text-[10px] text-orange-200">
                     resolved
                   </span>
                 )}
                 <Link
                   href={`/projects/${r.projectId}`}
-                  className="ml-1 text-neutral-500 hover:text-emerald-400"
+                  className="ml-1 text-neutral-500 hover:text-orange-400"
                   title="Open project"
                 >
                   <ExternalLink className="h-3 w-3" />

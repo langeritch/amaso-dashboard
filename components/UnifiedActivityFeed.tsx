@@ -171,7 +171,7 @@ function PersonCard({ person }: { person: PeopleCard }) {
         {initial}
         <span
           className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-neutral-950 ${
-            person.online ? "bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.55)]" : "bg-neutral-600"
+            person.online ? "bg-orange-500 shadow-[0_0_6px_rgba(255, 107, 61,0.55)]" : "bg-neutral-600"
           }`}
           aria-label={person.online ? "online" : "offline"}
         />
@@ -221,7 +221,7 @@ function FilterChips({
             onClick={() => onChange(c.value)}
             className={`amaso-fx rounded-full border px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] ${
               isActive
-                ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200 shadow-[0_0_0_1px_rgba(16,185,129,0.18)]"
+                ? "border-orange-500/40 bg-orange-500/15 text-orange-200 shadow-[0_0_0_1px_rgba(255, 107, 61,0.18)]"
                 : "border-neutral-800 bg-neutral-950 text-neutral-500 hover:border-neutral-700 hover:text-neutral-200"
             }`}
             aria-pressed={isActive}
@@ -296,8 +296,8 @@ function visualForKind(kind: FeedItem["kind"]): KindVisual {
     case "dispatch_completed":
       return {
         Icon: Sparkles,
-        iconBg: "bg-emerald-900/40",
-        iconColor: "text-emerald-300",
+        iconBg: "bg-orange-900/40",
+        iconColor: "text-orange-300",
         label: "Finished",
       };
     case "remark_created":
@@ -310,8 +310,8 @@ function visualForKind(kind: FeedItem["kind"]): KindVisual {
     case "remark_resolved":
       return {
         Icon: Sparkles,
-        iconBg: "bg-emerald-900/40",
-        iconColor: "text-emerald-300",
+        iconBg: "bg-orange-900/40",
+        iconColor: "text-orange-300",
         label: "Resolved",
       };
     case "file_change":

@@ -106,13 +106,13 @@ function PwaInstallCard() {
     // got the PWA, which reads as "blank page" to anyone who navigated
     // here looking for something to do.
     return (
-      <section className="rounded-lg border border-emerald-900/40 bg-neutral-950/60 p-5">
-        <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-emerald-400">
-          <Check className="h-3.5 w-3.5" />
+      <section className="rounded-lg border border-orange-900/40 bg-neutral-950/60 p-5">
+        <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-orange-400">
+          <Check className="h-3.5 w-3.5 flex-shrink-0" />
           <span>Step 1 · Installed</span>
         </div>
         <div className="mb-1 flex items-center gap-2">
-          <MonitorDown className="h-5 w-5 text-neutral-300" />
+          <MonitorDown className="h-5 w-5 flex-shrink-0 text-neutral-300" />
           <h2 className="text-lg font-semibold text-neutral-100">
             Amaso Dashboard (PWA)
           </h2>
@@ -127,12 +127,12 @@ function PwaInstallCard() {
   }
 
   return (
-    <section className="rounded-lg border border-emerald-900/40 bg-neutral-950/60 p-5">
-      <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-emerald-400">
+    <section className="rounded-lg border border-orange-900/40 bg-neutral-950/60 p-5">
+      <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-orange-400">
         <span>Step 1 · Install the app</span>
       </div>
       <div className="mb-1 flex items-center gap-2">
-        <MonitorDown className="h-5 w-5 text-neutral-300" />
+        <MonitorDown className="h-5 w-5 flex-shrink-0 text-neutral-300" />
         <h2 className="text-lg font-semibold text-neutral-100">
           Amaso Dashboard (PWA)
         </h2>
@@ -148,7 +148,7 @@ function PwaInstallCard() {
           type="button"
           onClick={handleInstall}
           disabled={state === "prompting"}
-          className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-800"
+          className="inline-flex items-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-orange-800"
         >
           <MonitorDown className="h-4 w-4" />
           {state === "prompting" ? "Awaiting browser prompt…" : "Install app"}
@@ -243,7 +243,7 @@ function CompanionCard() {
         <span>Optional · Mac only</span>
       </div>
       <div className="mb-1 flex items-center gap-2">
-        <Apple className="h-5 w-5 text-neutral-300" />
+        <Apple className="h-5 w-5 flex-shrink-0 text-neutral-300" />
         <h2 className="text-lg font-semibold text-neutral-100">
           Amaso Companion for Mac
         </h2>
@@ -256,15 +256,15 @@ function CompanionCard() {
 
       <ul className="mb-4 flex flex-col gap-1.5 text-sm text-neutral-400">
         <li className="flex gap-2">
-          <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400" />
+          <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-orange-400" />
           Run local commands dispatched from the dashboard
         </li>
         <li className="flex gap-2">
-          <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400" />
+          <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-orange-400" />
           Reach local files and folders when the dashboard asks
         </li>
         <li className="flex gap-2">
-          <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400" />
+          <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-orange-400" />
           Duck system audio during Spar voice sessions
         </li>
       </ul>
@@ -289,11 +289,11 @@ function CompanionDownload({
 
   if (fetchState.status === "error" || !fetchState.release) {
     return (
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="inline-flex items-center gap-2 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-neutral-500">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
+        <span className="inline-flex w-fit items-center gap-2 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-neutral-500">
           No release available yet
         </span>
-        <span className="text-xs text-neutral-500">
+        <span className="text-xs text-neutral-500 sm:flex-1 sm:pt-1.5">
           The Mac DMG ships through GitHub Releases. Once the next
           <code className="mx-1 rounded bg-neutral-800 px-1 py-0.5 text-[11px] text-neutral-300">
             companion-v*
@@ -359,7 +359,7 @@ function CompanionDownload({
           </a>
         )}
       </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-neutral-500">
+      <div className="flex flex-col gap-y-1 text-[11px] text-neutral-500 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3">
         <span>
           Latest&nbsp;build:{" "}
           <a
@@ -372,7 +372,9 @@ function CompanionDownload({
             <ExternalLink className="h-3 w-3" />
           </a>
         </span>
-        <span className="text-neutral-600">·</span>
+        <span aria-hidden="true" className="hidden text-neutral-600 sm:inline">
+          ·
+        </span>
         <span>
           <span className="text-amber-400">Unsigned build.</span>{" "}
           First launch: right-click the app → Open → Open again to

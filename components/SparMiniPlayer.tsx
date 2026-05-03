@@ -19,6 +19,187 @@ import { useSpar } from "./SparContext";
 import type { FillerNow } from "./SparContext";
 import MediaDrawer from "./MediaDrawer";
 import { useSparFooter } from "./SparFooterContext";
+import YoutubePiPButton from "./YoutubePiPButton";
+
+/**
+ * Inner row content for the mini player — artwork + label + transport
+ * controls (or a live-state activity dot when nothing is actively
+ * playing). Renders the MediaDrawer and a small style block too. Owns
+ * its own expand/volume-popover state so any consumer (the standalone
+ * pill in SparMiniPlayer or a unified footer in SparFullView) can drop
+ * it in without re-implementing the player logic.
+ */
+export function SparMediaRow({ compact = false }: { compact?: boolean }) {
+  const {
+    fillerNow,
+    youtubeQueue,
+    youtubeVolume,
+    setYoutubeVolume,
+    youtubePlay,
+    youtubePause,
+    youtubeSkip,
+    newsUpcoming,
+    newsPause,
+    newsResume,
+    newsSkip,
+  } = useSpar();
+
+  const [volumeOpen, setVolumeOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const lastNonZeroRef = useRef<number>(youtubeVolume > 0 ? youtubeVolume : 80);
+  useEffect(() => {
+    if (youtubeVolume > 0) lastNonZeroRef.current = youtubeVolume;
+  }, [youtubeVolume]);
+
+  const muted = youtubeVolume === 0;
+  const handleMuteToggle = () => {
+    if (muted) setYoutubeVolume(lastNonZeroRef.current || 80);
+    else setYoutubeVolume(0);
+  };
+
+  const isYoutube = fillerNow.kind === "youtube";
+  const isNews = fillerNow.kind === "news";
+  const isMedia = isYoutube || isNews;
+  const isPlayingYt = isYoutube && fillerNow.status === "playing";
+  const isPlayingNews = isNews && !fillerNow.paused;
+  const isPlaying = isPlayingYt || isPlayingNews;
+
+  const handleNowPlayingClick = () => setExpanded((v) => !v);
+  const handlePlayPause = () => {
+    if (isYoutube) {
+      if (isPlayingYt) youtubePause();
+      else youtubePlay();
+      return;
+    }
+    if (isNews) {
+      if (isPlayingNews) newsPause();
+      else newsResume();
+    }
+  };
+  const handleSkip = () => {
+    if (isYoutube) youtubeSkip();
+    else if (isNews) newsSkip();
+  };
+
+  return (
+    <div className="relative flex min-w-0 items-center gap-1">
+      <MediaDrawer open={expanded} onClose={() => setExpanded(false)} />
+      <button
+        type="button"
+        onClick={handleNowPlayingClick}
+        className="flex min-w-0 cursor-pointer items-center gap-2 rounded-lg text-left transition hover:bg-neutral-800/40"
+        aria-label={expanded ? "close media drawer" : "open media drawer"}
+        aria-expanded={expanded}
+      >
+        <ArtSlot fillerNow={fillerNow} compact={compact} />
+        <div className="flex min-w-0 flex-col">
+          <span
+            className={
+              compact
+                ? "max-w-[10rem] truncate text-[11px] leading-tight font-medium text-neutral-100 sm:max-w-[18rem]"
+                : "truncate text-[12px] leading-tight font-medium text-neutral-100"
+            }
+          >
+            {primaryLabel(fillerNow)}
+          </span>
+          <span
+            className={
+              compact
+                ? "hidden text-[9px] uppercase tracking-[0.18em] text-neutral-500 sm:block"
+                : "text-[10px] uppercase tracking-[0.18em] text-neutral-500"
+            }
+          >
+            {secondaryLabel(fillerNow, youtubeQueue.length, newsUpcoming.length)}
+          </span>
+        </div>
+      </button>
+      <div className="flex items-center gap-0.5">
+        {isMedia ? (
+          <>
+            <IconButton
+              label={isPlaying ? "pause" : "play"}
+              onClick={handlePlayPause}
+            >
+              {isPlaying ? (
+                <Pause className="h-4 w-4" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+            </IconButton>
+            <IconButton label="skip" onClick={handleSkip}>
+              <SkipForward className="h-4 w-4" />
+            </IconButton>
+            {isYoutube && (
+              <div
+                className="relative"
+                onMouseEnter={() => setVolumeOpen(true)}
+                onMouseLeave={() => setVolumeOpen(false)}
+              >
+                <IconButton
+                  label={muted ? "unmute" : "mute"}
+                  onClick={handleMuteToggle}
+                  onFocus={() => setVolumeOpen(true)}
+                  onBlur={() => setVolumeOpen(false)}
+                >
+                  {muted ? (
+                    <VolumeX className="h-4 w-4" />
+                  ) : (
+                    <Volume2 className="h-4 w-4" />
+                  )}
+                </IconButton>
+                {volumeOpen && (
+                  <div
+                    className="absolute right-0 bottom-full mb-2 flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/95 px-3 py-1.5 shadow-lg"
+                    onMouseEnter={() => setVolumeOpen(true)}
+                    onMouseLeave={() => setVolumeOpen(false)}
+                  >
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={youtubeVolume}
+                      onChange={(e) => setYoutubeVolume(Number(e.target.value))}
+                      aria-label="volume"
+                      className="amaso-mini-slider h-1 w-28 cursor-pointer appearance-none rounded-full bg-neutral-700 outline-none"
+                    />
+                    <span className="w-7 text-right font-mono text-[10px] tabular-nums text-neutral-400">
+                      {youtubeVolume}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+            <YoutubePiPButton />
+          </>
+        ) : (
+          <ActivityDot fillerNow={fillerNow} />
+        )}
+      </div>
+      <style jsx>{`
+        .amaso-mini-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 9999px;
+          background: rgb(229 229 229);
+          border: 0;
+          cursor: pointer;
+        }
+        .amaso-mini-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 9999px;
+          background: rgb(229 229 229);
+          border: 0;
+          cursor: pointer;
+        }
+      `}</style>
+    </div>
+  );
+}
 
 export default function SparMiniPlayer() {
   const {
@@ -172,6 +353,8 @@ export default function SparMiniPlayer() {
       if (setFooterHeight) setFooterHeight(0);
     };
   }, [footerMode, setFooterHeight, idleEmpty]);
+
+  if (footerMode) return null;
 
   if (idleEmpty) {
     if (footerMode) {
@@ -340,6 +523,7 @@ export default function SparMiniPlayer() {
                   )}
                 </div>
               )}
+              <YoutubePiPButton />
             </>
           ) : (
             <ActivityDot fillerNow={fillerNow} />
@@ -466,7 +650,7 @@ function ActivityDot({ fillerNow }: { fillerNow: FillerNow }) {
     // phone leg.
     const phaseColor =
       fillerNow.phase === "speaking"
-        ? "bg-emerald-400"
+        ? "bg-orange-400"
         : "bg-sky-300";
     const phaseText =
       fillerNow.phase === "speaking" ? "speaking" : "listening";
@@ -568,7 +752,7 @@ function artForFiller(fillerNow: Exclude<FillerNow, { kind: "youtube" }>): {
     case "news":
       return { icon: Newspaper, tint: "bg-amber-900/30 text-amber-200" };
     case "speaking":
-      return { icon: Radio, tint: "bg-emerald-900/30 text-emerald-200" };
+      return { icon: Radio, tint: "bg-orange-900/30 text-orange-200" };
     case "listening":
       return { icon: Mic, tint: "bg-rose-900/30 text-rose-200" };
     case "thinking":
@@ -583,7 +767,7 @@ function artForFiller(fillerNow: Exclude<FillerNow, { kind: "youtube" }>): {
         case "speaking":
           return {
             icon: Radio,
-            tint: "bg-emerald-900/30 text-emerald-200",
+            tint: "bg-orange-900/30 text-orange-200",
           };
         case "listening":
           return {

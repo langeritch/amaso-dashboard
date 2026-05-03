@@ -3,7 +3,9 @@ import { cookies } from "next/headers";
 import Script from "next/script";
 import ShareIngress from "../components/ShareIngress";
 import SparProvider from "../components/SparProvider";
+import { SparFooterProvider } from "../components/SparFooterContext";
 import SparMiniOverlay from "../components/SparMiniOverlay";
+import SparMiniPlayer from "../components/SparMiniPlayer";
 import DemoOverlay from "../components/DemoOverlay";
 import SplashScreen from "../components/SplashScreen";
 import UserTracker from "../components/UserTracker";
@@ -42,7 +44,7 @@ export const metadata: Metadata = {
 // stays behind the keyboard).
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: dark)", color: "#0b0d10" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0c" },
     { media: "(prefers-color-scheme: light)", color: "#fafafa" },
   ],
 };
@@ -206,9 +208,12 @@ export default async function RootLayout({
         <ShareIngress />
         {sparBoot ? (
           <SparProvider {...sparBoot}>
-            <UserTracker />
-            {children}
-            <SparMiniOverlay />
+            <SparFooterProvider>
+              <UserTracker />
+              {children}
+              <SparMiniOverlay />
+              <SparMiniPlayer />
+            </SparFooterProvider>
           </SparProvider>
         ) : (
           children

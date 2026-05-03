@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, KeyRound } from "lucide-react";
 
 type Role = "admin" | "team" | "client";
 interface UserRow {
@@ -111,6 +111,10 @@ export default function UsersAdmin({
                   <option value="team">team</option>
                   <option value="client">client</option>
                 </select>
+                <PasswordChange
+                  disabled={u.id === currentUserId}
+                  onSave={(password) => patch(u.id, { password })}
+                />
               </div>
               {u.role === "client" && (
                 <div className="mt-3">
@@ -132,7 +136,7 @@ export default function UsersAdmin({
                           }}
                           className={`rounded-full border px-2 py-0.5 text-xs transition ${
                             enabled
-                              ? "border-emerald-700 bg-emerald-900/30 text-emerald-300"
+                              ? "border-orange-700 bg-orange-900/30 text-orange-300"
                               : "border-neutral-800 text-neutral-500 hover:border-neutral-700"
                           }`}
                         >
@@ -274,7 +278,7 @@ function CreateUserForm({
                   }
                   className={`rounded-full border px-2 py-0.5 text-xs ${
                     enabled
-                      ? "border-emerald-700 bg-emerald-900/30 text-emerald-300"
+                      ? "border-orange-700 bg-orange-900/30 text-orange-300"
                       : "border-neutral-800 text-neutral-500 hover:border-neutral-700"
                   }`}
                 >
@@ -303,5 +307,100 @@ function CreateUserForm({
         </button>
       </div>
     </form>
+  );
+}
+
+function PasswordChange({
+  disabled,
+  onSave,
+}: {
+  disabled: boolean;
+  onSave: (password: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [justSaved, setJustSaved] = useState(false);
+
+  async function save() {
+    if (password.length < 8) {
+      setErr("Min 8 characters.");
+      return;
+    }
+    setErr(null);
+    setSaving(true);
+    try {
+      await onSave(password);
+      setPassword("");
+      setOpen(false);
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        disabled={disabled}
+        title={disabled ? "Can't change your own password here" : "Change password"}
+        className={`flex items-center gap-1 rounded border px-2 py-1 transition disabled:opacity-30 ${
+          justSaved
+            ? "border-orange-700 bg-orange-900/30 text-orange-300"
+            : "border-neutral-800 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
+        }`}
+      >
+        <KeyRound className="h-3 w-3" />
+        {justSaved ? "Updated" : "Change password"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <input
+        type="password"
+        autoFocus
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void save();
+          } else if (e.key === "Escape") {
+            setOpen(false);
+            setPassword("");
+            setErr(null);
+          }
+        }}
+        minLength={8}
+        placeholder="New password…"
+        className="rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs"
+      />
+      <button
+        type="button"
+        onClick={() => void save()}
+        disabled={saving || password.length < 8}
+        className="rounded bg-white px-2 py-1 text-xs font-medium text-black disabled:opacity-50"
+      >
+        {saving ? "Saving…" : "Save"}
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false);
+          setPassword("");
+          setErr(null);
+        }}
+        className="rounded border border-neutral-800 px-2 py-1 text-xs text-neutral-400 hover:border-neutral-700"
+      >
+        Cancel
+      </button>
+      {err && <span className="text-xs text-red-400">{err}</span>}
+    </div>
   );
 }

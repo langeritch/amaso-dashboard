@@ -188,14 +188,14 @@ function UserCard({
         onClick={onSelect}
         className={`block w-full rounded-lg border p-4 text-left transition ${
           selected
-            ? "border-emerald-700 bg-emerald-900/15"
+            ? "border-orange-700 bg-orange-900/15"
             : "border-neutral-800 bg-neutral-900/40 hover:border-neutral-700"
         }`}
       >
         <div className="flex items-start gap-3">
           <span className="relative mt-1 flex h-2 w-2 flex-shrink-0">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400/60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500" />
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline justify-between gap-2">

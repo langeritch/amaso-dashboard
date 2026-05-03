@@ -213,7 +213,7 @@ export default function RoadmapPanel({ projectId }: RoadmapPanelProps) {
         <div className="mt-4 flex items-center gap-3">
           <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
             <div
-              className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+              className="h-full rounded-full bg-orange-500 transition-[width] duration-300"
               style={{ width: `${progressPct}%` }}
             />
           </div>
@@ -274,12 +274,12 @@ export default function RoadmapPanel({ projectId }: RoadmapPanelProps) {
           onChange={(e) => setNewTopTitle(e.target.value)}
           placeholder="Add a step…"
           maxLength={500}
-          className="flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-emerald-700 focus:outline-none"
+          className="flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-orange-700 focus:outline-none"
         />
         <button
           type="submit"
           disabled={!newTopTitle.trim() || creating}
-          className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-500"
+          className="inline-flex items-center gap-1.5 rounded-md bg-orange-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-500"
         >
           <Plus className="h-4 w-4" />
           Add
@@ -327,7 +327,7 @@ function StepRow({
       <span
         className={`absolute -left-[27px] top-2 flex h-4 w-4 items-center justify-center rounded-full border ${
           step.done
-            ? "border-emerald-500 bg-emerald-500"
+            ? "border-orange-500 bg-orange-500"
             : "border-neutral-700 bg-neutral-950"
         }`}
         aria-hidden="true"
@@ -430,7 +430,7 @@ function StepHeader({
         onClick={() => onToggle(step)}
         className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition ${
           step.done
-            ? "border-emerald-500 bg-emerald-500"
+            ? "border-orange-500 bg-orange-500"
             : "border-neutral-600 bg-neutral-950 hover:border-neutral-400"
         }`}
         aria-label={step.done ? "Mark as not done" : "Mark as done"}
@@ -464,7 +464,7 @@ function StepHeader({
               }
             }}
             maxLength={500}
-            className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-0.5 text-sm text-neutral-100 focus:border-emerald-700 focus:outline-none"
+            className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-0.5 text-sm text-neutral-100 focus:border-orange-700 focus:outline-none"
           />
         </form>
       ) : (
@@ -526,12 +526,12 @@ function SubStepComposer({
         }}
         placeholder="Sub-step…"
         maxLength={500}
-        className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-emerald-700 focus:outline-none"
+        className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-orange-700 focus:outline-none"
       />
       <button
         type="submit"
         disabled={!value.trim()}
-        className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-500"
+        className="rounded bg-orange-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-500"
       >
         <Check className="h-3.5 w-3.5" />
       </button>

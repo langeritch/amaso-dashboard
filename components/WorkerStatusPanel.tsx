@@ -492,7 +492,7 @@ function WorkerRow({
           disabled={spawning}
           aria-label={`Spawn another session for ${w.name}`}
           title="Spawn another session for this project"
-          className="amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40"
+          className="amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-orange-900/30 hover:text-orange-300 disabled:opacity-40"
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
@@ -596,7 +596,7 @@ function formatUptime(ms: number): string {
 }
 
 interface Visual {
-  tone: "amber" | "rose" | "emerald" | "neutral" | "sky" | "orange";
+  tone: "amber" | "rose" | "lime" | "neutral" | "sky" | "orange";
   pulsing: boolean;
   label: string;
   labelClass: string;
@@ -638,18 +638,18 @@ function stateVisual(w: WorkerStatus): Visual {
     // a fresh idle prompt.
     if (COMPLETION_RX.test(w.lastLine)) {
       return {
-        tone: "emerald",
+        tone: "lime",
         pulsing: false,
         label: "done",
-        labelClass: "text-emerald-400/80",
+        labelClass: "text-lime-400",
         idleHint: "Last task completed — ready for the next.",
       };
     }
     return {
-      tone: "emerald",
+      tone: "lime",
       pulsing: false,
       label: "ready",
-      labelClass: "text-emerald-400/80",
+      labelClass: "text-lime-400",
       idleHint: "Idle at prompt — ready for the next task.",
     };
   }
@@ -678,24 +678,24 @@ function StatusDot({
       ? "bg-amber-400"
       : tone === "rose"
         ? "bg-rose-400"
-        : tone === "emerald"
-          ? "bg-emerald-500"
+        : tone === "lime"
+          ? "bg-lime-400"
           : tone === "sky"
             ? "bg-sky-400"
             : tone === "orange"
-              ? "bg-orange-400"
+              ? "bg-orange-500"
               : "bg-neutral-700";
   const halo =
     tone === "amber"
       ? "bg-amber-400/60"
       : tone === "rose"
         ? "bg-rose-400/60"
-        : tone === "emerald"
-          ? "bg-emerald-500/60"
+        : tone === "lime"
+          ? "bg-lime-400/60"
           : tone === "sky"
             ? "bg-sky-400/60"
             : tone === "orange"
-              ? "bg-orange-400/60"
+              ? "bg-orange-500/60"
               : "bg-neutral-700/60";
   return (
     <span className="relative flex h-2 w-2 flex-shrink-0" aria-hidden>

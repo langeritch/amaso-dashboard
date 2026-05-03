@@ -81,7 +81,7 @@ export default function SparAudioVisualizer({
 
       idleSeed += 1;
 
-      // Autopilot aura — emerald shadow painted directly on each bar
+      // Autopilot aura — orange shadow painted directly on each bar
       // stroke, so the glow hugs the ring of bars instead of filling the
       // hollow center. Breathes on a slow sine and swells with audio.
       if (f.autopilot) {

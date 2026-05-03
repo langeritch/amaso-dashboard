@@ -98,7 +98,7 @@ function TreeItem({
     } else if (untrackedPaths?.has(node.path)) {
       badge = {
         label: "U",
-        className: "bg-emerald-900/60 text-emerald-200 border-emerald-700/70",
+        className: "bg-orange-900/60 text-orange-200 border-orange-700/70",
         title: "New file — not yet tracked by git",
       };
     }
@@ -122,7 +122,7 @@ function TreeItem({
           style={padding}
           className={`group flex w-full items-center gap-1 rounded py-1.5 sm:py-0.5 ${
             isSelected
-              ? "bg-emerald-900/30 text-emerald-100 ring-1 ring-emerald-700/50"
+              ? "bg-orange-900/30 text-orange-100 ring-1 ring-orange-700/50"
               : "text-neutral-300 hover:bg-neutral-800/50"
           }`}
         >
@@ -184,7 +184,7 @@ function TreeItem({
         style={padding}
         className={`group flex w-full items-center gap-1 rounded py-0.5 ${
           isSelected
-            ? "bg-emerald-900/30 text-emerald-100 ring-1 ring-emerald-700/50"
+            ? "bg-orange-900/30 text-orange-100 ring-1 ring-orange-700/50"
             : "text-neutral-300 hover:bg-neutral-800/50"
         }`}
       >
@@ -221,7 +221,7 @@ function TargetBtn({
       title={active ? "Currently targeted" : "Use as remark target"}
       className={`mr-1 flex-shrink-0 rounded p-0.5 transition ${
         active
-          ? "text-emerald-300"
+          ? "text-orange-300"
           : "text-neutral-600 opacity-0 hover:bg-neutral-700 hover:text-neutral-200 group-hover:opacity-100"
       }`}
     >

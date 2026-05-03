@@ -374,7 +374,7 @@ function Toolbar({
             active={mode === "live"}
             onClick={() => onModeChange("live")}
             disabled={!liveUrl}
-            tone="emerald"
+            tone="lime"
           >
             Live
           </ModeBtn>
@@ -437,12 +437,12 @@ function Toolbar({
                 ? `flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
                     inspectorArmed
                       ? "border-amber-500 bg-amber-500 text-black"
-                      : "border-emerald-700/50 bg-emerald-900/20 text-emerald-200 hover:border-emerald-600"
+                      : "border-orange-700/50 bg-orange-900/20 text-orange-200 hover:border-orange-600"
                   }`
                 : `flex items-center gap-1 rounded-full px-3 py-1 text-[11px] ${
                     inspectorArmed
                       ? "bg-amber-500 font-medium text-black"
-                      : "bg-emerald-900/80 text-emerald-200"
+                      : "bg-orange-900/80 text-orange-200"
                   }`
             }
           >
@@ -526,13 +526,13 @@ function ModeBtn({
   active: boolean;
   onClick: () => void;
   disabled?: boolean;
-  tone: "sky" | "emerald";
+  tone: "sky" | "lime";
   children: React.ReactNode;
 }) {
   const activeStyle =
     tone === "sky"
       ? "bg-sky-900/50 text-sky-200"
-      : "bg-emerald-900/50 text-emerald-200";
+      : "bg-lime-500/15 text-lime-300 ring-1 ring-lime-400/30";
   return (
     <button
       type="button"
@@ -563,7 +563,7 @@ function DevPill({
   let dot = "bg-neutral-500";
   if (state === "ready" || reachable) {
     label = `dev :${port}`;
-    dot = "bg-emerald-500";
+    dot = "bg-orange-500";
   } else if (state === "starting") {
     label = "starting…";
     dot = "bg-amber-500";

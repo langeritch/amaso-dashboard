@@ -43,13 +43,20 @@ import {
 
 // ---------- API shapes -------------------------------------------------------
 
-type NodeKind = "project" | "person" | "tech" | "blocker" | "decision";
+type NodeKind =
+  | "project"
+  | "person"
+  | "tech"
+  | "blocker"
+  | "decision"
+  | "milestone";
 const NODE_KINDS: NodeKind[] = [
   "project",
   "person",
   "tech",
   "blocker",
   "decision",
+  "milestone",
 ];
 
 type GraphNode = {
@@ -96,7 +103,8 @@ const LAYER_Y: Record<NodeKind, number> = {
   decision: 110,
   project: 220,
   blocker: 330,
-  tech: 440,
+  milestone: 440,
+  tech: 550,
 };
 const H_SPACING = 220;
 
@@ -207,11 +215,11 @@ function ProjectNode({ data }: { data: NodeData }) {
 function PersonNode({ data }: { data: NodeData }) {
   return (
     <>
-      <Handle type="target" position={Position.Top} className={`!bg-emerald-500 ${HANDLE_CLS}`} />
-      <div className="flex h-24 w-24 items-center justify-center rounded-full border-2 border-emerald-500/80 bg-neutral-900 text-center text-sm font-medium text-neutral-100 shadow">
+      <Handle type="target" position={Position.Top} className={`!bg-orange-500 ${HANDLE_CLS}`} />
+      <div className="flex h-24 w-24 items-center justify-center rounded-full border-2 border-orange-500/80 bg-neutral-900 text-center text-sm font-medium text-neutral-100 shadow">
         {data.label}
       </div>
-      <Handle type="source" position={Position.Bottom} className={`!bg-emerald-500 ${HANDLE_CLS}`} />
+      <Handle type="source" position={Position.Bottom} className={`!bg-orange-500 ${HANDLE_CLS}`} />
     </>
   );
 }
@@ -264,12 +272,28 @@ function DecisionNode({ data }: { data: NodeData }) {
   );
 }
 
+function MilestoneNode({ data }: { data: NodeData }) {
+  return (
+    <>
+      <Handle type="target" position={Position.Top} className={`!bg-cyan-500 ${HANDLE_CLS}`} />
+      <div className="min-w-[160px] rounded-md border-2 border-cyan-500/80 bg-neutral-900 px-3 py-2 text-center shadow">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300/80">
+          Milestone{data.status ? ` · ${data.status}` : ""}
+        </div>
+        <div className="mt-0.5 text-sm text-neutral-100">{data.label}</div>
+      </div>
+      <Handle type="source" position={Position.Bottom} className={`!bg-cyan-500 ${HANDLE_CLS}`} />
+    </>
+  );
+}
+
 const NODE_TYPES: NodeTypes = {
   project: ProjectNode,
   person: PersonNode,
   tech: TechNode,
   blocker: BlockerNode,
   decision: DecisionNode,
+  milestone: MilestoneNode,
 };
 
 // ---------- Custom edge with hover-to-delete --------------------------------
@@ -333,10 +357,11 @@ const EDGE_TYPES: EdgeTypes = { editable: EditableEdge };
 
 const ACCENT: Record<NodeKind, { bar: string; text: string; border: string }> = {
   project: { bar: "bg-indigo-500", text: "text-indigo-300", border: "border-indigo-500/60" },
-  person: { bar: "bg-emerald-500", text: "text-emerald-300", border: "border-emerald-500/60" },
+  person: { bar: "bg-orange-500", text: "text-orange-300", border: "border-orange-500/60" },
   tech: { bar: "bg-amber-500", text: "text-amber-300", border: "border-amber-500/60" },
   blocker: { bar: "bg-red-500", text: "text-red-300", border: "border-red-500/60" },
   decision: { bar: "bg-violet-500", text: "text-violet-300", border: "border-violet-500/60" },
+  milestone: { bar: "bg-cyan-500", text: "text-cyan-300", border: "border-cyan-500/60" },
 };
 
 export default function BrainGraph() {
@@ -371,21 +396,51 @@ export default function BrainGraph() {
     deleteEdgeRef.current = deleteEdge;
   }, [deleteEdge]);
 
+  // Pulls the latest graph from /api/graph and rebuilds the canvas.
+  // Used by the initial load AND by the live-refresh WebSocket subscription
+  // below — sharing one path keeps the post-update state identical to the
+  // first-load state (deterministic layout, same edge handler wiring).
+  //
+  // `mergePositions` keeps existing node positions when refetching so a
+  // live update doesn't snap the canvas back to the deterministic layout
+  // mid-interaction. New nodes still flow through `layout()`.
+  const reloadGraph = useCallback(
+    async (mergePositions: boolean): Promise<void> => {
+      const res = await fetch("/api/graph", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as GraphPayload;
+      const laid = layout(data.nodes);
+      if (mergePositions) {
+        const prevById = new Map(
+          nodesRef.current.map((n) => [n.id, n.position] as const),
+        );
+        for (const n of laid) {
+          const p = prevById.get(n.id);
+          if (p) n.position = p;
+        }
+      }
+      setNodes(laid);
+      setEdges(
+        data.edges.map((e) =>
+          toRfEdge(e, (id) => deleteEdgeRef.current(id)),
+        ),
+      );
+    },
+    [setNodes, setEdges],
+  );
+
+  const reloadGraphRef = useRef(reloadGraph);
+  useEffect(() => {
+    reloadGraphRef.current = reloadGraph;
+  }, [reloadGraph]);
+
   // Initial load.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch("/api/graph", { cache: "no-store" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as GraphPayload;
+        await reloadGraph(false);
         if (cancelled) return;
-        setNodes(layout(data.nodes));
-        setEdges(
-          data.edges.map((e) =>
-            toRfEdge(e, (id) => deleteEdgeRef.current(id)),
-          ),
-        );
         setStatus("ready");
       } catch (e) {
         if (cancelled) return;
@@ -396,7 +451,75 @@ export default function BrainGraph() {
     return () => {
       cancelled = true;
     };
-  }, [setNodes, setEdges]);
+    // reloadGraph is stable across renders (refs only), so we deliberately
+    // run this once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live refresh: subscribe to the dashboard sync bus and refetch the
+  // graph whenever something pushes a `graph:changed` event. The spar
+  // tool's write_graph is the primary producer (lib/spar-graph.ts mirrors
+  // its JSON write into SQLite and fires the broadcast) but any future
+  // server-side mutation that calls broadcastGraphChanged() will be
+  // picked up the same way.
+  //
+  // Pattern matches ProjectsLiveRefresh (3s reconnect, ignore unparsable
+  // frames). A trailing 250 ms debounce coalesces bursts of writes —
+  // cheap on the brain side and avoids re-laying-out the canvas N times
+  // when a single spar turn fires multiple write_graphs.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    let ws: WebSocket | null = null;
+    let closed = false;
+    let reconnectTimer: number | null = null;
+    let debounceTimer: number | null = null;
+
+    function connect() {
+      if (closed) return;
+      try {
+        ws = new WebSocket(`${proto}//${window.location.host}/api/sync`);
+      } catch {
+        reconnectTimer = window.setTimeout(connect, 3000);
+        return;
+      }
+      ws.addEventListener("message", (e) => {
+        let msg: { type?: string };
+        try {
+          msg = JSON.parse(typeof e.data === "string" ? e.data : "");
+        } catch {
+          return;
+        }
+        if (msg.type !== "graph:changed") return;
+        if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => {
+          debounceTimer = null;
+          void reloadGraphRef.current(true).catch((err) => {
+            console.warn("[brain] live refresh failed:", err);
+          });
+        }, 250);
+      });
+      ws.addEventListener("close", () => {
+        if (closed) return;
+        reconnectTimer = window.setTimeout(connect, 3000);
+      });
+      ws.addEventListener("error", () => {
+        // close fires after error — let the close handler reconnect.
+      });
+    }
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+      try {
+        ws?.close();
+      } catch {
+        /* already closed */
+      }
+    };
+  }, []);
 
   // ---- Selection + detail fetch
   const onNodeClick = useCallback(
@@ -610,10 +733,11 @@ export default function BrainGraph() {
             nodeColor={(n) => {
               const kind = (n.data as NodeData | undefined)?.kind;
               if (kind === "project") return "#6366f1";
-              if (kind === "person") return "#10b981";
+              if (kind === "person") return "#ff6b3d";
               if (kind === "tech") return "#f59e0b";
               if (kind === "blocker") return "#ef4444";
               if (kind === "decision") return "#8b5cf6";
+              if (kind === "milestone") return "#06b6d4";
               return "#525252";
             }}
             maskColor="rgba(10, 10, 10, 0.7)"

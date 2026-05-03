@@ -155,7 +155,7 @@ export default function PushToggle({
         className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200 disabled:opacity-50 sm:min-h-0 sm:min-w-0 sm:px-2 sm:py-1"
       >
         {status === "on" ? (
-          <Bell className="h-4 w-4 text-emerald-400 sm:h-3.5 sm:w-3.5" />
+          <Bell className="h-4 w-4 text-orange-400 sm:h-3.5 sm:w-3.5" />
         ) : (
           <BellOff className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
         )}
@@ -174,7 +174,7 @@ export default function PushToggle({
       className="flex min-h-[48px] w-full items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900 disabled:opacity-60"
     >
       {on ? (
-        <Bell className="h-5 w-5 text-emerald-400" />
+        <Bell className="h-5 w-5 text-orange-400" />
       ) : (
         <BellOff className="h-5 w-5" />
       )}

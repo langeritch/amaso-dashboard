@@ -11,7 +11,6 @@ import {
   Radio,
   Sparkles,
   StickyNote,
-  Wind,
   Zap,
 } from "lucide-react";
 import { useSparOptional, type FillerNow } from "./SparContext";
@@ -96,7 +95,7 @@ export default function BrainSparringPanel({ projects, openRemarks }: Props) {
               {recentDispatches.map((d) => {
                 const tone =
                   d.status === "sent"
-                    ? "border-emerald-500/40 bg-emerald-950/20"
+                    ? "border-orange-500/40 bg-orange-950/20"
                     : "border-red-500/40 bg-red-950/20";
                 return (
                   <li
@@ -137,7 +136,7 @@ export default function BrainSparringPanel({ projects, openRemarks }: Props) {
                 key={m.id}
                 className={`rounded-xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
                   m.role === "user"
-                    ? "bg-emerald-700/20 text-emerald-50"
+                    ? "bg-orange-700/20 text-orange-50"
                     : "bg-neutral-800/60 text-neutral-100"
                 }`}
               >
@@ -220,8 +219,8 @@ function StatusCard({
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-neutral-400">
         {inCall ? (
           <>
-            <Phone className="h-3 w-3 text-emerald-400" />
-            <span className="text-emerald-300">in call · {callTimeLabel}</span>
+            <Phone className="h-3 w-3 text-orange-400" />
+            <span className="text-orange-300">in call · {callTimeLabel}</span>
           </>
         ) : (
           <>
@@ -230,7 +229,7 @@ function StatusCard({
           </>
         )}
         {autopilot && (
-          <span className="ml-auto inline-flex items-center gap-1 rounded-full border border-emerald-400/60 bg-emerald-500/15 px-2 py-0.5 text-emerald-200">
+          <span className="ml-auto inline-flex items-center gap-1 rounded-full border border-orange-400/60 bg-orange-500/15 px-2 py-0.5 text-orange-200">
             <Zap className="h-3 w-3" />
             autopilot
           </span>
@@ -314,17 +313,10 @@ function describeFiller(fn: FillerNow): {
         label: "Reading the news",
         sub: "filler · news clip",
       };
-    case "hum":
-      return {
-        icon: Wind,
-        tint: "bg-sky-900/30 text-sky-200",
-        label: "Windchime hum",
-        sub: "filler · ambient",
-      };
     case "speaking":
       return {
         icon: Radio,
-        tint: "bg-emerald-900/30 text-emerald-200",
+        tint: "bg-orange-900/30 text-orange-200",
         label: "Sparring partner speaking",
         sub: "tts · live",
       };
@@ -354,7 +346,7 @@ function describeFiller(fn: FillerNow): {
         case "speaking":
           return {
             icon: Radio,
-            tint: "bg-emerald-900/30 text-emerald-200",
+            tint: "bg-orange-900/30 text-orange-200",
             label: "Telegram · speaking",
             sub: "phone · assistant talking",
           };

@@ -93,7 +93,7 @@ export default function DeployButton({
         }
         className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
           actionable
-            ? "bg-emerald-500 text-black hover:bg-emerald-400"
+            ? "bg-orange-500 text-black hover:bg-orange-400"
             : "cursor-not-allowed bg-neutral-800 text-neutral-500"
         }`}
       >
@@ -128,7 +128,7 @@ export default function DeployButton({
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="flex items-center gap-1.5 text-base font-medium">
-                  <Rocket className="h-4 w-4 text-emerald-400" /> Push to live
+                  <Rocket className="h-4 w-4 text-orange-400" /> Push to live
                 </h2>
                 <p className="mt-1 text-xs text-neutral-500">
                   Commits all changes and pushes to{" "}
@@ -162,7 +162,7 @@ export default function DeployButton({
               </div>
               <div className="mt-2 grid grid-cols-3 gap-2 text-center">
                 <Stat label="modified" n={status.modified.length} />
-                <Stat label="new" n={status.untracked.length} tone="emerald" />
+                <Stat label="new" n={status.untracked.length} tone="lime" />
                 <Stat label="to push" n={status.ahead} tone="sky" />
               </div>
               {status.conflicts.length > 0 && (
@@ -189,7 +189,7 @@ export default function DeployButton({
             )}
 
             {error && <p className="text-sm text-red-400">{error}</p>}
-            {result && <p className="text-sm text-emerald-400">{result}</p>}
+            {result && <p className="text-sm text-orange-400">{result}</p>}
 
             <div className="flex justify-end gap-2">
               <button
@@ -203,7 +203,7 @@ export default function DeployButton({
               <button
                 type="submit"
                 disabled={pending || status.conflicts.length > 0}
-                className="flex items-center gap-1.5 rounded bg-emerald-500 px-4 py-1.5 text-sm font-medium text-black hover:bg-emerald-400 disabled:opacity-50"
+                className="flex items-center gap-1.5 rounded bg-orange-500 px-4 py-1.5 text-sm font-medium text-black hover:bg-orange-400 disabled:opacity-50"
               >
                 {pending ? (
                   <>
@@ -230,16 +230,16 @@ function Stat({
 }: {
   label: string;
   n: number;
-  tone?: "amber" | "emerald" | "sky";
+  tone?: "amber" | "lime" | "sky";
 }) {
   const style =
     tone === "amber"
       ? n > 0
         ? "text-amber-300"
         : "text-neutral-500"
-      : tone === "emerald"
+      : tone === "lime"
         ? n > 0
-          ? "text-emerald-300"
+          ? "text-lime-400"
           : "text-neutral-500"
         : n > 0
           ? "text-sky-300"

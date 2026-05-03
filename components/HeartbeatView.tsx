@@ -292,8 +292,8 @@ export function CurrentHeartbeat({ sections }: { sections: Section[] }) {
     <section className="rounded-xl border border-neutral-800/80 bg-neutral-950 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.2)] sm:p-5">
       <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
         <span className="relative flex h-2 w-2">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.55)]" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500 shadow-[0_0_6px_rgba(255, 107, 61,0.55)]" />
         </span>
         Live
       </div>
@@ -499,7 +499,7 @@ export function StatusBadge({
   if (status === "ok") {
     return (
       <span
-        className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-400"
+        className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-orange-500/10 text-orange-400"
         title="No signal"
       >
         <CheckCircle2 className="h-4 w-4" />

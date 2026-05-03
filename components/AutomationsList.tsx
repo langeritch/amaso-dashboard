@@ -17,8 +17,6 @@ export default function AutomationsList({
   const [editing, setEditing] = useState<AutomationWithStats | null>(null);
   const [adding, setAdding] = useState(false);
 
-  // Self-fetch — the launcher now lives inside BrowserViewer (a client
-  // component) where there's no server-fetched initial payload.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -94,7 +92,7 @@ export default function AutomationsList({
               <button
                 type="button"
                 onClick={() => run(a)}
-                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 transition hover:border-emerald-400 hover:bg-emerald-500/20"
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border border-orange-500/40 bg-orange-500/10 text-orange-300 transition hover:border-orange-400 hover:bg-orange-500/20"
                 aria-label={`Run ${a.name}`}
                 title={`Run ${a.name}`}
               >

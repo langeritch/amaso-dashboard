@@ -57,7 +57,7 @@ export default function SplashScreen() {
               cx="256"
               cy="440"
               r="14"
-              fill="#10b981"
+              fill="#ff6b3d"
             />
           </svg>
           <div className="amaso-splash__shine" />
