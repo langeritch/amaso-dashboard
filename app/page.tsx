@@ -1,4 +1,3 @@
-import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/guard";
 import { listChannelsForUser } from "@/lib/chat";
 import { visibleProjects } from "@/lib/access";
@@ -8,9 +7,8 @@ import ChatClient from "@/components/ChatClient";
 export const dynamic = "force-dynamic";
 
 export default async function ChatPage() {
+  // requireUser handles client → /client redirect.
   const user = await requireUser();
-  // Clients have a dedicated portal — never the internal chat dashboard.
-  if (user.role === "client") redirect("/client");
   const channels = listChannelsForUser(user);
   const projects = visibleProjects(user).map((p) => ({ id: p.id, name: p.name }));
   const initialChannelId =

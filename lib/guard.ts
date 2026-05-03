@@ -7,11 +7,30 @@ import { isSuperUser } from "./heartbeat";
 /**
  * Server-component helper. Sends the visitor to /setup if no users exist yet,
  * to /login if they're not signed in, or returns the current user.
+ *
+ * Internal-dashboard pages should call this. Clients are routed away to the
+ * dedicated /client portal — they should never see Spar, Projects, Brain,
+ * Heartbeat, Activity, Remarks, Settings, etc. Use `requireClient()` from
+ * inside /client routes instead.
  */
 export async function requireUser(): Promise<User> {
   if (userCount() === 0) redirect("/setup");
   const user = await getCurrentUser();
   if (!user) redirect("/login");
+  if (user.role === "client") redirect("/client");
+  return user;
+}
+
+/**
+ * Server-component helper for the /client portal. Redirects unauthenticated
+ * visitors to /login and admin/team users back to the internal dashboard
+ * home (the portal is a client-only surface).
+ */
+export async function requireClient(): Promise<User> {
+  if (userCount() === 0) redirect("/setup");
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  if (user.role !== "client") redirect("/");
   return user;
 }
 

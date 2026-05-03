@@ -81,14 +81,18 @@ export default function UsersAdmin({
           {users.map((u) => (
             <li key={u.id} className="p-4">
               <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{u.name}</span>
-                    <span className="rounded-full border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
-                      {u.role}
-                    </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-neutral-100">{u.name}</span>
+                    <RoleBadge role={u.role} />
+                    {u.role === "client" && u.projects.length > 0 && (
+                      <span className="text-[11px] text-neutral-500">
+                        · {u.projects.length} project
+                        {u.projects.length === 1 ? "" : "s"}
+                      </span>
+                    )}
                   </div>
-                  <p className="text-xs text-neutral-500">{u.email}</p>
+                  <p className="mt-0.5 text-xs text-neutral-500">{u.email}</p>
                 </div>
                 <button
                   type="button"
@@ -157,6 +161,30 @@ export default function UsersAdmin({
         </ul>
       )}
     </div>
+  );
+}
+
+function RoleBadge({ role }: { role: Role }) {
+  // Distinct color per role so admins / team / clients are scannable at
+  // a glance instead of squinting at small grey text.
+  if (role === "admin") {
+    return (
+      <span className="inline-flex items-center rounded-full border border-orange-500/40 bg-orange-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-orange-200">
+        Admin
+      </span>
+    );
+  }
+  if (role === "team") {
+    return (
+      <span className="inline-flex items-center rounded-full border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-sky-200">
+        Team
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center rounded-full border border-lime-400/40 bg-lime-400/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-lime-200">
+      Client
+    </span>
   );
 }
 
