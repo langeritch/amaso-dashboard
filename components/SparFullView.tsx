@@ -407,6 +407,32 @@ function SlashCommandDropdown({
   );
 }
 
+/** Friendly cluster-divider timestamp. Today: "12:34"; yesterday or
+ *  earlier this week: "Mon · 12:34"; older: "Mar 14 · 12:34". Used by
+ *  the chat surface to anchor message clusters without spamming a
+ *  timestamp under every bubble. */
+function formatClusterTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const time = d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return time;
+  const dayMs = 24 * 60 * 60_000;
+  const ageDays = (now.getTime() - ts) / dayMs;
+  if (ageDays < 7) {
+    const day = d.toLocaleDateString(undefined, { weekday: "short" });
+    return `${day} · ${time}`;
+  }
+  const md = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${md} · ${time}`;
+}
+
 function ThinkingTimer({ startedAt }: { startedAt: number }) {
   const [elapsed, setElapsed] = useState(
     Math.round((Date.now() - startedAt) / 1000),
@@ -550,6 +576,15 @@ export default function SparFullView() {
   const bottomReserve = (unifiedFooterHeight || 120) + 4;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Scroll container for the text-mode message list. We track whether
+  // the user is "stuck to bottom" (within ~80px of the floor) so new
+  // messages auto-scroll only when they're already at the latest —
+  // scrolling up to read history shouldn't yank you back. When you
+  // *aren't* stuck and a new message arrives, a "scroll to bottom"
+  // pill appears above the composer.
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const [stuckToBottom, setStuckToBottom] = useState(true);
+  const [hasNewBelow, setHasNewBelow] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const dragCountRef = useRef(0);
   // Tracks whether the speaker toggle (not the user's own mini-player
@@ -575,17 +610,54 @@ export default function SparFullView() {
           ? "bg-rose-300"
           : "bg-sky-300";
 
-  // Auto-scroll the active chat surface to the latest message. The
-  // shared messagesEndRef is rendered inside the text-mode chat list
-  // (and inside the transcript drawer when it's open). On mode changes
-  // we also nudge it so switching from voice → text lands at the
-  // bottom of the conversation.
+  // Auto-scroll behaviour, position-aware. We only smooth-scroll to
+  // the latest message when the user is already pinned to the bottom;
+  // if they've scrolled up to read older context, new messages don't
+  // yank them back — instead the "↓ new messages" pill (rendered
+  // above the composer) lights up so they can opt in.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, messagesEndRef]);
+    if (mode !== "text") return;
+    if (stuckToBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setHasNewBelow(false);
+    } else {
+      setHasNewBelow(true);
+    }
+    // We deliberately don't depend on `stuckToBottom` here — the
+    // intent is "react to new messages", not "react when the user
+    // scrolls". The current value is read via closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, messagesEndRef, mode]);
   useEffect(() => {
+    // Mode swap (voice → text or back) always lands at the floor.
     messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    setStuckToBottom(true);
+    setHasNewBelow(false);
   }, [mode, messagesEndRef]);
+
+  // Keep `stuckToBottom` in sync with actual scroll position. Threshold
+  // is a forgiving 80px so a half-line of overscroll (or a momentum
+  // wobble on iOS) still counts as "at the bottom".
+  useEffect(() => {
+    if (mode !== "text") return;
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      const atBottom = distanceFromBottom < 80;
+      setStuckToBottom(atBottom);
+      if (atBottom) setHasNewBelow(false);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [mode]);
+
+  const scrollToLatest = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    setHasNewBelow(false);
+  }, [messagesEndRef]);
 
   // Auto-grow the text-mode composer up to a cap so multi-line drafts
   // don't get cut off but can't push the input past ~6 lines either.
@@ -1046,18 +1118,33 @@ export default function SparFullView() {
               clear
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div
+            ref={messagesScrollRef}
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
             <ul className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-6">
               {messages.length === 0 && (
-                <li className="mt-12 text-center text-sm text-neutral-500">
-                  type below to chat — or hit{" "}
-                  <span className="rounded border border-neutral-800 px-1.5 py-0.5 font-mono text-[11px]">
-                    voice
-                  </span>{" "}
-                  to call.
+                <li className="amaso-fade-in-slow mt-8 flex flex-col items-center px-6 py-12 text-center">
+                  <span
+                    aria-hidden
+                    className="relative mb-5 inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-orange-500/30 bg-orange-500/5"
+                  >
+                    <span className="absolute inset-0 rounded-2xl bg-gradient-to-br from-orange-500/15 to-transparent" />
+                    <span className="relative inline-block h-2.5 w-2.5 rounded-full bg-orange-500 shadow-[0_0_12px_rgba(255,107,61,0.7)]" />
+                  </span>
+                  <h2 className="text-lg font-semibold tracking-tight text-neutral-100">
+                    What&rsquo;s on your mind?
+                  </h2>
+                  <p className="mt-2 max-w-xs text-sm leading-relaxed text-neutral-500">
+                    Type below to chat with your sparring partner — or hit{" "}
+                    <span className="rounded-md border border-neutral-800 bg-neutral-900/70 px-1.5 py-0.5 font-mono text-[11px] text-neutral-400">
+                      voice
+                    </span>{" "}
+                    to call.
+                  </p>
                 </li>
               )}
-              {messages.map((m) => {
+              {messages.flatMap((m, idx) => {
                 const dur =
                   m.role === "assistant" && m.startedAt && m.completedAt
                     ? Math.round((m.completedAt - m.startedAt) / 1000)
@@ -1067,6 +1154,19 @@ export default function SparFullView() {
                   m.startedAt &&
                   !m.completedAt &&
                   busy;
+                // Group messages into time clusters: render an inline
+                // timestamp divider above the first message of each
+                // cluster (and on first message). Cluster boundary =
+                // ≥5min gap between consecutive messages.
+                const prev = idx > 0 ? messages[idx - 1] : null;
+                const ts = m.startedAt ?? m.completedAt ?? null;
+                const prevTs = prev?.startedAt ?? prev?.completedAt ?? null;
+                const showTimestamp =
+                  ts !== null &&
+                  (prev === null ||
+                    prevTs === null ||
+                    ts - prevTs > 5 * 60_000);
+                const tsLabel = showTimestamp ? formatClusterTime(ts!) : null;
                 const steps =
                   m.role === "assistant" && m.steps?.length ? m.steps : null;
                 const sources =
@@ -1079,20 +1179,21 @@ export default function SparFullView() {
                 // chronological grouping intact (steps belong to
                 // *this* assistant turn) while letting them break out
                 // of the bubble's max-w-[85%] constraint visually.
+                let bubble: React.ReactElement;
                 if (m.role === "assistant" && steps) {
                   // While steps are running and no visible text has
                   // arrived yet, suppress the empty "…" bubble so the
                   // tool cards are the focus. Once any text streams in
                   // (or the turn completes), the bubble appears below.
                   const hasText = m.content && m.content.length > 0;
-                  return (
+                  bubble = (
                     <li
                       key={m.id}
-                      className="flex max-w-[85%] flex-col self-start"
+                      className="amaso-fade-in flex max-w-[85%] flex-col self-start"
                     >
                       <ToolStepList steps={steps} />
                       {(hasText || !isThinking) && (
-                        <div className="rounded-2xl rounded-tl-md bg-neutral-800/70 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-neutral-100 ring-1 ring-white/[0.04] shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
+                        <div className="rounded-2xl rounded-tl-md bg-neutral-800/70 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-neutral-100 ring-1 ring-white/[0.04] shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-colors duration-150 active:bg-neutral-700/80">
                           {m.content || (busy ? "…" : "")}
                           {dur !== null && (
                             <span className="mt-1 block text-[10px] text-neutral-500">
@@ -1109,17 +1210,16 @@ export default function SparFullView() {
                       ) : null}
                     </li>
                   );
-                }
-                // Auto-report bubbles render as user messages with a small
-                // badge above them so the operator can tell at a glance
-                // that the system kicked the turn off (a dispatched
-                // terminal went idle), not them. Otherwise visually
-                // identical to a typed user message.
-                if (m.role === "user" && m.isAutoReport) {
-                  return (
+                } else if (m.role === "user" && m.isAutoReport) {
+                  // Auto-report bubbles render as user messages with a
+                  // small badge above them so the operator can tell at
+                  // a glance that the system kicked the turn off (a
+                  // dispatched terminal went idle), not them. Otherwise
+                  // visually identical to a typed user message.
+                  bubble = (
                     <li
                       key={m.id}
-                      className="flex max-w-[85%] flex-col items-end gap-1 self-end"
+                      className="amaso-fade-in flex max-w-[85%] flex-col items-end gap-1 self-end"
                     >
                       <span
                         className="rounded-full border border-orange-700/60 bg-orange-900/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-orange-300"
@@ -1127,7 +1227,7 @@ export default function SparFullView() {
                       >
                         Auto-report
                       </span>
-                      <div className="rounded-2xl rounded-tr-md bg-orange-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-orange-50 ring-1 ring-orange-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
+                      <div className="rounded-2xl rounded-tr-md bg-orange-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-orange-50 ring-1 ring-orange-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-colors duration-150 active:bg-orange-600/40">
                         {m.content || ""}
                         {m.attachments?.length ? (
                           <InlineAttachments attachments={m.attachments} />
@@ -1135,44 +1235,58 @@ export default function SparFullView() {
                       </div>
                     </li>
                   );
-                }
-                return (
-                  <li
-                    key={m.id}
-                    className={
-                      m.role === "user"
-                        ? "max-w-[85%] self-end rounded-2xl rounded-tr-md bg-orange-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-orange-50 ring-1 ring-orange-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
-                        : "flex max-w-[85%] flex-col self-start"
-                    }
-                  >
-                    {m.role === "assistant" ? (
-                      <>
-                        <div className="rounded-2xl rounded-tl-md bg-neutral-800/70 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-neutral-100 ring-1 ring-white/[0.04] shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
-                          {m.content || (busy ? "…" : "")}
+                } else {
+                  bubble = (
+                    <li
+                      key={m.id}
+                      className={
+                        m.role === "user"
+                          ? "amaso-fade-in max-w-[85%] self-end rounded-2xl rounded-tr-md bg-orange-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-orange-50 ring-1 ring-orange-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-colors duration-150 active:bg-orange-600/40"
+                          : "amaso-fade-in flex max-w-[85%] flex-col self-start"
+                      }
+                    >
+                      {m.role === "assistant" ? (
+                        <>
+                          <div className="rounded-2xl rounded-tl-md bg-neutral-800/70 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-neutral-100 ring-1 ring-white/[0.04] shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-colors duration-150 active:bg-neutral-700/80">
+                            {m.content || (busy ? "…" : "")}
+                            {m.attachments?.length ? (
+                              <InlineAttachments attachments={m.attachments} />
+                            ) : null}
+                            {dur !== null && (
+                              <span className="mt-1 block text-[10px] text-neutral-500">
+                                {dur}s
+                              </span>
+                            )}
+                            {isThinking && (
+                              <ThinkingTimer startedAt={m.startedAt!} />
+                            )}
+                          </div>
+                          {sources ? <SourcesStrip sources={sources} /> : null}
+                        </>
+                      ) : (
+                        <>
+                          {m.content || ""}
                           {m.attachments?.length ? (
                             <InlineAttachments attachments={m.attachments} />
                           ) : null}
-                          {dur !== null && (
-                            <span className="mt-1 block text-[10px] text-neutral-500">
-                              {dur}s
-                            </span>
-                          )}
-                          {isThinking && (
-                            <ThinkingTimer startedAt={m.startedAt!} />
-                          )}
-                        </div>
-                        {sources ? <SourcesStrip sources={sources} /> : null}
-                      </>
-                    ) : (
-                      <>
-                        {m.content || ""}
-                        {m.attachments?.length ? (
-                          <InlineAttachments attachments={m.attachments} />
-                        ) : null}
-                      </>
-                    )}
-                  </li>
-                );
+                        </>
+                      )}
+                    </li>
+                  );
+                }
+                if (tsLabel) {
+                  return [
+                    <li
+                      key={`ts-${m.id}`}
+                      aria-hidden
+                      className="amaso-fade-in mx-auto py-1 text-center text-[10.5px] font-medium uppercase tracking-[0.16em] text-neutral-600"
+                    >
+                      {tsLabel}
+                    </li>,
+                    bubble,
+                  ];
+                }
+                return bubble;
               })}
               {/* Live STT preview — shows what the user is saying
                   while a voice call streams into text mode. Faded so
@@ -1188,6 +1302,39 @@ export default function SparFullView() {
               <div ref={mode === "text" ? messagesEndRef : null} />
             </ul>
           </div>
+          {/* "Scroll to bottom" pill — only visible when the user
+              has scrolled up AND a new message has arrived since.
+              Sits centred above the composer; the bottom offset
+              matches the unified footer height so it floats just
+              above the bar regardless of how tall the composer
+              grew. Self-dismisses when the user scrolls back to
+              the floor. */}
+          {hasNewBelow && (
+            <button
+              type="button"
+              onClick={scrollToLatest}
+              aria-label="Scroll to latest message"
+              className="amaso-fx amaso-press amaso-fade-in pointer-events-auto absolute left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-orange-500/40 bg-neutral-900/90 px-3.5 py-2 text-[12px] font-medium text-orange-200 shadow-[0_4px_16px_rgba(0,0,0,0.5),0_0_0_1px_rgba(255,107,61,0.15)] backdrop-blur hover:border-orange-400/60 hover:text-orange-100"
+              style={{ bottom: bottomReserve + 8 }}
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 12 12"
+                fill="none"
+                aria-hidden
+              >
+                <path
+                  d="M6 2v7m0 0L3 6m3 3l3-3"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              New messages
+            </button>
+          )}
           {/* Subtle phase indicator above the input so users know
               something's happening even without the central ring. */}
           {(busy || !ttsIdle || (inCall && listening && !micMuted)) && (
@@ -1473,7 +1620,11 @@ export default function SparFullView() {
                       ? "type — will queue until ready…"
                       : "message your sparring partner…"
                   }
-                  className="min-w-0 flex-1 resize-none bg-transparent py-1 text-sm leading-relaxed text-neutral-100 placeholder-neutral-500 focus:outline-none"
+                  // transition-[height] eases the auto-grow on each
+                  // keystroke that crosses a line boundary so the
+                  // composer doesn't snap-resize. Cap at ~4 lines
+                  // (160px) is enforced by the height-measure effect.
+                  className="min-w-0 flex-1 resize-none bg-transparent py-1 text-sm leading-relaxed text-neutral-100 placeholder-neutral-500 transition-[height] duration-150 ease-out focus:outline-none"
                 />
                 <button
                   type="submit"
