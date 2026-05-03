@@ -324,21 +324,47 @@ export function recentDispatchesAllUsers(
 export function markDispatchCompleted(
   userId: number,
   projectId: string,
+  sessionId?: string,
 ): DispatchLogEntry | null {
   const rows = logStore().get(userId);
   if (!rows) return null;
-  // Walk newest-first; we mark only the most recent eligible entry.
+  // Stage 3: when the caller knows which session went idle, prefer the
+  // newest pending entry for THAT specific session. Without this, two
+  // parallel sessions on the same project would race for whichever
+  // dispatch happened to be queued last — and the wrong dispatch row
+  // would get its completedAt set, leaving the truly-finished one
+  // looking eternally pending.
+  //
+  // Fallback: if no entry matches the sessionId (legacy on-disk rows
+  // saved before Stage 2 lacked the sessionId field, and the
+  // session-default `sessionId === projectId` case sometimes lands
+  // here too), walk again and accept any unfinished entry for the
+  // project. This keeps single-session and pre-Stage-2 behaviour
+  // bit-for-bit identical.
+  const eligible = (r: DispatchLogEntry) =>
+    r.projectId === projectId &&
+    r.status === "sent" &&
+    r.completedAt === undefined;
+  if (sessionId) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (eligible(r) && r.sessionId === sessionId) {
+        r.completedAt = Date.now();
+        saveDispatchLog();
+        return r;
+      }
+    }
+  }
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
-    if (
-      r.projectId === projectId &&
-      r.status === "sent" &&
-      r.completedAt === undefined
-    ) {
-      r.completedAt = Date.now();
-      saveDispatchLog();
-      return r;
-    }
+    if (!eligible(r)) continue;
+    // When the caller passed a sessionId but we got here via fallback,
+    // skip rows that explicitly belong to a DIFFERENT session — those
+    // are someone else's pending work, not ours.
+    if (sessionId && r.sessionId && r.sessionId !== sessionId) continue;
+    r.completedAt = Date.now();
+    saveDispatchLog();
+    return r;
   }
   return null;
 }

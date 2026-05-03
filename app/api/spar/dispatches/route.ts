@@ -14,6 +14,11 @@ export async function GET() {
   const rows = recentDispatches(user.id, 20).map((d) => ({
     id: d.id,
     projectId: d.projectId,
+    // Stage 3: surface sessionId on the dispatch mirror so the
+    // SparProvider polling fallback can attribute completions to the
+    // right session when the WS event was missed. Omitted when the
+    // log entry predates the field.
+    ...(d.sessionId ? { sessionId: d.sessionId } : {}),
     prompt: d.prompt,
     status: d.status,
     confirmedAt: d.confirmedAt,

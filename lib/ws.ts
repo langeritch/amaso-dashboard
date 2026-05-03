@@ -21,13 +21,89 @@ type PublicHistoryEvent = Pick<
   "id" | "projectId" | "type" | "path" | "ts"
 >;
 
+export interface SparMessagePayload {
+  conversationId: number;
+  message: {
+    id: number;
+    role: "user" | "assistant" | "system";
+    content: string;
+    toolCalls: unknown | null;
+    createdAt: number;
+  };
+}
+
+/**
+ * Remote-control action payload. Pushed when the spar voice
+ * assistant (or any authenticated caller of /api/spar/remote-control)
+ * wants to drive the dashboard UI for the user. The frontend listens
+ * for these and dispatches into local state — toggling autopilot,
+ * opening sidebars, starting a new conversation, setting the
+ * directive, etc.
+ *
+ * The action is the wire-level discriminator. Frontend translates
+ * each action into the appropriate UI mutation. Unknown actions are
+ * silently dropped on the client so adding new ones is a one-sided
+ * deploy.
+ */
+export type SparRemoteControlAction =
+  | { action: "toggle_autopilot"; value: boolean }
+  | { action: "open_sidebar"; side: "left" | "right" }
+  | { action: "close_sidebar"; side: "left" | "right" }
+  | { action: "new_conversation" }
+  | { action: "set_directive"; value: string };
+
+export interface SparRemoteControlPayload {
+  /** Monotonic id used by the frontend to ack back which action it
+   *  applied. Generated server-side per request. */
+  id: string;
+  /** Wall-clock when the API route handled the request. The
+   *  visual-feedback flash uses this to ignore replays older than
+   *  ~5s in case a ws reconnect re-delivers a stale buffer. */
+  issuedAt: number;
+  payload: SparRemoteControlAction;
+}
+
+export interface SparConversationPayload {
+  conversationId: number;
+  /** Echoed only when the title changed this broadcast — null
+   *  otherwise so consumers can tell "title update" apart from
+   *  "drift notice update" without a separate event type. */
+  title?: string | null;
+  /** Drift notice text or null when cleared. Omitted when this
+   *  broadcast doesn't touch the drift state. */
+  driftNotice?: string | null;
+  updatedAt: number;
+}
+
 export type ServerMessage =
   | { type: "hello"; user: { id: number; name: string; role: User["role"] } }
   | { type: "file"; event: PublicFileEvent }
   | { type: "history"; event: PublicHistoryEvent }
   | { type: "remark"; action: "added" | "deleted"; projectId: string; path: string; remarkId: number }
   | { type: "chat:message"; channelId: number; message: MessageView }
-  | { type: "chat:remark"; channelId: number; projectId: string; remarkId: number };
+  | { type: "chat:remark"; channelId: number; projectId: string; remarkId: number }
+  | { type: "projects:changed" }
+  | { type: "graph:changed" }
+  | {
+      type: "dispatch_completed";
+      projectId: string;
+      projectName: string;
+      dispatchId: string;
+      /** Stage 3 of remark #285: which terminal session for the project
+       *  just went idle. Equals projectId for the legacy single-session
+       *  case so old clients that ignore this field keep working
+       *  unchanged. Multi-session UIs use it to attribute the auto-
+       *  report to the correct row. */
+      sessionId?: string;
+      /** 1-based ordinal among the project's currently-live sessions
+       *  at fire-time. Optional — purely cosmetic ("session #2") for
+       *  the auto-report bubble. Computed at broadcast time so the UI
+       *  doesn't have to re-derive it from worker-status. */
+      sessionOrdinal?: number;
+    }
+  | { type: "spar:message"; payload: SparMessagePayload }
+  | { type: "spar:conversation"; payload: SparConversationPayload }
+  | { type: "spar:remote_control"; payload: SparRemoteControlPayload };
 
 interface ClientState {
   user: User;
@@ -225,6 +301,116 @@ function buildWs() {
         send(ws, { type: "chat:remark", channelId, projectId, remarkId });
       }
     },
+    broadcastProjectsChanged() {
+      for (const ws of wss.clients) {
+        const state = clients.get(ws);
+        if (!state) continue;
+        send(ws, { type: "projects:changed" });
+      }
+    },
+    // Brain page graph mutated. Global broadcast — the brain page is
+    // admin-scoped and a refetch is cheap, so we don't bother with
+    // per-user targeting like dispatch_completed does.
+    broadcastGraphChanged() {
+      for (const ws of wss.clients) {
+        const state = clients.get(ws);
+        if (!state) continue;
+        send(ws, { type: "graph:changed" });
+      }
+    },
+    // True if any currently-connected /api/sync socket belongs to
+    // `userId`. Used by the proactive-turn pipeline to gate
+    // dispatch-complete summaries: when the user has a spar tab open
+    // the existing client-side queueCompletion path already produces
+    // a transcript-quality reply (Opus, voice-mode aware), so server
+    // re-running the summary on top would duplicate the bubble.
+    hasSparUserSocket(userId: number): boolean {
+      for (const ws of wss.clients) {
+        const state = clients.get(ws);
+        if (!state) continue;
+        if (state.user.id !== userId) continue;
+        if (ws.readyState !== WebSocket.OPEN) continue;
+        return true;
+      }
+      return false;
+    },
+    // Spar conversation message persisted — fan out to every socket
+    // belonging to the same user so a thread the user just typed into
+    // on the laptop appears immediately on the phone (and vice versa).
+    // Other users never see these. No subscription required: a user's
+    // spar tab implicitly subscribes by having an authenticated socket
+    // open. The payload carries a conversationId so the client can
+    // ignore broadcasts for threads it isn't currently viewing.
+    broadcastSparMessage(userId: number, payload: SparMessagePayload) {
+      for (const ws of wss.clients) {
+        const state = clients.get(ws);
+        if (!state) continue;
+        if (state.user.id !== userId) continue;
+        send(ws, { type: "spar:message", payload });
+      }
+    },
+    // Remote-control actions issued by the spar voice assistant /
+    // /api/spar/remote-control. Per-user fan-out so one operator's
+    // "toggle autopilot" doesn't ripple into a teammate's tab.
+    broadcastSparRemoteControl(
+      userId: number,
+      payload: SparRemoteControlPayload,
+    ) {
+      for (const ws of wss.clients) {
+        const state = clients.get(ws);
+        if (!state) continue;
+        if (state.user.id !== userId) continue;
+        send(ws, { type: "spar:remote_control", payload });
+      }
+    },
+    // Conversation-level updates: title rename + drift notice. Same
+    // per-user fan-out as broadcastSparMessage; the sidebar consumes
+    // these to reorder + retitle threads in real time without a
+    // polling round-trip.
+    broadcastSparConversation(userId: number, payload: SparConversationPayload) {
+      for (const ws of wss.clients) {
+        const state = clients.get(ws);
+        if (!state) continue;
+        if (state.user.id !== userId) continue;
+        send(ws, { type: "spar:conversation", payload });
+      }
+    },
+    // Targeted at the user who fired the dispatch — we don't want one
+    // operator's "task done" pings echoing into a teammate's open spar
+    // tab. The terminal idle-timer call site has the userId from the
+    // dispatch log entry.
+    broadcastDispatchCompleted(
+      userId: number,
+      projectId: string,
+      projectName: string,
+      dispatchId: string,
+      sessionId?: string,
+      sessionOrdinal?: number,
+    ) {
+      let matched = 0;
+      let total = 0;
+      for (const ws of wss.clients) {
+        total++;
+        const state = clients.get(ws);
+        if (!state) continue;
+        if (state.user.id !== userId) continue;
+        matched++;
+        send(ws, {
+          type: "dispatch_completed",
+          projectId,
+          projectName,
+          dispatchId,
+          // Both fields are omitted from the wire payload when the
+          // caller didn't supply them, so legacy single-session
+          // dispatches send exactly the pre-Stage-3 message shape.
+          ...(sessionId ? { sessionId } : {}),
+          ...(sessionOrdinal ? { sessionOrdinal } : {}),
+        });
+      }
+      console.log(
+        `[ws] dispatch_completed broadcast user=${userId} project=${projectId} session=${sessionId ?? "<default>"} dispatchId=${dispatchId} → ${matched}/${total} sockets`,
+      );
+    },
   };
 }
 
@@ -289,4 +475,82 @@ export function broadcastChatRemark(
   remarkId: number,
 ) {
   globalThis.__amasoWs?.broadcastChatRemark(channelId, projectId, remarkId);
+}
+
+export function broadcastProjectsChanged() {
+  globalThis.__amasoWs?.broadcastProjectsChanged();
+}
+
+/** Notify every connected client that graph_nodes / graph_edges changed.
+ *  Brain page subscribers refetch /api/graph on receipt. */
+export function broadcastGraphChanged() {
+  globalThis.__amasoWs?.broadcastGraphChanged();
+}
+
+/** True if `userId` currently has at least one open /api/sync
+ *  socket (i.e. their spar tab is live). Returns false during cron
+ *  ticks / dashboard restarts when nobody is connected. */
+export function hasSparUserSocket(userId: number): boolean {
+  return globalThis.__amasoWs?.hasSparUserSocket(userId) ?? false;
+}
+
+/** Push a freshly-persisted spar message to every connection owned
+ *  by `userId`. Used by /api/spar/conversations/[id]/messages and the
+ *  /api/spar streaming route to keep multiple devices in sync. Other
+ *  users' connections never receive these payloads. */
+export function broadcastSparMessage(
+  userId: number,
+  payload: SparMessagePayload,
+) {
+  globalThis.__amasoWs?.broadcastSparMessage(userId, payload);
+}
+
+/** Push a conversation metadata update (title rename / drift notice)
+ *  to every socket the user has open. The auto-namer fires this from
+ *  the streaming route's finalize step. */
+export function broadcastSparConversation(
+  userId: number,
+  payload: SparConversationPayload,
+) {
+  globalThis.__amasoWs?.broadcastSparConversation(userId, payload);
+}
+
+/** Push a remote-control action to every socket the user has open.
+ *  Used by /api/spar/remote-control so the spar voice assistant can
+ *  drive UI state (autopilot, sidebars, conversations, directive)
+ *  remotely. */
+export function broadcastSparRemoteControl(
+  userId: number,
+  payload: SparRemoteControlPayload,
+) {
+  globalThis.__amasoWs?.broadcastSparRemoteControl(userId, payload);
+}
+
+/** Notify the spar tab(s) of the dispatching user that a project's
+ *  Claude Code session just returned to idle after a dispatched prompt.
+ *  Spar uses this to auto-fetch the terminal scrollback and report
+ *  back without the user having to ask. Targeted at one user — see
+ *  buildWs().broadcastDispatchCompleted for the rationale. */
+export function broadcastDispatchCompleted(
+  userId: number,
+  projectId: string,
+  projectName: string,
+  dispatchId: string,
+  sessionId?: string,
+  sessionOrdinal?: number,
+) {
+  if (!globalThis.__amasoWs) {
+    console.warn(
+      `[ws] broadcastDispatchCompleted dropped — WS singleton not initialized (project=${projectId} dispatchId=${dispatchId})`,
+    );
+    return;
+  }
+  globalThis.__amasoWs.broadcastDispatchCompleted(
+    userId,
+    projectId,
+    projectName,
+    dispatchId,
+    sessionId,
+    sessionOrdinal,
+  );
 }

@@ -32,6 +32,7 @@ import { pushToUsers } from "./push";
 import { markDispatchCompleted } from "./spar-dispatch";
 import { runProactiveTurn } from "./spar-proactive";
 import { detectWorkerState } from "./terminal-state";
+import { listSessionsForProject } from "./terminal-backend";
 import { broadcastDispatchCompleted, hasSparUserSocket } from "./ws";
 
 // How long to wait after observing a non-thinking state before firing.
@@ -316,26 +317,54 @@ function fireIdle(sessionId: string): void {
   const projectId = s.projectId;
   const project = getProject(projectId);
   const name = project?.name ?? projectId;
-  console.log(`[idle] fireIdle session=${sessionId} project=${projectId} user=${userId} name=${name}`);
+  // Stage 3: compute the session's 1-based ordinal among the project's
+  // currently-live sessions (oldest-first), matching the convention the
+  // worker-status route + WorkerStatusPanel use. Pure presentation —
+  // surfaces "session #2" in the auto-report bubble when more than one
+  // is alive. Snapshot at fire-time so the label can't drift even if
+  // siblings spawn / exit between the broadcast and the user reading
+  // the bubble.
+  const liveSessions = listSessionsForProject(projectId).sort(
+    (a, b) => a.startedAt - b.startedAt,
+  );
+  const ordinalIdx = liveSessions.findIndex((x) => x.sessionId === sessionId);
+  const sessionOrdinal = ordinalIdx >= 0 ? ordinalIdx + 1 : 0;
+  const projectSessionCount = liveSessions.length;
+  console.log(
+    `[idle] fireIdle session=${sessionId} project=${projectId} user=${userId} name=${name} ordinal=${sessionOrdinal}/${projectSessionCount}`,
+  );
 
   // If this idle followed a spar-dispatched prompt, mark it complete
   // so the spar UI can auto-report back without the user asking. No-op
   // when the user typed the prompt themselves — there's no pending
-  // dispatch log entry to update.
+  // dispatch log entry to update. Stage 3 passes sessionId so the
+  // resolver picks the right pending entry when multiple sessions
+  // for the same project have queued dispatches.
   let completedDispatchId: string | null = null;
   try {
-    const completed = markDispatchCompleted(userId, projectId);
+    const completed = markDispatchCompleted(userId, projectId, sessionId);
     completedDispatchId = completed?.id ?? null;
   } catch (err) {
     console.warn(`[idle] markDispatchCompleted threw for project=${projectId}:`, err);
   }
   console.log(
-    `[idle] markDispatchCompleted result project=${projectId} dispatchId=${completedDispatchId ?? "<none>"}`,
+    `[idle] markDispatchCompleted result project=${projectId} session=${sessionId} dispatchId=${completedDispatchId ?? "<none>"}`,
   );
 
   if (completedDispatchId) {
     try {
-      broadcastDispatchCompleted(userId, projectId, name, completedDispatchId);
+      // Only forward the session pair when the project actually has
+      // multiple live sessions — single-session dispatches keep the
+      // pre-Stage-3 wire shape, so legacy clients see no change.
+      const includeSession = projectSessionCount > 1;
+      broadcastDispatchCompleted(
+        userId,
+        projectId,
+        name,
+        completedDispatchId,
+        includeSession ? sessionId : undefined,
+        includeSession ? sessionOrdinal : undefined,
+      );
     } catch (err) {
       console.warn(
         `[idle] broadcastDispatchCompleted threw for project=${projectId}:`,
@@ -352,28 +381,45 @@ function fireIdle(sessionId: string): void {
   // an assistant message in the conversation, and sends a richer push
   // with the actual summary as the body.
   const tabOpen = hasSparUserSocket(userId);
+  // Disambiguate the push notification body when the project has
+  // multiple live sessions — the user otherwise can't tell which one
+  // just finished from the lock screen.
+  const pushBody =
+    projectSessionCount > 1 && sessionOrdinal > 0
+      ? `${name} #${sessionOrdinal} wacht op je.`
+      : `${name} wacht op je.`;
   if (tabOpen || !completedDispatchId) {
     void pushToUsers([userId], {
       title: "Claude is klaar",
-      body: `${name} wacht op je.`,
+      body: pushBody,
       url: `/projects/${encodeURIComponent(projectId)}`,
-      tag: `claude-idle-${projectId}`,
-      data: { projectId },
+      // Per-session push tag so two sessions finishing back-to-back
+      // each get their own notification instead of one collapsing on
+      // top of the other. Falls back to project-only when we don't
+      // have an ordinal (single-session case).
+      tag:
+        projectSessionCount > 1 && sessionOrdinal > 0
+          ? `claude-idle-${projectId}-${sessionOrdinal}`
+          : `claude-idle-${projectId}`,
+      data: { projectId, sessionId, sessionOrdinal },
     });
     return;
   }
 
   console.log(
-    `[idle] no spar tab for user=${userId} — running server-side proactive summary for project=${projectId}`,
+    `[idle] no spar tab for user=${userId} — running server-side proactive summary for project=${projectId} session=${sessionId}`,
   );
   void runProactiveTurn({
     kind: "dispatch_complete",
     userId,
     projectId,
+    sessionId,
+    sessionOrdinal: projectSessionCount > 1 ? sessionOrdinal : undefined,
+    projectSessionCount,
     dispatchId: completedDispatchId,
   }).catch((err) => {
     console.warn(
-      `[idle] proactive turn threw for project=${projectId}:`,
+      `[idle] proactive turn threw for project=${projectId} session=${sessionId}:`,
       err instanceof Error ? err.message : String(err),
     );
   });

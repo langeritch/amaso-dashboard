@@ -2404,6 +2404,13 @@ export default function SparProvider({
     projectId: string;
     projectName: string;
     dispatchId: string;
+    /** Stage 3: which session for the project completed. Optional —
+     *  legacy single-session dispatches omit it from the WS payload
+     *  and the auto-report falls back to project-only phrasing.
+     *  Carried alongside `sessionOrdinal` so the visible bubble can
+     *  say "amaso-portfolio #2" instead of just "amaso-portfolio". */
+    sessionId?: string;
+    sessionOrdinal?: number;
   };
   const pendingCompletionsRef = useRef<PendingCompletion[]>([]);
   const completionFlushTimerRef = useRef<number | null>(null);
@@ -2426,19 +2433,25 @@ export default function SparProvider({
    */
   function buildCompletionPrompt(items: PendingCompletion[]): string {
     if (items.length === 0) return "";
-    if (items.length === 1) {
-      const it = items[0];
+    // Append the session ordinal when the WS event carried one — it
+    // means the project had multiple live sessions at fire-time, and
+    // the user (and the autopilot) need to know which one completed.
+    // Solo-session events have sessionOrdinal undefined and render
+    // exactly like the pre-Stage-3 prompt.
+    const label = (it: PendingCompletion): string => {
+      const base = it.projectName;
       const idHint =
         it.projectName === it.projectId ? "" : ` (${it.projectId})`;
-      return `Update on ${it.projectName}${idHint} — what happened?`;
+      const sess =
+        it.sessionOrdinal && it.sessionOrdinal > 0
+          ? ` session #${it.sessionOrdinal}`
+          : "";
+      return `${base}${sess}${idHint}`;
+    };
+    if (items.length === 1) {
+      return `Update on ${label(items[0])} — what happened?`;
     }
-    const list = items
-      .map((it) => {
-        const idHint =
-          it.projectName === it.projectId ? "" : ` (${it.projectId})`;
-        return `${it.projectName}${idHint}`;
-      })
-      .join(", ");
+    const list = items.map(label).join(", ");
     return `Updates on ${list} — what happened on each?`;
   }
 
@@ -2824,8 +2837,20 @@ export default function SparProvider({
             ? msg.projectName
             : projectId;
         const dispatchId = typeof msg.dispatchId === "string" ? msg.dispatchId : "";
+        // Stage 3: optional fields. Pre-Stage-3 dashboards / single-
+        // session dispatches omit them; we tolerate either shape.
+        const sessionId =
+          typeof msg.sessionId === "string" && msg.sessionId
+            ? msg.sessionId
+            : undefined;
+        const sessionOrdinal =
+          typeof msg.sessionOrdinal === "number" &&
+          Number.isFinite(msg.sessionOrdinal) &&
+          msg.sessionOrdinal > 0
+            ? msg.sessionOrdinal
+            : undefined;
         console.log(
-          `[spar-ws] dispatch_completed received project=${projectId} dispatchId=${dispatchId}`,
+          `[spar-ws] dispatch_completed received project=${projectId} session=${sessionId ?? "<default>"} dispatchId=${dispatchId}`,
         );
         if (!projectId || !dispatchId) {
           console.warn(
@@ -2833,7 +2858,13 @@ export default function SparProvider({
           );
           return;
         }
-        queueCompletion({ projectId, projectName, dispatchId });
+        queueCompletion({
+          projectId,
+          projectName,
+          dispatchId,
+          sessionId,
+          sessionOrdinal,
+        });
       });
       ws.addEventListener("close", () => {
         if (closed) return;
@@ -2906,11 +2937,16 @@ export default function SparProvider({
       // No projectName available from the dispatches API (it predates
       // the WS event). Fall back to projectId as the human label —
       // slightly less polished than the WS path but correct, and only
-      // hit when the WS broadcast was missed entirely.
+      // hit when the WS broadcast was missed entirely. sessionOrdinal
+      // is computed at fire-time on the server and isn't persisted
+      // to the dispatch log, so the polling fallback can't reproduce
+      // the "session #N" suffix — we forward sessionId only and the
+      // bubble degrades to project-only phrasing.
       queueCompletion({
         projectId: d.projectId,
         projectName: d.projectId,
         dispatchId: d.id,
+        sessionId: d.sessionId,
       });
     }
     // queueCompletion is recreated each render but only reads refs;
