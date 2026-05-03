@@ -19,20 +19,26 @@ import {
 import type { User } from "@/lib/db";
 import { useSparOptional } from "./SparContext";
 
-const NAV_ITEMS = [
-  { href: "/", label: "Chat", icon: MessageSquare },
-  { href: "/projects", label: "Projects", icon: FolderKanban },
-  { href: "/remarks", label: "Remarks", icon: StickyNote },
+// Top-level nav was redesigned 2026-05 down to two primary
+// destinations + a Settings entry point. The header now reads as
+// "Spar | Projects | gear" with the AMASO wordmark itself linking to
+// the chat home (and carrying the unread badge). All previous
+// destinations stay reachable: chat via the wordmark, brain /
+// heartbeat / activity / remarks via the mobile drawer's "More"
+// section and via the Settings page's "Workspace" section.
+const PRIMARY_NAV = [
   { href: "/spar", label: "Spar", icon: Phone },
-  // /brain hosts the project-entity graph plus tabs for the
-  // assistant's accumulated user-memory and the live Sparring Partner
-  // status. The standalone /memory route now redirects into the tab.
+  { href: "/projects", label: "Projects", icon: FolderKanban },
+] as const;
+
+// Secondary destinations exposed via the mobile drawer. Desktop users
+// reach these from the Settings page or by typing the URL — the goal
+// is a quiet header, not a hidden app.
+const SECONDARY_NAV = [
+  { href: "/", label: "Chat", icon: MessageSquare },
+  { href: "/remarks", label: "Remarks", icon: StickyNote },
   { href: "/brain", label: "Brain", icon: Brain },
   { href: "/heartbeat", label: "Heartbeat", icon: Activity },
-  // /activity is the cross-team feed (dispatches + remarks + file
-  // changes + presence). Distinct from /heartbeat — heartbeat is one
-  // user's signal, activity is the team's. Users icon emphasises the
-  // people-focused framing.
   { href: "/activity", label: "Activity", icon: Users },
 ] as const;
 
@@ -75,15 +81,32 @@ export default function Topbar({ user }: { user: User }) {
       <nav className="pt-safe pl-safe pr-safe sticky top-0 z-30 flex flex-shrink-0 items-center justify-between gap-2 border-b border-neutral-800/80 bg-neutral-950/75 px-3 py-1.5 text-sm backdrop-blur-md backdrop-saturate-150 sm:grid sm:grid-cols-3 sm:px-4 sm:py-2.5">
         <Link
           href="/"
-          className="amaso-fx flex min-h-[40px] items-center font-semibold tracking-[0.02em] text-neutral-100 hover:text-white sm:min-h-0 sm:justify-self-start"
-          aria-label="Amaso home"
+          className="amaso-fx group relative flex min-h-[40px] items-center gap-2 font-semibold tracking-[0.02em] text-neutral-100 hover:text-white sm:min-h-0 sm:justify-self-start"
+          aria-label={
+            unreadTotal > 0
+              ? `Amaso home — ${unreadTotal} unread`
+              : "Amaso home"
+          }
+          title={
+            unreadTotal > 0
+              ? `Chat — ${unreadTotal} unread`
+              : "Chat / home"
+          }
         >
-          AMASO
+          <span>AMASO</span>
+          {unreadTotal > 0 && (
+            <span
+              aria-hidden
+              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.7)]"
+            />
+          )}
         </Link>
 
-        {/* Desktop: inline nav in the centered grid column. Hidden on mobile
-            — the hamburger drawer replaces it. */}
-        <div className="hidden items-center justify-self-center gap-2 sm:flex">
+        {/* Desktop: two primary nav items only. Everything else moves
+            into the Settings page (Workspace section) and the mobile
+            drawer's "More" group. The header used to host seven
+            destinations — now Spar + Projects are the spine. */}
+        <div className="hidden items-center justify-self-center gap-1 sm:flex">
           <a
             href="/login?demo=1"
             target="_blank"
@@ -94,13 +117,9 @@ export default function Topbar({ user }: { user: User }) {
             <Play className="h-3.5 w-3.5" />
             <span>Demo</span>
           </a>
-          {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+          {PRIMARY_NAV.map(({ href, label, icon: Icon }) => {
             const active = isActive(pathname, href);
-            // Chat gets the global unread badge; Projects/Remarks don't.
-            const badge = href === "/" ? unreadTotal : 0;
-            // Spar is icon-only in the header — the phone glyph is
-            // unambiguous and skipping the label keeps the bar tighter.
-            const iconOnly = href === "/spar";
+            const isSpar = href === "/spar";
             return (
               <Link
                 key={href}
@@ -111,12 +130,10 @@ export default function Topbar({ user }: { user: User }) {
                     : "text-neutral-400 hover:bg-neutral-900/80 hover:text-neutral-100"
                 }`}
                 aria-current={active ? "page" : undefined}
-                aria-label={iconOnly ? label : undefined}
-                title={iconOnly ? label : undefined}
               >
                 <Icon
                   className={`h-3.5 w-3.5 transition-colors duration-200 ${
-                    iconOnly
+                    isSpar
                       ? telegramActive
                         ? "text-sky-400"
                         : dashCallActive
@@ -125,8 +142,7 @@ export default function Topbar({ user }: { user: User }) {
                       : ""
                   }`}
                 />
-                {!iconOnly && <span>{label}</span>}
-                <UnreadDot count={badge} />
+                <span>{label}</span>
               </Link>
             );
           })}
@@ -138,7 +154,7 @@ export default function Topbar({ user }: { user: User }) {
         <div className="hidden min-w-0 items-center justify-self-end gap-3 text-neutral-400 sm:flex">
           <Link
             href="/settings"
-            className={`amaso-fx flex items-center gap-1.5 rounded-md px-3 py-1.5 ${
+            className={`amaso-fx flex h-9 w-9 items-center justify-center rounded-md ${
               isActive(pathname, "/settings")
                 ? "bg-neutral-800/90 text-neutral-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
                 : "hover:bg-neutral-900/80 hover:text-neutral-100"
@@ -146,8 +162,7 @@ export default function Topbar({ user }: { user: User }) {
             title="Settings"
             aria-label="Settings"
           >
-            <Settings className="h-3.5 w-3.5" />
-            <span>Settings</span>
+            <Settings className="h-4 w-4" />
           </Link>
         </div>
 
@@ -258,65 +273,117 @@ function MobileDrawer({
         </div>
 
         <nav className="flex flex-col py-2">
-          {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+          {/* Primary destinations + Settings — same three the desktop
+              header surfaces, rendered prominently. */}
+          {PRIMARY_NAV.map(({ href, label, icon: Icon }) => {
             const active = isActive(pathname, href);
-            const badge = href === "/" ? unreadTotal : 0;
             return (
-              <Link
+              <DrawerLink
                 key={href}
                 href={href}
-                onClick={onClose}
-                className={`amaso-fx relative flex min-h-[48px] items-center gap-3 px-4 text-base ${
-                  active
-                    ? "bg-neutral-800/80 text-white"
-                    : "text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
-                }`}
-                aria-current={active ? "page" : undefined}
-              >
-                {active && (
-                  <span
-                    aria-hidden
-                    className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-emerald-500"
-                  />
-                )}
-                <Icon
-                  className={`h-5 w-5 transition-colors duration-200 ${
-                    href === "/spar"
-                      ? telegramActive
-                        ? "text-sky-400"
-                        : dashCallActive
-                          ? "text-red-400"
-                          : ""
-                      : ""
-                  }`}
-                />
-                <span className="flex-1">{label}</span>
-                <UnreadDot count={badge} />
-              </Link>
+                label={label}
+                icon={Icon}
+                active={active}
+                onClose={onClose}
+                iconClass={
+                  href === "/spar"
+                    ? telegramActive
+                      ? "text-sky-400"
+                      : dashCallActive
+                        ? "text-red-400"
+                        : ""
+                    : ""
+                }
+              />
             );
           })}
-          <Link
+          <DrawerLink
             href="/settings"
-            onClick={onClose}
-            className={`amaso-fx relative flex min-h-[48px] items-center gap-3 px-4 text-base ${
-              isActive(pathname, "/settings")
-                ? "bg-neutral-800/80 text-white"
-                : "text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
-            }`}
-            aria-current={isActive(pathname, "/settings") ? "page" : undefined}
-          >
-            {isActive(pathname, "/settings") && (
-              <span
-                aria-hidden
-                className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-emerald-500"
-              />
-            )}
-            <Settings className="h-5 w-5" />
-            <span>Settings</span>
-          </Link>
+            label="Settings"
+            icon={Settings}
+            active={isActive(pathname, "/settings")}
+            onClose={onClose}
+          />
+
+          {/* Secondary destinations — Chat, Remarks, Brain, Heartbeat,
+              Activity. Visually de-emphasised so the drawer reads as
+              "Spar / Projects / Settings + a more menu". */}
+          <div className="mt-3 border-t border-neutral-800/70 pt-2">
+            <div className="px-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
+              More
+            </div>
+            {SECONDARY_NAV.map(({ href, label, icon: Icon }) => {
+              const active = isActive(pathname, href);
+              const badge = href === "/" ? unreadTotal : 0;
+              return (
+                <DrawerLink
+                  key={href}
+                  href={href}
+                  label={label}
+                  icon={Icon}
+                  active={active}
+                  onClose={onClose}
+                  badge={badge}
+                  compact
+                />
+              );
+            })}
+          </div>
         </nav>
       </div>
     </div>
+  );
+}
+
+function DrawerLink({
+  href,
+  label,
+  icon: Icon,
+  active,
+  onClose,
+  badge = 0,
+  iconClass = "",
+  compact = false,
+}: {
+  href: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  active: boolean;
+  onClose: () => void;
+  badge?: number;
+  iconClass?: string;
+  compact?: boolean;
+}) {
+  // Two visual densities so the drawer reads as a primary group + a
+  // quieter "More" group. Compact rows are still 44px tall to stay
+  // touch-friendly; only padding + icon size shrink.
+  const sizing = compact
+    ? "min-h-[44px] gap-3 px-4 text-sm"
+    : "min-h-[48px] gap-3 px-4 text-base";
+  const iconSize = compact ? "h-4 w-4" : "h-5 w-5";
+  return (
+    <Link
+      href={href}
+      onClick={onClose}
+      className={`amaso-fx relative flex items-center ${sizing} ${
+        active
+          ? "bg-neutral-800/80 text-white"
+          : compact
+            ? "text-neutral-400 hover:bg-neutral-900/70 hover:text-neutral-100"
+            : "text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
+      }`}
+      aria-current={active ? "page" : undefined}
+    >
+      {active && (
+        <span
+          aria-hidden
+          className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-emerald-500"
+        />
+      )}
+      <Icon className={`${iconSize} transition-colors duration-200 ${iconClass}`} />
+      <span className="flex-1">{label}</span>
+      <UnreadDot count={badge} />
+    </Link>
   );
 }
 

@@ -3,7 +3,18 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Activity, LogOut, Moon, MonitorDown, Shield, Sun } from "lucide-react";
+import {
+  Activity,
+  Brain,
+  HeartPulse,
+  LogOut,
+  MessageSquare,
+  Moon,
+  MonitorDown,
+  Shield,
+  StickyNote,
+  Sun,
+} from "lucide-react";
 import type { User } from "@/lib/db";
 import ClaudeAccountsSection from "./ClaudeAccountsSection";
 import PushToggle from "./PushToggle";
@@ -62,6 +73,18 @@ export default function SettingsPanel({ user }: { user: User }) {
         </button>
       </Section>
 
+      <Section title="Workspace">
+        <WorkspaceLink href="/" icon={MessageSquare} label="Chat" />
+        <WorkspaceLink href="/remarks" icon={StickyNote} label="Remarks" divider />
+        <WorkspaceLink href="/brain" icon={Brain} label="Brain" divider />
+        <WorkspaceLink
+          href="/heartbeat"
+          icon={HeartPulse}
+          label="Heartbeat"
+          divider
+        />
+      </Section>
+
       <Section title="Appearance">
         <ThemeRow />
       </Section>
@@ -99,6 +122,30 @@ export default function SettingsPanel({ user }: { user: User }) {
         </Section>
       )}
     </div>
+  );
+}
+
+function WorkspaceLink({
+  href,
+  icon: Icon,
+  label,
+  divider = false,
+}: {
+  href: string;
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  divider?: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className={`amaso-fx flex min-h-[48px] items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100 ${
+        divider ? "border-t border-neutral-800/70" : ""
+      }`}
+    >
+      <Icon className="h-5 w-5" />
+      <span>{label}</span>
+    </Link>
   );
 }
 
