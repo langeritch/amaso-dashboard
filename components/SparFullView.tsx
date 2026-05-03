@@ -8,9 +8,9 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { createPortal } from "react-dom";
 import {
   AlertCircle,
+  BookOpen,
   Check,
   ChevronRight,
   FileText,
@@ -24,8 +24,8 @@ import {
   Phone,
   PhoneOff,
   Radio,
-  Save,
   Send,
+  Activity,
   Trash2,
   Volume2,
   VolumeX,
@@ -40,9 +40,12 @@ import {
   type ToolStep,
 } from "./SparContext";
 import SparAudioVisualizer from "./SparAudioVisualizer";
-import WorkerStatusPanel from "./WorkerStatusPanel";
 import { useVoiceChannel } from "./useVoiceChannel";
-import { useClaimSparFooter, useSparFooter } from "./SparFooterContext";
+import { useClaimSparFooter } from "./SparFooterContext";
+import { SparMediaRow } from "./SparMiniPlayer";
+import HeartbeatPanel from "./HeartbeatPanel";
+import { useLatestTick } from "./HeartbeatView";
+import AutopilotSidebar from "./AutopilotSidebar";
 
 type Mode = "text" | "voice";
 
@@ -220,6 +223,49 @@ function ToolStepList({ steps }: { steps: ToolStep[] }) {
   );
 }
 
+/**
+ * Subtle "sources read" strip rendered under each assistant bubble.
+ * Default state is collapsed: just an icon and the count. Tap to
+ * expand and show the full list as small chips. The visual weight is
+ * deliberately low — this is transparency for users who want it, not
+ * a primary surface that competes with the answer.
+ */
+function SourcesStrip({ sources }: { sources: string[] }) {
+  const [open, setOpen] = useState(false);
+  if (!sources.length) return null;
+  const count = sources.length;
+  return (
+    <div className="mt-1.5 flex flex-col gap-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 self-start rounded-full border border-neutral-800/70 bg-neutral-900/40 px-2 py-0.5 text-[11px] text-neutral-400 transition hover:border-neutral-700 hover:text-neutral-200"
+        aria-expanded={open}
+      >
+        <BookOpen className="h-3 w-3" />
+        <span>
+          {count} {count === 1 ? "source" : "sources"} read
+        </span>
+        <ChevronRight
+          className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open ? (
+        <div className="flex flex-wrap gap-1 pl-1">
+          {sources.map((s) => (
+            <span
+              key={s}
+              className="break-all rounded-full border border-neutral-800/70 bg-neutral-900/30 px-2 py-0.5 text-[10.5px] text-neutral-400"
+            >
+              {s}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AttachmentPreviewBar({
   attachments,
   onRemove,
@@ -381,7 +427,7 @@ function ThinkingTimer({ startedAt }: { startedAt: number }) {
 
 export default function SparFullView() {
   const {
-    currentUser: _currentUser,
+    currentUser,
     canManageOthers,
     messages,
     busy,
@@ -419,8 +465,17 @@ export default function SparFullView() {
     youtubePlay,
     youtubePause,
     appendNotice,
+    activeDriftNotice,
+    dismissDriftNotice,
+    newConversation,
   } = useSpar();
-  void _currentUser;
+
+  // Latest heartbeat tick drives the small status dot on the heartbeat
+  // button so the user can see at a glance whether the last cron tick
+  // was clean (green) or escalated to a tier-2 alert (amber). Polled
+  // independently of the panel so the dot stays fresh even when the
+  // panel is closed.
+  const latestTick = useLatestTick(currentUser?.id ?? 0);
 
   const [draft, setDraft] = useState("");
   // Slash-command autocomplete state. `slashIndex` is the highlighted
@@ -441,6 +496,7 @@ export default function SparFullView() {
   const drainingRef = useRef(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [heartbeatOpen, setHeartbeatOpen] = useState(false);
+  const [autopilotSidebarOpen, setAutopilotSidebarOpen] = useState(false);
   // Mobile-only bottom sheet that holds the secondary controls
   // (autopilot, heartbeat, transcript, speaker, telegram, workers).
   // The desktop header keeps showing them inline; on small screens the
@@ -465,23 +521,33 @@ export default function SparFullView() {
   // which mode is rendered, so toggling never disturbs an active call.
   const [mode, setMode] = useState<Mode>("text");
 
-  // Claim the unified footer for as long as this view is mounted, so
-  // the SparMiniPlayer expands across the bottom and exposes the right-
-  // side slot we portal our mode/autopilot/heartbeat/menu buttons into.
+  // Listen for spar:remote-sidebar events so the spar voice assistant
+  // can open / close the right autopilot panel via the remote-control
+  // API. Mirrors the left-sidebar listener in SparPageShell.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ side?: string; open?: boolean }>)
+        .detail;
+      if (!detail || detail.side !== "right") return;
+      setAutopilotSidebarOpen(Boolean(detail.open));
+    };
+    window.addEventListener("spar:remote-sidebar", handler);
+    return () => window.removeEventListener("spar:remote-sidebar", handler);
+  }, []);
+
+  // Claim the global SparMiniPlayer footer slot so the mini-player
+  // hides itself while this view is mounted — we render a single
+  // unified footer below that bundles the media row, control buttons,
+  // and chat composer in one bar.
   useClaimSparFooter();
-  const sparFooter = useSparFooter();
-  const footerSlotEl = sparFooter?.slotEl ?? null;
-  // Read the live footer height from context (state-driven, forces a
-  // re-render when SparMiniPlayer's ResizeObserver publishes a new
-  // value). The earlier setup leaned on a CSS var with a `3.75rem`
-  // fallback, but on mobile the footer easily exceeds that once
-  // portaled controls + the safe-area inset stack — leaving the chat
-  // input hidden behind the bar on first paint and any time the
-  // footer grew. The 80px floor covers the brief moment before the
-  // first measurement lands; 16px buffer keeps the input visually
-  // clear of the footer instead of flush-against it.
-  const measuredFooterHeight = sparFooter?.footerHeight ?? 0;
-  const bottomReserve = (measuredFooterHeight || 80) + 16;
+  // Declarations must precede the `bottomReserve` calc below — the
+  // previous order had `bottomReserve` reading `unifiedFooterHeight`
+  // four lines before the useState call that creates it, which TS's
+  // block-scoped TDZ check (correctly) rejected. Build failed in a
+  // tight loop until this got moved up.
+  const unifiedFooterRef = useRef<HTMLDivElement>(null);
+  const [unifiedFooterHeight, setUnifiedFooterHeight] = useState(0);
+  const bottomReserve = (unifiedFooterHeight || 120) + 4;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -529,6 +595,21 @@ export default function SparFullView() {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }, [draft, mode]);
+
+  // Measure the unified footer in both modes — chat content uses this
+  // height to know how much bottom padding to reserve so messages
+  // never sit behind the bar (which grows with safe-area insets and
+  // when the textarea expands to multi-line).
+  useEffect(() => {
+    const el = unifiedFooterRef.current;
+    if (!el) return;
+    const update = () =>
+      setUnifiedFooterHeight(Math.ceil(el.getBoundingClientRect().height));
+    update();
+    const ro = new ResizeObserver(() => update());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [mode]);
 
   // POST to the filler-mode endpoint and surface a transcript notice
   // so the user has a visible confirmation that their /news, /quiet,
@@ -732,41 +813,35 @@ export default function SparFullView() {
       {lastDispatch && Date.now() - lastDispatch.confirmedAt < 30_000 && (
         <DispatchBanner dispatch={lastDispatch} />
       )}
+      {activeDriftNotice && (
+        <DriftHintBanner
+          message={activeDriftNotice}
+          onDismiss={() => void dismissDriftNotice()}
+          onStartNewChat={() => {
+            newConversation();
+            void dismissDriftNotice();
+          }}
+        />
+      )}
 
       {/* Mode-switching body. Both views are kept mounted and
           crossfaded via opacity so the audio analyser, ring animation,
           and chat scroll position never re-mount when toggling. */}
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* Mission-control feed for active workers — overlaid on the
-            chat area so it never eats into the chat's vertical space.
-            Pinned to the top-left, max-w-sm, defaults to a collapsed
-            pill so the chat fills the page from top to bottom.
-            Desktop only — on mobile the panel lives inside the bottom
-            sheet, since overlaying it on the chat there made the
-            layout chaotic. */}
-        {!isMobile && (
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-30 hidden md:flex">
-            <div className="pointer-events-auto">
-              <WorkerStatusPanel />
-            </div>
-          </div>
-        )}
+        {/* Workers panel used to overlay the chat area here; it now
+            lives in the page-level SparSidebar (see SparPageShell)
+            so the chat reclaims that vertical space. Mobile users
+            access it via the sidebar drawer triggered by the
+            hamburger button in the page shell. */}
         {/* ── Voice mode ────────────────────────────────────────── */}
         <div
-          className={`absolute inset-0 flex min-h-0 flex-col transition-opacity duration-300 ${
+          className={`absolute inset-x-0 top-0 flex min-h-0 flex-col transition-opacity duration-300 ${
             mode === "voice" ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
           aria-hidden={mode !== "voice"}
           style={{
             paddingTop: "var(--spar-chrome-h)",
-            // Reserve space at the bottom of the column so the call
-            // dock + input form sit above the unified footer strip
-            // rendered by SparMiniPlayer (claimed via useClaimSparFooter).
-            // bottomReserve = measured footer height + 16px buffer, so
-            // the call dock and voice input form always clear the
-            // footer regardless of safe-area insets or portaled
-            // controls that grow the bar on mobile.
-            paddingBottom: bottomReserve,
+            bottom: bottomReserve,
           }}
         >
           {/* Flex-1 spacer so the dock sits at the bottom of the
@@ -892,7 +967,7 @@ export default function SparFullView() {
                 e.preventDefault();
                 submitDraft();
               }}
-              className="mt-2 flex w-full max-w-sm items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/60 px-3 py-1.5 text-sm"
+              className="mt-2 flex w-full max-w-sm items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/70 px-3 py-1.5 text-sm transition-[border-color,box-shadow] duration-200 ease-out focus-within:border-emerald-500/50 focus-within:shadow-[0_0_0_3px_rgba(16,185,129,0.12)]"
             >
               <button
                 type="button"
@@ -913,7 +988,7 @@ export default function SparFullView() {
               <button
                 type="submit"
                 disabled={!draft.trim() && !pendingAttachments.length}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-700 text-neutral-100 transition disabled:opacity-40"
+                className="amaso-fx amaso-press flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500 text-neutral-950 shadow-[0_2px_8px_rgba(16,185,129,0.35)] hover:bg-emerald-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
                 aria-label="Send"
               >
                 <Send className="h-4 w-4" />
@@ -933,22 +1008,13 @@ export default function SparFullView() {
             stay at natural height instead of competing with the
             list for vertical space. */}
         <div
-          className={`absolute inset-0 flex min-h-0 flex-col transition-opacity duration-300 ${
+          className={`absolute inset-x-0 top-0 flex min-h-0 flex-col transition-opacity duration-300 ${
             mode === "text" ? "opacity-100" : "pointer-events-none opacity-0"
           }`}
           aria-hidden={mode !== "text"}
           style={{
             paddingTop: "var(--spar-chrome-h)",
-            // Reserve space at the bottom of the column so the chat
-            // input dock sits above the unified footer strip rendered
-            // by SparMiniPlayer (claimed via useClaimSparFooter).
-            // bottomReserve = measured footer height + 16px buffer.
-            // Reading the React state value (instead of a CSS var
-            // with a small fallback) means we re-render the moment a
-            // new measurement lands, so the input never sits behind
-            // the bar on mobile where portaled controls + safe-area
-            // insets routinely push the footer past 80px.
-            paddingBottom: bottomReserve,
+            bottom: bottomReserve,
           }}
           onDragEnter={handleDragEnter}
           onDragLeave={handleDragLeave}
@@ -1003,6 +1069,10 @@ export default function SparFullView() {
                   busy;
                 const steps =
                   m.role === "assistant" && m.steps?.length ? m.steps : null;
+                const sources =
+                  m.role === "assistant" && m.sources?.length
+                    ? m.sources
+                    : null;
                 // Tool steps render as their own track, full-width and
                 // off to the side of the assistant bubble. Wrapping
                 // them in the same list-item as the message keeps the
@@ -1022,7 +1092,7 @@ export default function SparFullView() {
                     >
                       <ToolStepList steps={steps} />
                       {(hasText || !isThinking) && (
-                        <div className="rounded-2xl bg-neutral-800/70 px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap text-neutral-100">
+                        <div className="rounded-2xl rounded-tl-md bg-neutral-800/70 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-neutral-100 ring-1 ring-white/[0.04] shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
                           {m.content || (busy ? "…" : "")}
                           {dur !== null && (
                             <span className="mt-1 block text-[10px] text-neutral-500">
@@ -1034,29 +1104,72 @@ export default function SparFullView() {
                           )}
                         </div>
                       )}
+                      {sources && (hasText || !isThinking) ? (
+                        <SourcesStrip sources={sources} />
+                      ) : null}
+                    </li>
+                  );
+                }
+                // Auto-report bubbles render as user messages with a small
+                // badge above them so the operator can tell at a glance
+                // that the system kicked the turn off (a dispatched
+                // terminal went idle), not them. Otherwise visually
+                // identical to a typed user message.
+                if (m.role === "user" && m.isAutoReport) {
+                  return (
+                    <li
+                      key={m.id}
+                      className="flex max-w-[85%] flex-col items-end gap-1 self-end"
+                    >
+                      <span
+                        className="rounded-full border border-emerald-700/60 bg-emerald-900/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-emerald-300"
+                        title="Inserted by the auto-report path after a dispatched terminal finished"
+                      >
+                        Auto-report
+                      </span>
+                      <div className="rounded-2xl rounded-tr-md bg-emerald-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-emerald-50 ring-1 ring-emerald-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
+                        {m.content || ""}
+                        {m.attachments?.length ? (
+                          <InlineAttachments attachments={m.attachments} />
+                        ) : null}
+                      </div>
                     </li>
                   );
                 }
                 return (
                   <li
                     key={m.id}
-                    className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                    className={
                       m.role === "user"
-                        ? "self-end bg-emerald-700/30 text-emerald-50"
-                        : "self-start bg-neutral-800/70 text-neutral-100"
-                    }`}
+                        ? "max-w-[85%] self-end rounded-2xl rounded-tr-md bg-emerald-600/25 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-emerald-50 ring-1 ring-emerald-400/15 shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
+                        : "flex max-w-[85%] flex-col self-start"
+                    }
                   >
-                    {m.content || (busy && m.role === "assistant" ? "…" : "")}
-                    {m.attachments?.length ? (
-                      <InlineAttachments attachments={m.attachments} />
-                    ) : null}
-                    {dur !== null && (
-                      <span className="mt-1 block text-[10px] text-neutral-500">
-                        {dur}s
-                      </span>
-                    )}
-                    {isThinking && (
-                      <ThinkingTimer startedAt={m.startedAt!} />
+                    {m.role === "assistant" ? (
+                      <>
+                        <div className="rounded-2xl rounded-tl-md bg-neutral-800/70 px-4 py-2.5 text-[14px] leading-[1.55] tracking-[-0.005em] whitespace-pre-wrap text-neutral-100 ring-1 ring-white/[0.04] shadow-[0_1px_2px_rgba(0,0,0,0.18)]">
+                          {m.content || (busy ? "…" : "")}
+                          {m.attachments?.length ? (
+                            <InlineAttachments attachments={m.attachments} />
+                          ) : null}
+                          {dur !== null && (
+                            <span className="mt-1 block text-[10px] text-neutral-500">
+                              {dur}s
+                            </span>
+                          )}
+                          {isThinking && (
+                            <ThinkingTimer startedAt={m.startedAt!} />
+                          )}
+                        </div>
+                        {sources ? <SourcesStrip sources={sources} /> : null}
+                      </>
+                    ) : (
+                      <>
+                        {m.content || ""}
+                        {m.attachments?.length ? (
+                          <InlineAttachments attachments={m.attachments} />
+                        ) : null}
+                      </>
                     )}
                   </li>
                 );
@@ -1065,7 +1178,7 @@ export default function SparFullView() {
                   while a voice call streams into text mode. Faded so
                   it reads as not-yet-committed. */}
               {interimText && (
-                <li className="max-w-[85%] self-end rounded-2xl bg-emerald-700/15 px-4 py-2.5 text-sm italic leading-relaxed text-emerald-100/70">
+                <li className="max-w-[85%] self-end rounded-2xl rounded-tr-md bg-emerald-700/15 px-4 py-2.5 text-[14px] italic leading-[1.55] text-emerald-100/70 ring-1 ring-emerald-400/10">
                   {interimText}
                 </li>
               )}
@@ -1078,155 +1191,46 @@ export default function SparFullView() {
           {/* Subtle phase indicator above the input so users know
               something's happening even without the central ring. */}
           {(busy || !ttsIdle || (inCall && listening && !micMuted)) && (
-            <div className="flex-shrink-0 px-4 pb-1 text-center text-[11px] italic text-neutral-500">
-              {!ttsIdle
-                ? "speaking…"
-                : busy
-                  ? "thinking…"
-                  : "listening…"}
+            <div className="flex-shrink-0 px-4 pb-1 flex items-center justify-center gap-1.5 text-[11px] text-neutral-500">
+              <span className="inline-flex items-center gap-1" aria-hidden>
+                <span className="amaso-thinking-dot" />
+                <span className="amaso-thinking-dot" />
+                <span className="amaso-thinking-dot" />
+              </span>
+              <span className="italic">
+                {!ttsIdle
+                  ? "speaking"
+                  : busy
+                    ? "thinking"
+                    : "listening"}
+              </span>
             </div>
           )}
-          <div className="pb-safe flex-shrink-0 border-t border-neutral-900/80 bg-neutral-950/70 px-4 pb-4 pt-3 backdrop-blur">
-            <QueueList
-              widthClass="max-w-3xl"
-              queue={queue}
-              busy={busy}
-              ttsIdle={ttsIdle}
-              onEdit={editQueued}
-              onRemove={removeQueued}
-            />
-            <div className="mx-auto max-w-3xl">
-              <AttachmentPreviewBar
-                attachments={pendingAttachments}
-                onRemove={removeAttachment}
-              />
-            </div>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                submitDraft();
-              }}
-              className="relative mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-neutral-800 bg-neutral-900/60 px-3 py-2 transition focus-within:border-neutral-700"
-            >
-              {slashOpen && (
-                <SlashCommandDropdown
-                  matches={slashMatches}
-                  selectedIndex={Math.min(
-                    slashIndex,
-                    Math.max(slashMatches.length - 1, 0),
-                  )}
-                  onSelect={applySlashCommand}
-                  onHover={setSlashIndex}
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach files"
-                title="Attach files"
-                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200"
-              >
-                <Paperclip className="h-4 w-4" />
-              </button>
-              <textarea
-                ref={textareaRef}
-                rows={1}
-                value={draft}
-                onChange={(e) => {
-                  setDraft(e.target.value);
-                  // Any edit re-opens a dismissed dropdown so a follow-up
-                  // keystroke (e.g. typing more after Esc) can re-engage
-                  // autocomplete without an explicit re-trigger.
-                  setSlashDismissed(false);
-                }}
-                onKeyDown={(e) => {
-                  if (slashOpen) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setSlashIndex(
-                        (i) => (i + 1) % slashMatches.length,
-                      );
-                      return;
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setSlashIndex(
-                        (i) =>
-                          (i - 1 + slashMatches.length) % slashMatches.length,
-                      );
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setSlashDismissed(true);
-                      return;
-                    }
-                    if (
-                      e.key === "Enter" ||
-                      e.key === " " ||
-                      e.key === "Tab"
-                    ) {
-                      e.preventDefault();
-                      const idx = Math.min(
-                        slashIndex,
-                        slashMatches.length - 1,
-                      );
-                      const cmd = slashMatches[idx];
-                      if (cmd) applySlashCommand(cmd);
-                      return;
-                    }
-                  }
-                  if (
-                    e.key === "Enter" &&
-                    !e.shiftKey &&
-                    !e.nativeEvent.isComposing
-                  ) {
-                    e.preventDefault();
-                    submitDraft();
-                  }
-                }}
-                placeholder={
-                  busy || !ttsIdle
-                    ? "type — will queue until ready…"
-                    : "message your sparring partner…"
-                }
-                className="flex-1 resize-none bg-transparent py-1 text-sm leading-relaxed text-neutral-100 placeholder-neutral-500 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={() => setMode("voice")}
-                aria-label="switch to voice mode"
-                title="voice mode"
-                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200"
-              >
-                <Mic className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={handleSpeakerToggle}
-                aria-pressed={!ttsMuted}
-                aria-label={ttsMuted ? "unmute speaker" : "mute speaker"}
-                title={ttsMuted ? "unmute speaker" : "mute speaker"}
-                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200"
-              >
-                {ttsMuted ? (
-                  <VolumeX className="h-4 w-4" />
-                ) : (
-                  <Volume2 className="h-4 w-4" />
-                )}
-              </button>
-              <button
-                type="submit"
-                disabled={!draft.trim() && !pendingAttachments.length}
-                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-neutral-200 text-neutral-900 transition hover:bg-white disabled:opacity-40"
-                aria-label="Send"
-              >
-                <Send className="h-4 w-4" />
-              </button>
-            </form>
-          </div>
         </div>
       </div>
+
+      <AutopilotSidebar
+        open={autopilotSidebarOpen}
+        onClose={() => setAutopilotSidebarOpen(false)}
+      />
+
+      {/* Right-edge presence indicator. Only shows when autopilot is on
+          AND the panel is closed — gives a subtle "loop is alive" cue
+          without taking up footer space. Tap to open the panel. */}
+      {autopilot && !autopilotSidebarOpen && (
+        <button
+          type="button"
+          onClick={() => setAutopilotSidebarOpen(true)}
+          aria-label="open autopilot panel"
+          title="autopilot is on — open panel"
+          className="fixed right-1.5 top-1/2 z-30 flex h-8 w-3 -translate-y-1/2 items-center justify-center rounded-l-md bg-emerald-500/10 transition hover:bg-emerald-500/20"
+        >
+          <span
+            aria-hidden
+            className="h-2 w-2 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.85)]"
+          />
+        </button>
+      )}
 
       <MobileControlsSheet
         open={menuOpen}
@@ -1251,7 +1255,6 @@ export default function SparFullView() {
           setHeartbeatOpen(true);
           setMenuOpen(false);
         }}
-        renderWorkers={isMobile && menuOpen}
       />
 
       <SideDrawer
@@ -1295,132 +1298,376 @@ export default function SparFullView() {
         </ul>
       </SideDrawer>
 
-      <SideDrawer
+      <HeartbeatPanel
         open={heartbeatOpen}
         onClose={() => setHeartbeatOpen(false)}
-        title="heartbeat"
-      >
-        <div className="flex h-full flex-col">
-          <div className="flex items-center gap-2 border-b border-neutral-800 px-3 py-2 text-xs text-neutral-400">
-            {canManageOthers && (
-              <label className="flex items-center gap-1 text-[11px] text-neutral-500">
-                user
-                <input
-                  type="number"
-                  min={1}
-                  value={speakingUserId}
-                  onChange={(e) => {
-                    const n = Number(e.target.value);
-                    if (Number.isFinite(n) && n > 0) void loadHeartbeatFor(n);
-                  }}
-                  className="w-16 rounded border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-right text-[11px] text-neutral-200"
-                />
-              </label>
-            )}
-            <button
-              type="button"
-              disabled={!heartbeatDirty || savingHeartbeat}
-              onClick={() => void saveHeartbeat()}
-              className="ml-auto flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-200 hover:border-neutral-600 disabled:opacity-40"
-            >
-              <Save className="h-3 w-3" /> {savingHeartbeat ? "…" : "save"}
-            </button>
-          </div>
-          <textarea
-            value={heartbeat}
-            onChange={(e) => {
-              setHeartbeat(e.target.value);
-              setHeartbeatDirty(true);
-            }}
-            spellCheck={false}
-            className="flex-1 resize-none bg-neutral-950 px-3 py-2 font-mono text-[12px] leading-relaxed text-neutral-200 focus:outline-none"
-            placeholder={"# What's on my plate\n\n- "}
-          />
-        </div>
-      </SideDrawer>
+        userId={currentUser?.id ?? 0}
+        initialBody={heartbeat}
+        canManageOthers={canManageOthers}
+        speakingUserId={speakingUserId}
+        onSpeakerChange={(n) => void loadHeartbeatFor(n)}
+        editorBody={heartbeat}
+        setEditorBody={setHeartbeat}
+        editorDirty={heartbeatDirty}
+        setEditorDirty={setHeartbeatDirty}
+        saving={savingHeartbeat}
+        onSave={saveHeartbeat}
+      />
 
-      {/* Footer-slot controls — portaled into the SparMiniPlayer's
-          right-side slot so the mode toggle, autopilot, heartbeat, and
-          mobile hamburger live on the same horizontal strip as the
-          media player. The hamburger picks up a coloured dot when
-          something inside the sheet is active (in-call / Telegram /
-          autopilot) so users know to open it. */}
-      {footerSlotEl &&
-        createPortal(
-          <>
-            <button
-              type="button"
-              onClick={() => setMode((m) => (m === "text" ? "voice" : "text"))}
-              aria-pressed={mode === "voice"}
-              title={
-                mode === "text"
-                  ? "switch to voice mode"
-                  : "switch to text mode"
-              }
-              className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900/80 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
-            >
-              {mode === "text" ? (
-                <Mic className="h-3 w-3" />
-              ) : (
-                <MessageSquare className="h-3 w-3" />
-              )}
-              <span>{mode === "text" ? "voice" : "text"}</span>
-            </button>
-            <button
-              type="button"
-              onClick={toggleAutopilot}
-              aria-pressed={autopilot}
-              title={
-                autopilot
-                  ? "autopilot on — spar handles permission gates itself"
-                  : "autopilot off — spar asks before acting"
-              }
-              className={`group hidden md:flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] transition ${
-                autopilot
-                  ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200 shadow-[0_0_18px_rgba(16,185,129,0.45)] hover:border-emerald-300/80"
-                  : "border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
-              }`}
-            >
-              <Zap
-                className={`h-3 w-3 ${
-                  autopilot
-                    ? "fill-emerald-300 text-emerald-300 animate-pulse"
-                    : "text-neutral-500 group-hover:text-neutral-300"
-                }`}
-              />
-              autopilot
-            </button>
-            <button
-              type="button"
-              onClick={() => setHeartbeatOpen(true)}
-              className="hidden md:inline-block rounded-full border border-neutral-800 bg-neutral-900/80 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
-            >
-              heartbeat
-            </button>
-            <button
-              type="button"
-              onClick={() => setMenuOpen(true)}
-              aria-label="open controls"
-              title="open controls"
-              className="relative md:hidden inline-flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-100"
-            >
-              <Menu className="h-4 w-4" />
-              {(inCall || onTelegram || autopilot) && (
-                <span
-                  aria-hidden
-                  className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ${
-                    inCall
-                      ? "bg-rose-400"
-                      : onTelegram
-                        ? "bg-sky-400"
-                        : "bg-emerald-400"
-                  } animate-pulse shadow-[0_0_8px_currentColor]`}
-                />
-              )}
-            </button>
-          </>,
-          footerSlotEl,
+      {/* Unified footer — single horizontal strip with media controls
+          on the left, the chat composer flexing in the middle, and the
+          mode/autopilot/heartbeat action buttons on the right. Fixed to
+          the viewport bottom and clears the safe-area inset; chat
+          surfaces above reserve `bottomReserve` so messages never sit
+          behind it. The composer renders in text mode only — voice
+          mode keeps its dock inside the voice column. Queue list and
+          attachment previews stack above the row when text mode is
+          active so the input row itself stays a single line. */}
+      <div
+        ref={unifiedFooterRef}
+        className="pb-safe pointer-events-auto fixed inset-x-0 bottom-0 z-30 border-t border-neutral-800/80 bg-neutral-950/85 shadow-[0_-8px_32px_rgba(0,0,0,0.55)] backdrop-blur-md backdrop-saturate-150"
+      >
+        {mode === "text" && (queue.length > 0 || pendingAttachments.length > 0) && (
+          <div className="mx-auto w-full max-w-3xl px-3 pt-2">
+            <QueueList
+              widthClass="max-w-3xl"
+              queue={queue}
+              busy={busy}
+              ttsIdle={ttsIdle}
+              onEdit={editQueued}
+              onRemove={removeQueued}
+            />
+            <AttachmentPreviewBar
+              attachments={pendingAttachments}
+              onRemove={removeAttachment}
+            />
+          </div>
         )}
+        {/* Three-section row.
+            ┌──────────────────────────────────────────────────────┐
+            │ media (left) │ composer (center, flex-1) │ actions   │
+            └──────────────────────────────────────────────────────┘
+            On phones (<640px) it stacks: media on its own line
+            above, composer + actions sharing the line below — the
+            three-up layout doesn't survive a 375px viewport without
+            squeezing the input below readable width. From `sm:` up
+            we switch to a 3-column grid with equal-flex side rails
+            (`1fr` each) and a center column capped at `max-w-3xl`
+            (768px). The equal side rails are what visually centers
+            the composer between the screen edges even when the
+            media row and the action cluster have different widths
+            — without them, `flex-1` on the form would just stretch
+            it across whatever space was left and the input would
+            drift toward whichever side had less content. */}
+        <div className="flex flex-col gap-2 px-3 py-2 sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(0,768px)_minmax(0,1fr)] sm:items-center sm:gap-3">
+          {/* LEFT — media controls. SparMediaRow is its own
+              `relative flex` wrapper, so it slots straight in as a
+              single flex child; the MediaDrawer floats above via
+              position:absolute instead of taking flow space and
+              visually splitting the row. The `sm:max-w-[14rem]`
+              cap stops the now-playing label from outgrowing the
+              composer on desktop. */}
+          <div className="flex min-w-0 items-center sm:max-w-[14rem] sm:justify-self-start">
+            <SparMediaRow compact />
+          </div>
+
+          {/* CENTER + RIGHT lane — on phones this wrapper holds the
+              composer and the action cluster on a shared flex line
+              (the second stacked row). From `sm:` up the wrapper
+              becomes `display: contents` so its children (form +
+              buttons) become direct grid items of the parent — form
+              into the centered column 2, buttons into column 3. */}
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:contents">
+            {/* CENTER — text composer (text mode only). `mx-auto
+                max-w-3xl` caps the input on huge desktops so it
+                doesn't stretch into one unreadable line. The
+                composer holds only paperclip + textarea + send —
+                speaker/TTS lives in the right cluster instead. */}
+            {mode === "text" ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  submitDraft();
+                }}
+                className="relative mx-auto flex min-w-0 max-w-3xl flex-1 items-end gap-1.5 rounded-2xl border border-neutral-800 bg-neutral-900/70 px-2.5 py-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-[border-color,box-shadow,background-color] duration-200 ease-out focus-within:border-emerald-500/50 focus-within:bg-neutral-900/85 focus-within:shadow-[0_0_0_3px_rgba(16,185,129,0.12),0_1px_2px_rgba(0,0,0,0.25)] sm:w-full sm:flex-none sm:col-start-2"
+              >
+                {slashOpen && (
+                  <SlashCommandDropdown
+                    matches={slashMatches}
+                    selectedIndex={Math.min(
+                      slashIndex,
+                      Math.max(slashMatches.length - 1, 0),
+                    )}
+                    onSelect={applySlashCommand}
+                    onHover={setSlashIndex}
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Attach files"
+                  title="Attach files"
+                  className="amaso-fx amaso-press flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </button>
+                <textarea
+                  ref={textareaRef}
+                  rows={1}
+                  value={draft}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    // Any edit re-opens a dismissed dropdown so a follow-up
+                    // keystroke (e.g. typing more after Esc) can re-engage
+                    // autocomplete without an explicit re-trigger.
+                    setSlashDismissed(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (slashOpen) {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setSlashIndex(
+                          (i) => (i + 1) % slashMatches.length,
+                        );
+                        return;
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setSlashIndex(
+                          (i) =>
+                            (i - 1 + slashMatches.length) % slashMatches.length,
+                        );
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        setSlashDismissed(true);
+                        return;
+                      }
+                      if (
+                        e.key === "Enter" ||
+                        e.key === " " ||
+                        e.key === "Tab"
+                      ) {
+                        e.preventDefault();
+                        const idx = Math.min(
+                          slashIndex,
+                          slashMatches.length - 1,
+                        );
+                        const cmd = slashMatches[idx];
+                        if (cmd) applySlashCommand(cmd);
+                        return;
+                      }
+                    }
+                    if (
+                      e.key === "Enter" &&
+                      !e.shiftKey &&
+                      !e.nativeEvent.isComposing
+                    ) {
+                      e.preventDefault();
+                      submitDraft();
+                    }
+                  }}
+                  placeholder={
+                    busy || !ttsIdle
+                      ? "type — will queue until ready…"
+                      : "message your sparring partner…"
+                  }
+                  className="min-w-0 flex-1 resize-none bg-transparent py-1 text-sm leading-relaxed text-neutral-100 placeholder-neutral-500 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!draft.trim() && !pendingAttachments.length}
+                  className="amaso-fx amaso-press flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500 text-neutral-950 shadow-[0_2px_8px_rgba(16,185,129,0.35)] hover:bg-emerald-400 hover:shadow-[0_2px_12px_rgba(16,185,129,0.5)] disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
+                  aria-label="Send"
+                >
+                  <Send className="h-4 w-4" />
+                </button>
+              </form>
+            ) : (
+              <div className="flex-1 sm:hidden" />
+            )}
+
+            {/* RIGHT — autopilot, heartbeat, mode toggle, then the
+                mobile menu trigger. The TTS mute toggle lives inside
+                the media drawer (left column) — there is intentionally
+                only one. Each button collapses to icon-only below
+                `sm:` so the cluster fits next to the composer on
+                phones. From `sm:` up the parent wrapper switches to
+                `display: contents` so this div lands in column 3 of
+                the grid — `justify-self-end` glues it to the right
+                edge of that column. */}
+            <div className="flex flex-shrink-0 items-center gap-1 sm:gap-1.5 sm:col-start-3 sm:justify-self-end">
+              <button
+                type="button"
+                onClick={toggleAutopilot}
+                aria-pressed={autopilot}
+                aria-label={
+                  autopilot
+                    ? "autopilot on — spar handles permission gates itself"
+                    : "autopilot off — spar asks before acting"
+                }
+                title={
+                  autopilot
+                    ? "autopilot on — spar handles permission gates itself"
+                    : "autopilot off — spar asks before acting"
+                }
+                className={`group inline-flex h-8 items-center gap-1.5 rounded-full border px-2 text-[11px] transition sm:px-3 ${
+                  autopilot
+                    ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200 shadow-[0_0_18px_rgba(16,185,129,0.45)] hover:border-emerald-300/80"
+                    : "border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
+                }`}
+              >
+                <Zap
+                  className={`h-3.5 w-3.5 ${
+                    autopilot
+                      ? "fill-emerald-300 text-emerald-300 animate-pulse"
+                      : "text-neutral-500 group-hover:text-neutral-300"
+                  }`}
+                />
+                <span className="hidden sm:inline">autopilot</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAutopilotSidebarOpen(true)}
+                aria-label="open autopilot panel"
+                title="autopilot controls"
+                className="inline-flex h-8 w-7 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900/80 text-neutral-500 transition hover:border-neutral-700 hover:text-neutral-200"
+              >
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setHeartbeatOpen((v) => !v)}
+                aria-label={heartbeatOpen ? "close heartbeat" : "open heartbeat"}
+                aria-pressed={heartbeatOpen}
+                title={heartbeatOpen ? "close heartbeat" : "open heartbeat"}
+                className={`relative inline-flex h-8 items-center gap-1.5 rounded-full border px-2 text-[11px] transition sm:px-3 ${
+                  heartbeatOpen
+                    ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-100 shadow-[0_0_18px_rgba(16,185,129,0.35)]"
+                    : "border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-200"
+                }`}
+              >
+                <Activity className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">heartbeat</span>
+                {latestTick && (
+                  <span
+                    aria-hidden
+                    title={
+                      latestTick.status === "ok"
+                        ? "last tick: ok"
+                        : latestTick.notified
+                          ? "last tick: alert pushed"
+                          : "last tick: alert (silent)"
+                    }
+                    className={`absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full ${
+                      latestTick.status === "ok"
+                        ? "bg-emerald-400"
+                        : latestTick.notified
+                          ? "bg-amber-400 animate-pulse"
+                          : "bg-amber-400/70"
+                    } shadow-[0_0_6px_currentColor]`}
+                  />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode((m) => (m === "text" ? "voice" : "text"))}
+                aria-pressed={mode === "voice"}
+                aria-label={
+                  mode === "text"
+                    ? "switch to voice mode"
+                    : "switch to text mode"
+                }
+                title={
+                  mode === "text"
+                    ? "switch to voice mode"
+                    : "switch to text mode"
+                }
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900/80 px-2 text-[11px] text-neutral-300 hover:border-neutral-700 hover:text-neutral-200 sm:px-3"
+              >
+                {mode === "text" ? (
+                  <Mic className="h-3.5 w-3.5" />
+                ) : (
+                  <MessageSquare className="h-3.5 w-3.5" />
+                )}
+                <span className="hidden sm:inline">
+                  {mode === "text" ? "voice" : "text"}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMenuOpen(true)}
+                aria-label="open controls"
+                title="open controls"
+                className="relative inline-flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900/80 text-neutral-300 hover:border-neutral-700 hover:text-neutral-100 md:hidden"
+              >
+                <Menu className="h-4 w-4" />
+                {(inCall || onTelegram || autopilot) && (
+                  <span
+                    aria-hidden
+                    className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ${
+                      inCall
+                        ? "bg-rose-400"
+                        : onTelegram
+                          ? "bg-sky-400"
+                          : "bg-emerald-400"
+                    } animate-pulse shadow-[0_0_8px_currentColor]`}
+                  />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Subtle "this chat has drifted" banner. Server-side drift detection
+ * sets the message; the user dismisses it here, optionally starting a
+ * new chat in the same gesture. Renders just below the dispatch
+ * banner so it stays inside the chat column without obscuring the
+ * media row underneath.
+ */
+function DriftHintBanner({
+  message,
+  onDismiss,
+  onStartNewChat,
+}: {
+  message: string;
+  onDismiss: () => void;
+  onStartNewChat: () => void;
+}) {
+  return (
+    <div className="mx-4 mb-2 flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-amber-950/30 px-3 py-2 text-xs text-amber-100">
+      <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-300" />
+      <div className="min-w-0 flex-1">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-amber-300/80">
+          topic drift
+        </div>
+        <div className="mt-1 leading-snug whitespace-pre-wrap text-amber-50/90">
+          {message}
+        </div>
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-1">
+        <button
+          type="button"
+          onClick={onStartNewChat}
+          className="rounded-md border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] text-amber-100 transition hover:bg-amber-800/50"
+        >
+          new chat
+        </button>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="rounded-md p-1 text-amber-300/80 transition hover:bg-amber-900/40 hover:text-amber-100"
+          aria-label="dismiss drift hint"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -1587,7 +1834,6 @@ function MobileControlsSheet({
   endCall,
   openTranscript,
   openHeartbeat,
-  renderWorkers,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1605,7 +1851,6 @@ function MobileControlsSheet({
   endCall: () => void;
   openTranscript: () => void;
   openHeartbeat: () => void;
-  renderWorkers: boolean;
 }) {
   return (
     <div
@@ -1791,15 +2036,9 @@ function MobileControlsSheet({
               </button>
             </div>
 
-            {/* Workers panel — rendered inline here on mobile instead
-                of overlaid on the chat. Only mounts while the sheet
-                is open so its 1 s polling loop doesn't run in the
-                background. */}
-            {renderWorkers && (
-              <div className="-mx-4">
-                <WorkerStatusPanel />
-              </div>
-            )}
+            {/* Workers panel moved out of this sheet entirely — it
+                now lives in the spar sidebar so mobile users open it
+                with the hamburger toggle, not the controls sheet. */}
           </div>
         </div>
       </div>
