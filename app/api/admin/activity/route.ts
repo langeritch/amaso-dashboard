@@ -7,7 +7,6 @@
 
 import { NextResponse } from "next/server";
 import { apiRequireSuperUser, apiRequireUser } from "@/lib/guard";
-import { isDemoUser } from "@/lib/demo/session";
 import {
   listOnlineUsers,
   listRecentActivity,
@@ -22,9 +21,6 @@ const MAX_DETAIL_BYTES = 4_096;
 export async function POST(req: Request) {
   const auth = await apiRequireUser();
   if (!auth.ok) return auth.res;
-  if (isDemoUser(auth.user)) {
-    return NextResponse.json({ ok: true, skipped: "demo" });
-  }
 
   let body: {
     label?: unknown;

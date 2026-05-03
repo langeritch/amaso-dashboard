@@ -3,13 +3,11 @@
 // — appends a page_visit activity event. The super-user activity
 // panel reads from the same tables this writes to.
 //
-// Demo users are excluded so the synthetic dashboard tour never
-// pollutes real activity. Auth is `apiRequireUser`: any logged-in
-// account heartbeats; only super-user can READ via the admin endpoint.
+// Auth is `apiRequireUser`: any logged-in account heartbeats; only
+// super-user can READ via the admin endpoint.
 
 import { NextResponse } from "next/server";
 import { apiRequireUser } from "@/lib/guard";
-import { isDemoUser } from "@/lib/demo/session";
 import { recordActivity, upsertPresence } from "@/lib/presence";
 
 export const dynamic = "force-dynamic";
@@ -17,9 +15,6 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   const auth = await apiRequireUser();
   if (!auth.ok) return auth.res;
-  if (isDemoUser(auth.user)) {
-    return NextResponse.json({ ok: true, skipped: "demo" });
-  }
 
   let body: { clientId?: unknown; path?: unknown };
   try {

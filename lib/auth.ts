@@ -44,14 +44,6 @@ export async function getSessionIdFromCookies(): Promise<string | null> {
 }
 
 export async function getCurrentUser(): Promise<User | null> {
-  // Demo mode bypasses the entire session/auth path. See lib/demo/session.
-  // Gated on DEMO_ENABLED — when the kill switch is off, a stale cookie
-  // on a visitor's browser must not return DEMO_USER (which would skip
-  // real auth and land them in the fake workspace).
-  const { DEMO_COOKIE, DEMO_USER, DEMO_ENABLED } = await import("./demo/session");
-  const store = await cookies();
-  if (DEMO_ENABLED && store.get(DEMO_COOKIE)?.value === "1") return DEMO_USER;
-
   const id = await getSessionIdFromCookies();
   if (!id) return null;
   return userFromSession(id);

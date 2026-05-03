@@ -11,7 +11,6 @@ import {
   X,
   Phone,
   Brain,
-  Play,
   Settings,
   Activity,
   Users,
@@ -107,16 +106,6 @@ export default function Topbar({ user }: { user: User }) {
             drawer's "More" group. The header used to host seven
             destinations — now Spar + Projects are the spine. */}
         <div className="hidden items-center justify-self-center gap-1 sm:flex">
-          <a
-            href="/login?demo=1"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="amaso-fx flex items-center gap-1.5 rounded-md px-3 py-1.5 text-neutral-400 hover:bg-neutral-900/80 hover:text-neutral-100"
-            title="Open demo tour (new tab)"
-          >
-            <Play className="h-3.5 w-3.5" />
-            <span>Demo</span>
-          </a>
           {PRIMARY_NAV.map(({ href, label, icon: Icon }) => {
             const active = isActive(pathname, href);
             const isSpar = href === "/spar";

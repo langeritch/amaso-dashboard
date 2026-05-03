@@ -7,14 +7,10 @@ import ChatClient from "@/components/ChatClient";
 
 export const dynamic = "force-dynamic";
 
-export default async function ChatPage({
-  searchParams,
-}: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
-  const sp = await searchParams;
-  if (sp.demo === "1" || sp.demo === "true") redirect("/demo"); // `/demo` sets the cookie, then bounces here
+export default async function ChatPage() {
   const user = await requireUser();
+  // Clients have a dedicated portal — never the internal chat dashboard.
+  if (user.role === "client") redirect("/client");
   const channels = listChannelsForUser(user);
   const projects = visibleProjects(user).map((p) => ({ id: p.id, name: p.name }));
   const initialChannelId =

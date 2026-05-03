@@ -1,8 +1,6 @@
 import { getDb } from "./db";
 import { loadConfig, type ProjectConfig } from "./config";
 import type { User } from "./db";
-import { demoProjectConfigs, DEMO_PROJECTS } from "./demo/data";
-import { isDemoUser } from "./demo/session";
 
 /**
  * Which projects this user is allowed to see?
@@ -10,7 +8,6 @@ import { isDemoUser } from "./demo/session";
  *  - client       → only projects explicitly granted in `project_access`
  */
 export function visibleProjects(user: User): ProjectConfig[] {
-  if (isDemoUser(user)) return demoProjectConfigs();
   const all = loadConfig().projects;
   if (user.role === "admin" || user.role === "team") return all;
   const rows = getDb()
@@ -21,9 +18,6 @@ export function visibleProjects(user: User): ProjectConfig[] {
 }
 
 export function canAccessProject(user: User, projectId: string): boolean {
-  if (isDemoUser(user)) {
-    return DEMO_PROJECTS.some((p) => p.id === projectId);
-  }
   if (user.role === "admin" || user.role === "team") {
     return loadConfig().projects.some((p) => p.id === projectId);
   }

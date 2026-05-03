@@ -3,11 +3,6 @@ import { loadConfig } from "./config";
 import { canAccessProject, visibleProjects } from "./access";
 import { chatAttachmentsByMessage } from "./attachments";
 import type { User } from "./db";
-import {
-  demoChannelViews,
-  demoMessagesForChannel,
-} from "./demo/data";
-import { isDemoUser } from "./demo/session";
 
 export type ChannelKind = "general" | "project" | "dm";
 
@@ -71,7 +66,6 @@ function safeJson(s: string | null): Record<string, unknown> | null {
 
 /** Ensure a channel row exists for every project this user can see. */
 export function ensureProjectChannels(user: User): void {
-  if (isDemoUser(user)) return; // demo mode never writes to the DB
   const db = getDb();
   const projects = visibleProjects(user);
   const insert = db.prepare(
@@ -86,7 +80,6 @@ export function ensureProjectChannels(user: User): void {
 
 /** Channels visible to this user: general + all project channels they can access + DMs they're in. */
 export function listChannelsForUser(user: User): ChannelView[] {
-  if (isDemoUser(user)) return demoChannelViews();
   ensureProjectChannels(user);
   const db = getDb();
   const cfg = loadConfig();
@@ -208,10 +201,6 @@ export function canUseChannel(user: User, channelId: number): ChannelRow | null 
 }
 
 export function listMessages(channelId: number, limit = 200): MessageView[] {
-  // Demo channels live in an ID range (1000+) the real DB never allocates.
-  if (channelId >= 1000 && channelId < 2000) {
-    return demoMessagesForChannel(channelId).slice(0, limit);
-  }
   const db = getDb();
   const rows = db
     .prepare(
@@ -247,7 +236,6 @@ export function getUnreadForUser(user: User): {
   byChannel: Record<number, number>;
   total: number;
 } {
-  if (isDemoUser(user)) return { byChannel: {}, total: 0 };
   const channels = listChannelsForUser(user);
   if (channels.length === 0) return { byChannel: {}, total: 0 };
   const db = getDb();

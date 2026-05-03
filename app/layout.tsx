@@ -6,12 +6,10 @@ import SparProvider from "../components/SparProvider";
 import { SparFooterProvider } from "../components/SparFooterContext";
 import SparMiniOverlay from "../components/SparMiniOverlay";
 import SparMiniPlayer from "../components/SparMiniPlayer";
-import DemoOverlay from "../components/DemoOverlay";
 import SplashScreen from "../components/SplashScreen";
 import UserTracker from "../components/UserTracker";
 import { getCurrentUser } from "../lib/auth";
 import { isSuperUser, readHeartbeat } from "../lib/heartbeat";
-import { DEMO_COOKIE, DEMO_ENABLED, isDemoUser } from "../lib/demo/session";
 import "./globals.css";
 
 export const THEME_COOKIE = "amaso:theme";
@@ -116,41 +114,6 @@ const swBootstrap = swEnabled
   }).catch(function(){});
 })();`;
 
-// Pre-hydration interceptor for demo mode. Replaces window.WebSocket with
-// a no-op stub and short-circuits /api/* fetches to empty 204s so the
-// real UI renders from its SSR payload without spamming the console or
-// hammering endpoints that would 404 for the synthetic DEMO_USER. Must
-// run BEFORE any app code mounts — hence beforeInteractive.
-const demoBootstrap = `(function(){
-  try {
-    window.WebSocket = function(){
-      var listeners = {};
-      var ws = {
-        readyState: 3,
-        send: function(){},
-        close: function(){},
-        addEventListener: function(t, fn){ (listeners[t] = listeners[t] || []).push(fn); },
-        removeEventListener: function(){},
-        dispatchEvent: function(){ return true; },
-        onopen: null, onmessage: null, onclose: null, onerror: null,
-        CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3,
-      };
-      return ws;
-    };
-    var origFetch = window.fetch.bind(window);
-    window.fetch = function(input, init){
-      var url = typeof input === 'string' ? input : (input && input.url) || '';
-      if (url.indexOf('/api/') !== -1) {
-        return Promise.resolve(new Response('{}', {
-          status: 200,
-          headers: { 'content-type': 'application/json' }
-        }));
-      }
-      return origFetch(input, init);
-    };
-  } catch(_){}
-})();`;
-
 export default async function RootLayout({
   children,
 }: {
@@ -160,12 +123,11 @@ export default async function RootLayout({
   // recognition session survive navigation between /spar and project
   // pages. The mini circle (rendered inside the provider) only appears
   // off-/spar while a call is active. /login and /setup have no user
-  // yet — fall through without mounting Spar.
+  // yet — fall through without mounting Spar. Clients also skip Spar:
+  // the sparring partner is an internal tool, not a client-facing one.
   const user = await getCurrentUser();
-  // Demo users skip SparProvider — the spar machinery expects live WS /
-  // heartbeat, both of which we stub out for demo visitors.
   const sparBoot =
-    user && !isDemoUser(user)
+    user && user.role !== "client"
       ? {
           currentUser: { id: user.id, name: user.name, email: user.email },
           canManageOthers: isSuperUser(user),
@@ -176,8 +138,6 @@ export default async function RootLayout({
   const cookieStore = await cookies();
   const themeCookie = cookieStore.get(THEME_COOKIE)?.value;
   const htmlClassName = themeCookie === "light" ? "light" : undefined;
-  const demoActive =
-    DEMO_ENABLED && cookieStore.get(DEMO_COOKIE)?.value === "1";
 
   return (
     <html lang="en" className={htmlClassName} suppressHydrationWarning>
@@ -193,11 +153,6 @@ export default async function RootLayout({
         />
       </head>
       <body className="min-h-[100dvh]">
-        {demoActive && (
-          <Script id="amaso-demo-bootstrap" strategy="beforeInteractive">
-            {demoBootstrap}
-          </Script>
-        )}
         {/* afterInteractive — React 19 refuses a <script> in the render
          * tree, and Next's beforeInteractive strategy injects one. The
          * dev-mode SW teardown still fires early enough because the
@@ -218,7 +173,6 @@ export default async function RootLayout({
         ) : (
           children
         )}
-        <DemoOverlay />
         <SplashScreen />
       </body>
     </html>

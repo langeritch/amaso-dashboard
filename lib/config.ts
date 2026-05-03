@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DEMO_PROJECTS } from "./demo/data";
 
 export type ProjectVisibility = "team" | "client" | "public";
 
@@ -39,17 +38,36 @@ export interface ProjectConfig {
 export interface AmasoConfig {
   projects: ProjectConfig[];
   ignore: string[];
+  /**
+   * URL of an external amaso-pty-service instance. When set, all terminal
+   * operations route through that service's HTTP/WS API so PTYs survive
+   * dashboard restarts. When empty (default), the in-process PTY code in
+   * lib/terminal.ts is used as before. Override at runtime via the
+   * PTY_SERVICE_URL env var (env wins). Example: "http://127.0.0.1:7850".
+   */
+  ptyServiceUrl?: string;
+}
+
+/**
+ * Resolve the active PTY-service URL — env var first (so an operator can
+ * flip it without committing config changes), then amaso.config.json.
+ * Returns an empty string when the toggle is off.
+ */
+export function getPtyServiceUrl(): string {
+  const fromEnv = process.env.PTY_SERVICE_URL?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    return loadConfig().ptyServiceUrl?.trim() ?? "";
+  } catch {
+    return "";
+  }
 }
 
 const CONFIG_PATH = path.resolve(process.cwd(), "amaso.config.json");
 
-let cached: AmasoConfig | null = null;
-
 export function loadConfig(): AmasoConfig {
-  if (cached) return cached;
   const raw = fs.readFileSync(CONFIG_PATH, "utf8");
   const parsed = JSON.parse(raw) as AmasoConfig;
-  // Normalise paths to absolute + forward slashes for consistent comparisons
   parsed.projects = parsed.projects.map((p) => ({
     ...p,
     path: path.resolve(p.path).replace(/\\/g, "/"),
@@ -57,7 +75,6 @@ export function loadConfig(): AmasoConfig {
       ? p.subPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")
       : undefined,
   }));
-  cached = parsed;
   return parsed;
 }
 
@@ -74,7 +91,25 @@ export function addProject(project: ProjectConfig): void {
   }
   parsed.projects.push(project);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(parsed, null, 2) + "\n", "utf8");
-  cached = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).__amasoWatcher?.refresh();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).__amasoWs?.broadcastProjectsChanged();
+}
+
+export function removeProject(id: string): void {
+  const raw = fs.readFileSync(CONFIG_PATH, "utf8");
+  const parsed = JSON.parse(raw) as AmasoConfig & Record<string, unknown>;
+  const before = parsed.projects.length;
+  parsed.projects = parsed.projects.filter((p) => p.id !== id);
+  if (parsed.projects.length === before) {
+    throw new Error("project_not_found");
+  }
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(parsed, null, 2) + "\n", "utf8");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).__amasoWatcher?.refresh();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).__amasoWs?.broadcastProjectsChanged();
 }
 
 /**
@@ -88,19 +123,7 @@ export function getProjectRoot(project: ProjectConfig): string {
 }
 
 export function getProject(id: string): ProjectConfig | undefined {
-  const real = loadConfig().projects.find((p) => p.id === id);
-  if (real) return real;
-  // Demo-mode project shims — synthetic ProjectConfig rows keyed off the
-  // fake project IDs so getProject() in /projects/[id] resolves for demo
-  // users without touching amaso.config.json.
-  const d = DEMO_PROJECTS.find((p) => p.id === id);
-  if (!d) return undefined;
-  return {
-    id: d.id,
-    name: d.name,
-    path: `/demo/${d.id}`,
-    visibility: "team",
-  };
+  return loadConfig().projects.find((p) => p.id === id);
 }
 
 /**
