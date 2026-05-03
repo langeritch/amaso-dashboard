@@ -13,9 +13,10 @@ import {
   Brain,
   Play,
   Settings,
+  Activity,
+  Users,
 } from "lucide-react";
 import type { User } from "@/lib/db";
-import RecordingToggle from "./RecordingToggle";
 import { useSparOptional } from "./SparContext";
 
 const NAV_ITEMS = [
@@ -27,6 +28,12 @@ const NAV_ITEMS = [
   // assistant's accumulated user-memory and the live Sparring Partner
   // status. The standalone /memory route now redirects into the tab.
   { href: "/brain", label: "Brain", icon: Brain },
+  { href: "/heartbeat", label: "Heartbeat", icon: Activity },
+  // /activity is the cross-team feed (dispatches + remarks + file
+  // changes + presence). Distinct from /heartbeat — heartbeat is one
+  // user's signal, activity is the team's. Users icon emphasises the
+  // people-focused framing.
+  { href: "/activity", label: "Activity", icon: Users },
 ] as const;
 
 export default function Topbar({ user }: { user: User }) {
@@ -65,10 +72,10 @@ export default function Topbar({ user }: { user: User }) {
 
   return (
     <>
-      <nav className="pt-safe pl-safe pr-safe sticky top-0 z-30 flex flex-shrink-0 items-center justify-between gap-2 border-b border-neutral-800 bg-neutral-950/80 px-3 py-1.5 text-sm backdrop-blur sm:grid sm:grid-cols-3 sm:px-4 sm:py-2.5">
+      <nav className="pt-safe pl-safe pr-safe sticky top-0 z-30 flex flex-shrink-0 items-center justify-between gap-2 border-b border-neutral-800/80 bg-neutral-950/75 px-3 py-1.5 text-sm backdrop-blur-md backdrop-saturate-150 sm:grid sm:grid-cols-3 sm:px-4 sm:py-2.5">
         <Link
           href="/"
-          className="flex min-h-[40px] items-center font-medium tracking-tight sm:min-h-0 sm:justify-self-start"
+          className="amaso-fx flex min-h-[40px] items-center font-semibold tracking-[0.02em] text-neutral-100 hover:text-white sm:min-h-0 sm:justify-self-start"
           aria-label="Amaso home"
         >
           AMASO
@@ -81,7 +88,7 @@ export default function Topbar({ user }: { user: User }) {
             href="/login?demo=1"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-1.5 rounded-md px-3 py-1 text-neutral-400 transition hover:bg-neutral-900 hover:text-neutral-200"
+            className="amaso-fx flex items-center gap-1.5 rounded-md px-3 py-1.5 text-neutral-400 hover:bg-neutral-900/80 hover:text-neutral-100"
             title="Open demo tour (new tab)"
           >
             <Play className="h-3.5 w-3.5" />
@@ -98,17 +105,17 @@ export default function Topbar({ user }: { user: User }) {
               <Link
                 key={href}
                 href={href}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1 transition ${
+                className={`amaso-fx relative flex items-center gap-1.5 rounded-md px-3 py-1.5 ${
                   active
-                    ? "bg-neutral-800 text-neutral-100"
-                    : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+                    ? "bg-neutral-800/90 text-neutral-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                    : "text-neutral-400 hover:bg-neutral-900/80 hover:text-neutral-100"
                 }`}
                 aria-current={active ? "page" : undefined}
                 aria-label={iconOnly ? label : undefined}
                 title={iconOnly ? label : undefined}
               >
                 <Icon
-                  className={`h-3.5 w-3.5 ${
+                  className={`h-3.5 w-3.5 transition-colors duration-200 ${
                     iconOnly
                       ? telegramActive
                         ? "text-sky-400"
@@ -123,7 +130,6 @@ export default function Topbar({ user }: { user: User }) {
               </Link>
             );
           })}
-          <RecordingToggle />
         </div>
 
         {/* Desktop: single Settings entry point on the right. Theme, push,
@@ -132,10 +138,10 @@ export default function Topbar({ user }: { user: User }) {
         <div className="hidden min-w-0 items-center justify-self-end gap-3 text-neutral-400 sm:flex">
           <Link
             href="/settings"
-            className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition ${
+            className={`amaso-fx flex items-center gap-1.5 rounded-md px-3 py-1.5 ${
               isActive(pathname, "/settings")
-                ? "bg-neutral-800 text-neutral-100"
-                : "hover:bg-neutral-900 hover:text-neutral-200"
+                ? "bg-neutral-800/90 text-neutral-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                : "hover:bg-neutral-900/80 hover:text-neutral-100"
             }`}
             title="Settings"
             aria-label="Settings"
@@ -151,7 +157,7 @@ export default function Topbar({ user }: { user: User }) {
         <button
           type="button"
           onClick={() => setMenuOpen((v) => !v)}
-          className="relative flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-neutral-300 hover:bg-neutral-900 sm:hidden"
+          className="amaso-fx amaso-press relative flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md text-neutral-300 hover:bg-neutral-900/80 hover:text-neutral-100 sm:hidden"
           aria-label={
             menuOpen
               ? "Close menu"
@@ -211,47 +217,47 @@ function MobileDrawer({
         tabIndex={-1}
         aria-label="Close menu"
         onClick={onClose}
-        className={`absolute inset-0 bg-black/60 transition-opacity ${
+        className={`absolute inset-0 bg-black/70 backdrop-blur-sm transition-opacity duration-300 ease-out ${
           open ? "opacity-100" : "opacity-0"
         }`}
       />
       {/* Panel — slides down from the top so it visually connects to the
           Topbar trigger that spawned it. */}
       <div
-        className={`pt-safe pl-safe pr-safe pb-safe absolute inset-x-0 top-0 flex flex-col border-b border-neutral-800 bg-neutral-950 shadow-xl transition-transform ${
+        className={`pt-safe pl-safe pr-safe pb-safe absolute inset-x-0 top-0 flex flex-col border-b border-neutral-800/80 bg-neutral-950/95 shadow-2xl backdrop-blur-md transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
           open ? "translate-y-0" : "-translate-y-full"
         }`}
       >
-        <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
+        <div className="flex items-center justify-between border-b border-neutral-800/70 px-4 py-3">
           <span className="flex items-center gap-2">
-            <span className="font-medium tracking-tight">AMASO</span>
-            <span className="rounded-full border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+            <span className="font-semibold tracking-[0.02em]">AMASO</span>
+            <span className="rounded-full border border-neutral-700/80 px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400">
               {user.role}
             </span>
           </span>
           <button
             type="button"
             onClick={onClose}
-            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+            className="amaso-fx amaso-press flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
             aria-label="Close menu"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="flex items-center gap-3 border-b border-neutral-800 px-3 py-2 text-xs text-neutral-400">
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-neutral-800 text-sm text-neutral-200">
+        <div className="flex items-center gap-3 border-b border-neutral-800/70 px-4 py-3 text-xs text-neutral-400">
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-neutral-700 to-neutral-800 text-sm font-medium text-neutral-100 ring-1 ring-white/5">
             {user.name.slice(0, 1).toUpperCase()}
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm text-neutral-200">{user.name}</div>
+            <div className="truncate text-sm font-medium text-neutral-100">{user.name}</div>
             <div className="truncate text-[11px] text-neutral-500">
               {user.email}
             </div>
           </div>
         </div>
 
-        <nav className="flex flex-col py-1">
+        <nav className="flex flex-col py-2">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
             const active = isActive(pathname, href);
             const badge = href === "/" ? unreadTotal : 0;
@@ -260,15 +266,21 @@ function MobileDrawer({
                 key={href}
                 href={href}
                 onClick={onClose}
-                className={`flex min-h-[48px] items-center gap-3 px-4 text-base transition ${
+                className={`amaso-fx relative flex min-h-[48px] items-center gap-3 px-4 text-base ${
                   active
-                    ? "bg-neutral-800 text-white"
-                    : "text-neutral-300 hover:bg-neutral-900"
+                    ? "bg-neutral-800/80 text-white"
+                    : "text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
                 }`}
                 aria-current={active ? "page" : undefined}
               >
+                {active && (
+                  <span
+                    aria-hidden
+                    className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-emerald-500"
+                  />
+                )}
                 <Icon
-                  className={`h-5 w-5 ${
+                  className={`h-5 w-5 transition-colors duration-200 ${
                     href === "/spar"
                       ? telegramActive
                         ? "text-sky-400"
@@ -286,13 +298,19 @@ function MobileDrawer({
           <Link
             href="/settings"
             onClick={onClose}
-            className={`flex min-h-[48px] items-center gap-3 px-4 text-base transition ${
+            className={`amaso-fx relative flex min-h-[48px] items-center gap-3 px-4 text-base ${
               isActive(pathname, "/settings")
-                ? "bg-neutral-800 text-white"
-                : "text-neutral-300 hover:bg-neutral-900"
+                ? "bg-neutral-800/80 text-white"
+                : "text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
             }`}
             aria-current={isActive(pathname, "/settings") ? "page" : undefined}
           >
+            {isActive(pathname, "/settings") && (
+              <span
+                aria-hidden
+                className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-emerald-500"
+              />
+            )}
             <Settings className="h-5 w-5" />
             <span>Settings</span>
           </Link>
@@ -358,7 +376,7 @@ function UnreadDot({ count, className = "" }: { count: number; className?: strin
   if (count <= 0) return null;
   return (
     <span
-      className={`inline-flex min-w-[18px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[10px] font-semibold text-black ${className}`}
+      className={`inline-flex min-w-[18px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[10px] font-semibold text-black shadow-[0_0_0_1px_rgba(16,185,129,0.25),0_0_8px_rgba(16,185,129,0.4)] ${className}`}
       aria-label={`${count} unread`}
     >
       {count > 99 ? "99+" : count}
