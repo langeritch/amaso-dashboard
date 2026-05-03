@@ -106,15 +106,20 @@ export default function GlobalRemarks({
       </div>
 
       {filtered.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-neutral-800 p-10 text-center text-sm text-neutral-500">
-          No remarks match these filters.
+        <div className="amaso-fade-in-slow flex flex-col items-center rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+          <p className="text-sm font-medium text-neutral-300">
+            Nothing matches these filters.
+          </p>
+          <p className="mt-1 max-w-sm text-xs leading-relaxed text-neutral-500">
+            Try clearing a project or category to see more.
+          </p>
         </div>
       ) : (
         <ul className="space-y-2">
           {filtered.map((r) => (
             <li
               key={r.id}
-              className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3"
+              className="rounded-xl border border-neutral-800/80 bg-neutral-950/50 p-3"
             >
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
                 <StickyNote className="h-3 w-3 text-amber-400" />

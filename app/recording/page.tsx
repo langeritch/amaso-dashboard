@@ -27,7 +27,7 @@ export default async function RecordingListPage() {
               {sessions.map((s) => (
                 <li
                   key={s.id}
-                  className="rounded-lg border border-neutral-800 bg-neutral-900/50"
+                  className="rounded-xl border border-neutral-800/80 bg-neutral-900/50"
                 >
                   <Link
                     href={`/recording/${s.id}`}

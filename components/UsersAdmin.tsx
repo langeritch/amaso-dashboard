@@ -99,7 +99,7 @@ export default function UsersAdmin({
                   onClick={() => remove(u.id)}
                   disabled={u.id === currentUserId}
                   title={u.id === currentUserId ? "Can't delete yourself" : "Delete"}
-                  className="text-neutral-500 hover:text-red-400 disabled:opacity-30"
+                  className="text-neutral-500 hover:text-rose-300 disabled:opacity-30"
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
@@ -317,7 +317,7 @@ function CreateUserForm({
           </div>
         </div>
       )}
-      {err && <p className="text-sm text-red-400">{err}</p>}
+      {err && <p className="text-sm text-rose-300">{err}</p>}
       <div className="flex justify-end gap-2">
         <button
           type="button"
@@ -428,7 +428,7 @@ function PasswordChange({
       >
         Cancel
       </button>
-      {err && <span className="text-xs text-red-400">{err}</span>}
+      {err && <span className="text-xs text-rose-300">{err}</span>}
     </div>
   );
 }

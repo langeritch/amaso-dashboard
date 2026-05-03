@@ -389,7 +389,7 @@ export function TickRow({ tick }: { tick: Tick }) {
   const exact = formatExactTime(tick.at);
 
   return (
-    <li className="overflow-hidden rounded-lg border border-neutral-800/70 bg-neutral-950">
+    <li className="overflow-hidden rounded-xl border border-neutral-800/80/70 bg-neutral-950">
       <button
         type="button"
         onClick={() => expandable && setExpanded((v) => !v)}

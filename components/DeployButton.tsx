@@ -91,9 +91,9 @@ export default function DeployButton({
               }`
             : "Nothing to deploy — working tree clean and branch up to date"
         }
-        className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
+        className={`amaso-fx amaso-press flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
           actionable
-            ? "bg-orange-500 text-black hover:bg-orange-400"
+            ? "bg-orange-500 text-neutral-950 shadow-[0_1px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400"
             : "cursor-not-allowed bg-neutral-800 text-neutral-500"
         }`}
       >
@@ -123,7 +123,7 @@ export default function DeployButton({
           <form
             onSubmit={deploy}
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md space-y-3 rounded-lg border border-neutral-800 bg-neutral-950 p-5"
+            className="w-full max-w-md space-y-3 rounded-xl border border-neutral-800/80 bg-neutral-950 p-5"
           >
             <div className="flex items-start justify-between">
               <div>
@@ -141,14 +141,15 @@ export default function DeployButton({
               <button
                 type="button"
                 onClick={() => setOpen(false)}
-                className="text-neutral-500 hover:text-neutral-200"
+                className="amaso-fx amaso-press flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-900/70 hover:text-neutral-100 disabled:opacity-30 sm:h-7 sm:w-7"
                 disabled={pending}
+                aria-label="Close"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="rounded border border-neutral-800 bg-neutral-900 p-3 text-xs">
+            <div className="rounded-lg border border-neutral-800/80 bg-neutral-900/60 p-3 text-xs">
               <div className="flex items-center gap-2 text-neutral-400">
                 <GitBranch className="h-3.5 w-3.5" />
                 <span className="font-mono text-neutral-200">
@@ -166,7 +167,7 @@ export default function DeployButton({
                 <Stat label="to push" n={status.ahead} tone="sky" />
               </div>
               {status.conflicts.length > 0 && (
-                <p className="mt-2 text-xs text-red-400">
+                <p className="mt-2 text-xs text-rose-300">
                   ⚠ {status.conflicts.length} unresolved conflict
                   {status.conflicts.length === 1 ? "" : "s"} — resolve first.
                 </p>
@@ -182,13 +183,13 @@ export default function DeployButton({
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   placeholder={`Deploy from Amaso dashboard`}
-                  className="w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm outline-none focus:border-neutral-600"
+                  className="w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-orange-500/50 focus:shadow-[0_0_0_3px_rgba(255,107,61,0.12)]"
                   disabled={pending}
                 />
               </label>
             )}
 
-            {error && <p className="text-sm text-red-400">{error}</p>}
+            {error && <p className="text-sm text-rose-300">{error}</p>}
             {result && <p className="text-sm text-orange-400">{result}</p>}
 
             <div className="flex justify-end gap-2">
@@ -196,14 +197,14 @@ export default function DeployButton({
                 type="button"
                 onClick={() => setOpen(false)}
                 disabled={pending}
-                className="rounded border border-neutral-800 px-3 py-1.5 text-sm text-neutral-300"
+                className="amaso-fx amaso-press min-h-[40px] rounded-md border border-neutral-800 px-3 py-1.5 text-sm text-neutral-300 hover:border-neutral-700 hover:text-neutral-100 disabled:opacity-50 sm:min-h-0"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={pending || status.conflicts.length > 0}
-                className="flex items-center gap-1.5 rounded bg-orange-500 px-4 py-1.5 text-sm font-medium text-black hover:bg-orange-400 disabled:opacity-50"
+                className="amaso-fx amaso-press flex min-h-[40px] items-center gap-1.5 rounded-md bg-orange-500 px-4 py-1.5 text-sm font-semibold text-neutral-950 shadow-[0_2px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none sm:min-h-0"
               >
                 {pending ? (
                   <>

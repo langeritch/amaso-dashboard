@@ -87,7 +87,7 @@ export default function AutomationsList({
           {items.map((a) => (
             <li
               key={a.id}
-              className="group flex items-start gap-3 rounded-lg border border-neutral-800 bg-neutral-900/50 p-4 transition hover:border-neutral-700"
+              className="group flex items-start gap-3 rounded-xl border border-neutral-800/80 bg-neutral-900/50 p-4 transition hover:border-neutral-700"
             >
               <button
                 type="button"
@@ -132,7 +132,7 @@ export default function AutomationsList({
                 <button
                   type="button"
                   onClick={() => handleDelete(a)}
-                  className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-red-400"
+                  className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-rose-300"
                   aria-label={`Delete ${a.name}`}
                   title="Delete"
                 >
@@ -178,16 +178,24 @@ export default function AutomationsList({
 
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
-    <div className="rounded-lg border border-dashed border-neutral-800 p-8 text-center">
-      <h2 className="text-lg font-medium">No automations yet</h2>
-      <p className="mt-2 text-sm text-neutral-400">
-        Save the URLs you reach for every morning so you can launch them in one
-        click.
+    <div className="amaso-fade-in-slow flex flex-col items-center rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+      <span
+        aria-hidden
+        className="mb-4 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-orange-500/30 bg-orange-500/5"
+      >
+        <Plus className="h-4 w-4 text-orange-400" />
+      </span>
+      <h2 className="text-lg font-semibold tracking-tight text-neutral-100">
+        No automations yet
+      </h2>
+      <p className="mt-2 max-w-sm text-sm leading-relaxed text-neutral-400">
+        Save the URLs you reach for every morning so you can launch them in
+        one click.
       </p>
       <button
         type="button"
         onClick={onAdd}
-        className="mt-4 inline-flex items-center gap-2 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+        className="amaso-fx amaso-press mt-5 inline-flex min-h-[40px] items-center gap-2 rounded-md bg-orange-500 px-4 py-1.5 text-sm font-semibold text-neutral-950 shadow-[0_2px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400 sm:min-h-0"
       >
         <Plus className="h-4 w-4" />
         Add your first
@@ -294,21 +302,21 @@ function AutomationForm({
         </div>
 
         {error && (
-          <p className="mt-3 text-xs text-red-400">{error}</p>
+          <p className="mt-3 text-xs text-rose-300">{error}</p>
         )}
 
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-900"
+            className="amaso-fx amaso-press rounded-md border border-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900 hover:text-neutral-100"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={submitting}
-            className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            className="amaso-fx amaso-press rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-neutral-950 shadow-[0_2px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none"
           >
             {submitting ? "Saving…" : existing ? "Save" : "Add"}
           </button>
@@ -352,7 +360,7 @@ function StatsRow({
       <span>Last {relativeTime(stats.lastRunAt)}</span>
       <span>{stats.runCount} {stats.runCount === 1 ? "run" : "runs"}</span>
       {stats.failedRuns > 0 && (
-        <span className="inline-flex items-center gap-1 text-red-400">
+        <span className="inline-flex items-center gap-1 text-rose-300">
           <AlertTriangle className="h-2.5 w-2.5" />
           {stats.failedRuns} failed
         </span>

@@ -59,7 +59,7 @@ export default function SetupForm() {
         autoComplete="new-password"
         required
       />
-      {err && <p className="text-sm text-red-400">{err}</p>}
+      {err && <p className="text-sm text-rose-300">{err}</p>}
       <button
         type="submit"
         disabled={pending}

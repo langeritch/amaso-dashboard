@@ -52,7 +52,7 @@ export default function LoginForm() {
         autoComplete="current-password"
         required
       />
-      {err && <p className="text-sm text-red-400">{err}</p>}
+      {err && <p className="text-sm text-rose-300">{err}</p>}
       <button
         type="submit"
         disabled={pending}

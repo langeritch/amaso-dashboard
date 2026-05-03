@@ -134,7 +134,7 @@ export default function ClaudeAccountsSection() {
   }
 
   return (
-    <section className="overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950/60">
+    <section className="overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-950/60">
       <div className="flex items-center justify-between gap-2 px-4 pb-2 pt-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-neutral-500">
           Claude accounts

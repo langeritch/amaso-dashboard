@@ -1137,7 +1137,7 @@ function NewDmDialog({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded-lg border border-neutral-800 bg-neutral-950 p-3 shadow-xl"
+        className="w-full max-w-sm rounded-xl border border-neutral-800/80 bg-neutral-950 p-3 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-2 flex items-center justify-between">

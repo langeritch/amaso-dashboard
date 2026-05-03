@@ -238,7 +238,7 @@ function CompanionCard() {
   }, []);
 
   return (
-    <section className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-5">
+    <section className="rounded-xl border border-neutral-800/80 bg-neutral-950/60 p-5">
       <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-neutral-500">
         <span>Optional · Mac only</span>
       </div>

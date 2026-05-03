@@ -323,7 +323,7 @@ function Section({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
-    <section className="rounded-lg border border-neutral-800 bg-neutral-950/60">
+    <section className="rounded-xl border border-neutral-800/80 bg-neutral-950/60">
       <button
         type="button"
         onClick={() => setCollapsed((v) => !v)}

@@ -232,8 +232,13 @@ export default function RoadmapPanel({ projectId }: RoadmapPanelProps) {
       {steps === null ? (
         <div className="text-sm text-neutral-500">Loading…</div>
       ) : topLevel.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-neutral-800 px-4 py-8 text-center text-sm text-neutral-500">
-          No steps yet — add the first one below.
+        <div className="amaso-fade-in-slow rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+          <p className="text-sm font-medium text-neutral-300">
+            No steps yet
+          </p>
+          <p className="mt-1 max-w-sm text-xs leading-relaxed text-neutral-500">
+            Add the first one below to start the roadmap.
+          </p>
         </div>
       ) : (
         <ol className="relative space-y-3 border-l border-neutral-800 pl-5">

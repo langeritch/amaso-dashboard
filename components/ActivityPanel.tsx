@@ -108,14 +108,14 @@ export default function ActivityPanel() {
           </span>
         </header>
         {error && (
-          <div className="mb-3 rounded-md border border-red-900/50 bg-red-900/20 px-3 py-2 text-xs text-red-300">
+          <div className="mb-3 rounded-md border border-rose-900/50 bg-rose-900/20 px-3 py-2 text-xs text-rose-300">
             {error}
           </div>
         )}
         {data === null ? (
           <p className="text-sm text-neutral-500">Loading…</p>
         ) : data.online.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
+          <p className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
             No live sessions right now.
           </p>
         ) : (
@@ -153,11 +153,11 @@ export default function ActivityPanel() {
         {data === null ? (
           <p className="text-sm text-neutral-500">Loading…</p>
         ) : recent.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
+          <p className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
             No recorded activity yet.
           </p>
         ) : (
-          <ol className="divide-y divide-neutral-800/70 rounded-lg border border-neutral-800 bg-neutral-950/50">
+          <ol className="divide-y divide-neutral-800/70 rounded-xl border border-neutral-800/80 bg-neutral-950/50">
             {recent.map((r) => (
               <ActivityListItem key={r.id} row={r} now={data.now} />
             ))}
