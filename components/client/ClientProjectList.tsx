@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Inbox } from "lucide-react";
 import { formatRelativeTime } from "@/lib/relative-time";
 
 interface ProjectCard {
@@ -22,11 +22,17 @@ export default function ClientProjectList({
 }) {
   if (projects.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed border-neutral-800 bg-neutral-900/30 p-10 text-center">
-        <h2 className="text-lg font-medium tracking-tight text-neutral-100">
+      <div className="amaso-fade-in-slow flex flex-col items-center rounded-2xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-14 text-center">
+        <span
+          aria-hidden
+          className="mb-5 inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-orange-500/30 bg-orange-500/5"
+        >
+          <Inbox className="h-6 w-6 text-orange-400" />
+        </span>
+        <h2 className="text-lg font-semibold tracking-tight text-neutral-100">
           No projects yet
         </h2>
-        <p className="mt-2 text-sm leading-relaxed text-neutral-400">
+        <p className="mt-2 max-w-sm text-sm leading-relaxed text-neutral-400">
           Your account is set up, but no projects have been shared with you
           yet. We&rsquo;ll let you know as soon as one is ready.
         </p>
@@ -35,14 +41,20 @@ export default function ClientProjectList({
   }
   return (
     <ul className="grid gap-4 sm:grid-cols-2">
-      {projects.map((p) => (
-        <ProjectListItem key={p.id} project={p} />
+      {projects.map((p, idx) => (
+        <ProjectListItem key={p.id} project={p} index={idx} />
       ))}
     </ul>
   );
 }
 
-function ProjectListItem({ project: p }: { project: ProjectCard }) {
+function ProjectListItem({
+  project: p,
+  index,
+}: {
+  project: ProjectCard;
+  index: number;
+}) {
   // Re-render the relative timestamp every minute so "Last updated 3 min
   // ago" doesn't go stale while the user is sitting on the dashboard.
   const [tick, setTick] = useState(0);
@@ -54,10 +66,13 @@ function ProjectListItem({ project: p }: { project: ProjectCard }) {
 
   const relative = formatRelativeTime(p.lastActivityAt);
   return (
-    <li>
+    <li
+      className="amaso-fade-in"
+      style={{ animationDelay: `${Math.min(index, 8) * 50}ms` }}
+    >
       <Link
         href={`/client/projects/${p.id}`}
-        className="amaso-surface-hover group block overflow-hidden rounded-2xl border border-neutral-800/80 bg-neutral-900/50 hover:border-neutral-700/80 hover:bg-neutral-900/80"
+        className="amaso-surface-hover amaso-press group block overflow-hidden rounded-2xl border border-neutral-800/80 bg-neutral-900/50 hover:border-orange-500/40 hover:bg-neutral-900/80"
       >
         {/* Mini preview pane — iframe peek of the live or preview URL.
             Pointer-events disabled so the whole card is the click
