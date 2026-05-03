@@ -3,26 +3,44 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SparContext,
+  type Attachment,
   type Dispatch,
   type Msg,
   type Role,
+  type SparConversationSummary,
   type SparUser,
+  type ToolStep,
   MAX_TRANSCRIPT,
 } from "./SparContext";
 import { useVoiceChannel } from "./useVoiceChannel";
-import { useThinkingHum } from "./useThinkingHum";
 import { useThinkingFiller } from "./useThinkingFiller";
 import { useTtsFillerContent } from "./useTtsFillerContent";
 import { useAmbientPad } from "./useAmbientPad";
 import { awaitFillerHandoff } from "@/lib/filler-handoff";
+import { buildAutopilotPromptBlock } from "@/lib/autopilot-prompt";
 import { trackAction } from "./UserTracker";
-import { useYoutubeFiller } from "./useYoutubeFiller";
+import { useMediaPlayer } from "./useMediaPlayer";
 import { useChime } from "./useChime";
 import { useToneCue } from "./useToneCue";
 
 const TRANSCRIPT_KEY_PREFIX = "spar:transcript:v1:";
 const AUTOPILOT_KEY_PREFIX = "spar:autopilot:v1:";
 const SENTENCE_BOUNDARY = /[.!?,;:—–](\s|$)/g;
+// Persisted TTS preference for the text-chat experience. The
+// in-call audio path always speaks regardless of this flag — see
+// the (ttsMuted && !inCall) gates below — so this only governs the
+// "I'm typing, please don't read it back to me" toggle the user
+// drives from the media drawer.
+const TTS_MUTED_STORAGE_KEY = "spar:ttsMuted:v1";
+
+function readTtsMutedPref(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(TTS_MUTED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 interface SpeechRecognitionResultList {
   length: number;
@@ -127,6 +145,9 @@ export default function SparProvider({
   children: React.ReactNode;
 }) {
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const pendingAttachmentsRef = useRef<Attachment[]>([]);
+  pendingAttachmentsRef.current = pendingAttachments;
   const [busy, setBusy] = useState(false);
   const [inCall, setInCall] = useState(false);
   const [callStartedAt, setCallStartedAt] = useState<number | null>(null);
@@ -149,6 +170,17 @@ export default function SparProvider({
   // before the YT iframe sees it). This one flips the frame the
   // browser actually starts outputting audio samples.
   const [ttsAudible, setTtsAudible] = useState(false);
+  // Post-TTS tail window. Stays true for ~450 ms after `ttsAudible`
+  // falls to false. Filler gates AND-in `!ttsTailSettling` so they
+  // can't snap back on between the audio element's `ended` event and
+  // the mic-arming setTimeout actually opening the mic. Without this
+  // the user hears a ~split-second clip of news / fun-fact filler
+  // right after the assistant stops speaking — and the open mic then
+  // catches it as input, looping back into a transcript. The mic-arm
+  // path waits ~1200 ms; 450 ms covers the audible-blip window
+  // without holding music off long enough to feel laggy.
+  const [ttsTailSettling, setTtsTailSettling] = useState(false);
+  const ttsTailTimerRef = useRef<number | null>(null);
   // Voice-activity flag, driven by the SpeechRecognition result
   // stream (not by whether the mic happens to be open). Flips true
   // on any recognised interim or final text, decays back to false
@@ -169,6 +201,10 @@ export default function SparProvider({
   const ttsQueueRef = useRef<string[]>([]);
   const ttsPlayingRef = useRef(false);
   const ttsMutedRef = useRef(false);
+  // Mirrors `inCall` for ref-based audio gates (speakChunk runs
+  // outside the React render cycle and needs the latest value
+  // without having to re-bind on every state change).
+  const inCallRef = useRef(false);
   const micMutedRef = useRef(false);
   // Pre-acquired MediaStream with echoCancellation / noiseSuppression /
   // autoGainControl all enabled. Kept alive for the whole call so the
@@ -201,6 +237,30 @@ export default function SparProvider({
     ttsMutedRef.current = ttsMuted;
   }, [ttsMuted]);
   useEffect(() => {
+    inCallRef.current = inCall;
+  }, [inCall]);
+  // Hydrate from localStorage on mount. Done in an effect (rather
+  // than a lazy useState init) so SSR matches the initial client
+  // render, then we sync the saved preference on the client tick.
+  useEffect(() => {
+    setTtsMuted(readTtsMutedPref());
+  }, []);
+  // Persist the preference. Removing the key when false keeps the
+  // storage clean and lets future migrations distinguish "never
+  // toggled" from "explicitly un-muted".
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (ttsMuted) {
+        window.localStorage.setItem(TTS_MUTED_STORAGE_KEY, "1");
+      } else {
+        window.localStorage.removeItem(TTS_MUTED_STORAGE_KEY);
+      }
+    } catch {
+      /* quota / private browsing — non-fatal */
+    }
+  }, [ttsMuted]);
+  useEffect(() => {
     autopilotRef.current = autopilot;
   }, [autopilot]);
   useEffect(() => {
@@ -225,37 +285,16 @@ export default function SparProvider({
   // source of truth with the Python Telegram worker); it's piggy-
   // backed on the voice-session poll.
   //
-  //   "news"    → pre-rendered news clips (Kokoro + RSS)
-  //   "youtube" → user-selected music / podcast / video audio
-  //   "hum"     → windchime only
-  //   "off"     → silent filler slot
+  //   "news"     → pre-rendered news clips (Kokoro + RSS)
+  //   "youtube"  → user-selected music / podcast / video audio
+  //   "quiet"    → ambient chime only, no spoken content
+  //   "fun-facts"/"calendar" → dashboard-native TTS content
+  // (Silencing the assistant entirely lives on the per-client TTS
+  //  toggle in SparContext, not on this filler mode.)
   const mode = voice.fillerMode;
   const ytVideoId = voice.youtube.videoId;
   const ytSelected = ytVideoId !== null && voice.youtube.status !== "idle";
   const wantsYoutube = mode === "youtube" && ytSelected;
-  // Declared up here (not next to the restore effect below) because
-  // `wantsNews` consumes it. See the block around setYtRestoring for
-  // the lifecycle details. Default false — gets flipped true only
-  // when the mount effect finds a fresh localStorage record.
-  const [ytRestoring, setYtRestoring] = useState(false);
-  // Two reasons to play news: mode is explicitly "news", OR mode is
-  // "youtube" but no video is selected (safe fallback).
-  //
-  // IMPORTANT: during the ~100-500 ms window right after a page
-  // refresh, the server's in-memory YouTube state has been wiped but
-  // `mode` (from filler-config.json on disk) still says "youtube".
-  // Without the `ytRestoring` guard below, that window fires the
-  // fallback and the user hears a news headline for a second before
-  // YT resumes — which consistently reads as "it defaults back to
-  // headlines every time I refresh". The guard holds the fallback
-  // back until the restore POST completes (or 4 s times out).
-  //
-  // If the user is on `mode==="news"` intentionally, we still play
-  // news — the guard only affects the youtube-fallback branch.
-  const wantsNews =
-    mode === "news" ||
-    (mode === "youtube" && !ytSelected && !ytRestoring);
-  const wantsHum = mode === "hum" || mode === "quiet";
   // TTS-content modes — handled by useTtsFillerContent (separate
   // <audio> element, fetches /api/spar/filler-content). Distinct
   // from `wantsNews` because news currently flows through the
@@ -296,13 +335,42 @@ export default function SparProvider({
   // are conversational fillers tied to "the assistant is thinking",
   // not background loops, so they keep their own thinking-only trigger.
   const fillerOnTelegram = voice.channel === "telegram";
-  const ttsQuiet = !ttsAudible && ttsIdle;
+  const ttsQuiet = !ttsAudible && !ttsTailSettling && ttsIdle;
   const nobodyTalking = ttsQuiet && !vadActive;
+  // Hard pause for the local mic-listening window. VAD ducking only
+  // mutes for the ~hundreds of ms the user is actively speaking, but
+  // the mic is hot the whole time recognition is running — between
+  // utterances filler audio still bleeds into the captured stream and
+  // produces hallucinated transcripts. Pausing on the rising edge of
+  // `listening` (and resuming when it ends) eliminates that bleed
+  // entirely. Manual pause survives because the inner `serverStatus
+  // === "playing"` check stays in the gate.
+  const micOpenForVoiceInput = listening && !micMuted;
+  // Post-TTS settle window. The mic-arming effect (search for the
+  // ~1200 ms setTimeout that calls startRecognition) deliberately
+  // waits about a second between TTS going idle and opening the mic
+  // so the your-turn chime has room to land. During that gap
+  // `ttsQuiet` is true (so `nobodyTalking` is true) but `listening`
+  // is still false — and the `!micOpenForVoiceInput` gate alone lets
+  // news / YouTube filler kick back on for that second before the
+  // mic finally opens and re-suppresses it. Treat the gap as if the
+  // mic were already open. Conditions match the mic-arm effect's own
+  // gating so we cover exactly the same window: in a voice call,
+  // mic not muted, not on Telegram, assistant no longer streaming,
+  // mic not yet listening.
+  const micArmingSoon =
+    inCall &&
+    !micMuted &&
+    !fillerOnTelegram &&
+    !busy &&
+    !listening;
+  const micActiveOrArming = micOpenForVoiceInput || micArmingSoon;
   const ytMusicShouldPlay =
     wantsYoutube &&
     voice.youtube.status === "playing" &&
     !fillerOnTelegram &&
-    nobodyTalking;
+    nobodyTalking &&
+    !micActiveOrArming;
   // News/hum: only while the assistant is thinking. No idle trigger.
   const fillerShouldPlay = busy && !fillerOnTelegram && ttsQuiet;
   // Kept for the legacy debug block below — semantically equivalent to
@@ -318,6 +386,57 @@ export default function SparProvider({
   // re-buffer on release. Only consulted while ytMusicShouldPlay
   // is already true; the hook ignores it otherwise.
   const ytMusicDucked = vadActive;
+
+  // Single source of truth for everything client-side that touches
+  // the media player: nowPlaying mirror, queue, volume, controls, the
+  // mount-time localStorage restore, and the iframe driver. The
+  // server (lib/youtube-state.ts via voice-session poll) stays
+  // authoritative across devices; this hook owns the client side.
+  const {
+    nowPlaying: youtubeNowPlaying,
+    queue: youtubeQueue,
+    volume: youtubeVolume,
+    setVolume: setYoutubeVolume,
+    play: youtubePlay,
+    pause: youtubePause,
+    stop: youtubeStop,
+    skip: youtubeSkip,
+    enqueue: youtubeEnqueue,
+    clearQueue: youtubeClearQueue,
+    removeFromQueue: youtubeRemoveFromQueue,
+    reorderQueue: youtubeReorderQueue,
+    ytRestoring,
+  } = useMediaPlayer({ voice, ytMusicShouldPlay, ytMusicDucked });
+
+  // Two reasons to play news: mode is explicitly "news", OR mode is
+  // "youtube" but no video is selected (safe fallback).
+  //
+  // IMPORTANT: during the ~100–500 ms window right after a page
+  // refresh, the server's in-memory YouTube state has been wiped but
+  // `mode` (from filler-config.json on disk) still says "youtube".
+  // Without the `ytRestoring` guard, that window fires the fallback
+  // and the user hears a news headline for a second before YT
+  // resumes — which consistently reads as "it defaults back to
+  // headlines every time I refresh". The guard (managed inside
+  // useMediaPlayer) holds the fallback back until the restore POST
+  // completes (or 4 s times out).
+  const wantsNews =
+    mode === "news" ||
+    (mode === "youtube" && !ytSelected && !ytRestoring);
+
+  // News plays continuously in the background, exactly like YouTube
+  // — gated by the same "nobody talking + not on Telegram" predicate
+  // (ttsQuiet && !vadActive). Previously this was tied to `busy`
+  // (thinking-only), which made the pause/skip controls feel broken:
+  // the user would pause, the assistant would stop thinking, the gate
+  // would flip false, then on the next thinking window the gate would
+  // flip true again — the pausedRef survived but the UX read as
+  // "the player ignores me." Mirroring the YouTube gate makes news a
+  // first-class background mode. Other filler kinds (fun-facts,
+  // calendar) keep their thinking-only gating below — those are
+  // *conversational* fillers, not background loops.
+  const newsShouldPlay =
+    wantsNews && !fillerOnTelegram && nobodyTalking && !micActiveOrArming;
 
   // ---- [FILLER-DEBUG] CHANGE-ONLY LOGGING (TEMP — remove once stable) --
   // Fires only when an input flips, so the timeline of "what changed and
@@ -491,435 +610,40 @@ export default function SparProvider({
   ]);
   // ---- end [FILLER-DEBUG] ----------------------------------------------
 
-  // ---- localStorage persistence: one-shot restore on mount ----
-  // Protects against the one scenario the in-memory server state
-  // can't: the dashboard process restarts between the user
-  // selecting a YouTube track and returning to the tab. Server
-  // state is gone, localStorage still has the record. We POST
-  // back to /api/youtube/state to rebuild the server selection —
-  // after that the existing 100 ms session-poll → useYoutubeFiller
-  // flow takes over identically to a fresh play call.
-  //
-  // `savedRestore` holds the saved position until the hook has
-  // actually cued the matching video; passing it as startAtSec
-  // while videoId matches makes cueVideoById seek on load. Once
-  // the playhead ticks past the saved position it becomes a no-op
-  // (YT preserves the real playhead across pause/play).
-  type SavedRecord = {
-    videoId: string;
-    title: string | null;
-    thumbnailUrl: string | null;
-    durationSec: number | null;
-    positionSec: number;
-    playlistUrl: string | null;
-    // Resting volume (0–100). Default 100 when absent (pre-extension
-    // records). Fed to useYoutubeFiller as restoreVolume so the first
-    // fade-in lands at the user's prior level.
-    volume: number;
-    // Sticky server status. "paused" means the user explicitly held
-    // silence — after we POST action=play to restore the selection,
-    // we follow up with action=pause so the server state matches.
-    status: "playing" | "paused";
-    savedAt: number;
-  };
-  const [savedRestore, setSavedRestore] = useState<SavedRecord | null>(null);
-  // `ytRestoring` is declared higher up (next to the filler mode
-  // wiring) because `wantsNews` consumes it. The flip-to-true lives
-  // here inside the restore mount effect; the flip-back-to-false
-  // lives in a follow-up effect below that watches
-  // voice.youtube.videoId. Overall lifecycle:
-  //   true from: we find a fresh localStorage record on mount
-  //   false after: server's videoId matches the record OR 4 s timeout
-  // Suppresses the "mode=youtube + !ytSelected → fall back to news"
-  // branch during the 100–500 ms race where the restore POST hasn't
-  // yet landed and the server in-memory state still reads null.
-  // That race is what made refreshes sound like "always defaults to
-  // headlines" — it was really "headlines for a second, then YT".
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    let raw: string | null;
-    try {
-      raw = window.localStorage.getItem("spar-youtube-playback");
-    } catch {
-      return;
-    }
-    if (!raw) return;
-    let parsed: Partial<SavedRecord>;
-    try {
-      parsed = JSON.parse(raw) as Partial<SavedRecord>;
-    } catch {
-      return;
-    }
-    const vid = parsed.videoId;
-    if (typeof vid !== "string" || vid.length !== 11) return;
-    const pos =
-      typeof parsed.positionSec === "number" && parsed.positionSec >= 0
-        ? parsed.positionSec
-        : 0;
-    const savedAt =
-      typeof parsed.savedAt === "number" ? parsed.savedAt : 0;
-    // Match the server-side youtube-state 6 h TTL — past that the
-    // user probably doesn't want the music to ambush them.
-    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
-    if (savedAt > 0 && Date.now() - savedAt > SIX_HOURS_MS) {
-      try {
-        window.localStorage.removeItem("spar-youtube-playback");
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
-    const rawVolume =
-      typeof parsed.volume === "number" && Number.isFinite(parsed.volume)
-        ? parsed.volume
-        : 100;
-    const volume = Math.max(0, Math.min(100, Math.round(rawVolume)));
-    const status: "playing" | "paused" =
-      parsed.status === "paused" ? "paused" : "playing";
-    const record: SavedRecord = {
-      videoId: vid,
-      title: (parsed.title as string | null) ?? null,
-      thumbnailUrl: (parsed.thumbnailUrl as string | null) ?? null,
-      durationSec:
-        typeof parsed.durationSec === "number" ? parsed.durationSec : null,
-      positionSec: pos,
-      playlistUrl: (parsed.playlistUrl as string | null) ?? null,
-      volume,
-      status,
-      savedAt,
-    };
-    setSavedRestore(record);
-    setYtRestoring(true);
-    console.info(
-      "[YT-FILLER] restoring from localStorage:",
-      { videoId: vid, positionSec: pos, title: record.title, volume, status },
-    );
-    // Rebuild server state so everything downstream (mode flip,
-    // session poll, hook cue) flows the normal path. Fire-and-
-    // forget; if it fails the worst case is no auto-restore, not
-    // a broken dashboard. If the user had the video paused before
-    // the refresh, we chain a second POST (action=pause) so the
-    // sticky pause state comes back too.
-    void (async () => {
-      try {
-        await fetch("/api/youtube/state", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "play",
-            video_id: vid,
-            title: record.title,
-            thumbnail_url: record.thumbnailUrl,
-            duration_sec: record.durationSec,
-          }),
-          cache: "no-store",
-        });
-        if (status === "paused") {
-          await fetch("/api/youtube/state", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "pause" }),
-            cache: "no-store",
-          });
-        }
-      } catch {
-        /* non-fatal — ytRestoring timeout below will release the
-           suppression so the user at least hears SOMETHING eventually */
-      }
-    })();
-    // Mount-only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Clear ytRestoring once the server-side videoId matches what we
-  // asked to restore — the poll will have picked up the rebuilt
-  // selection and useYoutubeFiller is cueing the video. Also run a
-  // safety timeout so a failed restore POST can't pin the suppression
-  // forever (4 s is plenty; the POST + next 100 ms poll typically
-  // complete in well under a second).
-  useEffect(() => {
-    if (!ytRestoring) return;
-    if (
-      savedRestore &&
-      voice.youtube.videoId === savedRestore.videoId
-    ) {
-      setYtRestoring(false);
-      return;
-    }
-    const id = window.setTimeout(() => setYtRestoring(false), 4_000);
-    return () => window.clearTimeout(id);
-  }, [ytRestoring, savedRestore, voice.youtube.videoId]);
-
-  // Use the saved position only while the current selection matches
-  // what was saved. Switching to a different video (or the user
-  // stopping) resets the seek target back to whatever the server
-  // reports (which is 0 for a fresh play).
-  const startAtSec =
-    savedRestore && ytVideoId === savedRestore.videoId
-      ? savedRestore.positionSec
-      : voice.youtube.positionSec;
-
-  // Mini-player slider state. Initialised from the saved record so a
-  // refresh lands on the same resting level; updated live as the user
-  // drags. Passed to useYoutubeFiller as `volume`, which snaps the
-  // iframe volume on every change.
-  const [youtubeVolume, setYoutubeVolume] = useState<number>(100);
-  const youtubeVolumeInitRef = useRef(false);
-  useEffect(() => {
-    if (youtubeVolumeInitRef.current) return;
-    if (savedRestore && typeof savedRestore.volume === "number") {
-      setYoutubeVolume(
-        Math.max(0, Math.min(100, Math.round(savedRestore.volume))),
-      );
-      youtubeVolumeInitRef.current = true;
-    }
-  }, [savedRestore]);
-
-  // Telegram-call handoff resync. While a call is active, the Python
-  // service is advancing voice.youtube.positionSec via
-  // /api/youtube/state action=report_position. The iframe is paused
-  // locally (hardCutoff includes voice.channel === "telegram") so its
-  // own playhead is frozen at the pre-call value. When the call ends
-  // we bump `resyncSignal` so useYoutubeFiller seeks to the fresher
-  // server position before resuming. Without this, the user would
-  // hear audio they already heard on the phone.
-  const lastChannelRef = useRef(voice.channel);
-  const [resyncSignal, setResyncSignal] = useState<number>(0);
-  useEffect(() => {
-    const prev = lastChannelRef.current;
-    lastChannelRef.current = voice.channel;
-    if (prev === "telegram" && voice.channel !== "telegram") {
-      // Snapshot bump — the timestamp serves as a unique trigger value;
-      // the hook reads startAtRef.current at fire time, so it always
-      // gets the latest server position regardless of when this state
-      // update flushes vs. when the next render lands.
-      setResyncSignal(Date.now());
-    }
-  }, [voice.channel]);
-
-  // Auto-advance: when the iframe finishes a video, hit the advance
-  // endpoint so the server promotes the next queue item (or stops if
-  // the queue is empty). Defined inline rather than reusing youtubeSkip
-  // because the skip helper isn't in scope here yet — keeping the
-  // network call self-contained avoids a dependency-ordering shuffle.
-  const handleVideoEnded = useCallback(() => {
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "advance" }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal — next poll re-syncs */
-    });
-  }, []);
-
-  useYoutubeFiller({
-    active: ytMusicShouldPlay,
-    ducked: ytMusicDucked,
-    videoId: ytVideoId,
-    startAtSec,
-    title: voice.youtube.title,
-    thumbnailUrl: voice.youtube.thumbnailUrl,
-    durationSec: voice.youtube.durationSec,
-    playlistUrl: savedRestore?.playlistUrl ?? null,
-    // One-shot restore hints. `restoreVolume` targets the first fade-in
-    // so a refreshed session lands at the user's prior resting level
-    // instead of snapping to 100. `serverStatus` is the authoritative
-    // read from the shared voice-session poll — the hook uses it when
-    // writing localStorage so a "paused" refresh comes back paused.
-    restoreVolume:
-      savedRestore && ytVideoId === savedRestore.videoId
-        ? savedRestore.volume
-        : null,
-    volume: youtubeVolume,
-    serverStatus: voice.youtube.status as "playing" | "paused" | "idle",
-    resyncSignal,
-    onEnded: handleVideoEnded,
-  });
-
-  const youtubePlay = useCallback(() => {
-    const vid = voice.youtube.videoId;
-    if (!vid) return;
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "play",
-        video_id: vid,
-        title: voice.youtube.title,
-        thumbnail_url: voice.youtube.thumbnailUrl,
-        duration_sec: voice.youtube.durationSec,
-      }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal — next poll re-syncs from server */
-    });
-  }, [
-    voice.youtube.videoId,
-    voice.youtube.title,
-    voice.youtube.thumbnailUrl,
-    voice.youtube.durationSec,
-  ]);
-
-  const youtubePause = useCallback(() => {
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "pause" }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal */
-    });
-  }, []);
-
-  const youtubeStop = useCallback(() => {
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "stop" }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal */
-    });
-  }, []);
-
-  // Skip current track. Server promotes the head of the queue into
-  // now-playing, or — if the queue is empty — falls back to a full
-  // stop, returning the filler mode to news. The browser doesn't
-  // distinguish: the next session poll either reveals the new
-  // selection or sees idle, and the iframe hook reacts accordingly.
-  const youtubeSkip = useCallback(() => {
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "advance" }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal */
-    });
-  }, []);
-
-  const youtubeEnqueue = useCallback((item: import("./SparContext").YoutubeQueueItem) => {
-    if (!item || !item.videoId) return;
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "enqueue",
-        video_id: item.videoId,
-        title: item.title,
-        thumbnail_url: item.thumbnailUrl,
-        duration_sec: item.durationSec,
-      }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal */
-    });
-  }, []);
-
-  const youtubeClearQueue = useCallback(() => {
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "clear_queue" }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal */
-    });
-  }, []);
-
-  const youtubeRemoveFromQueue = useCallback((videoId: string) => {
-    if (!videoId) return;
-    void fetch("/api/youtube/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "remove_from_queue", video_id: videoId }),
-      cache: "no-store",
-    }).catch(() => {
-      /* non-fatal — next session poll reconciles the queue */
-    });
-  }, []);
-
-  const youtubeReorderQueue = useCallback(
-    (fromIdx: number, toIdx: number) => {
-      if (!Number.isFinite(fromIdx) || !Number.isFinite(toIdx)) return;
-      if (fromIdx === toIdx) return;
-      void fetch("/api/youtube/state", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "reorder_queue",
-          from_index: fromIdx,
-          to_index: toIdx,
-        }),
-        cache: "no-store",
-      }).catch(() => {
-        /* non-fatal — next session poll reconciles the order */
-      });
-    },
-    [],
-  );
-
-  const youtubeQueue = useMemo(
+  // News clips — driven by `newsShouldPlay`, which is the same
+  // continuous-background predicate YouTube uses. News has no
+  // ducking affordance of its own (the WAV pool's gain envelope is
+  // a fade, not an instant mute), so it continues to fully stop
+  // during user speech and restart after the 800 ms decay — the
+  // `!vadActive` clause is baked into `nobodyTalking`.
+  const {
+    hasContent: fillerHasContent,
+    currentClip: newsCurrentClip,
+    upcoming: newsUpcomingRaw,
+    paused: newsPaused,
+    pause: newsPause,
+    resume: newsResume,
+    skip: newsSkip,
+  } = useThinkingFiller(newsShouldPlay);
+  const newsUpcoming = useMemo(
     () =>
-      voice.youtube.queue.map((q) => ({
-        videoId: q.videoId,
-        title: q.title,
-        thumbnailUrl: q.thumbnailUrl,
-        durationSec: q.durationSec,
+      newsUpcomingRaw.map((c) => ({
+        id: c.id,
+        title: c.title,
+        source: c.source,
       })),
-    [voice.youtube.queue],
+    [newsUpcomingRaw],
   );
-
-  const youtubeNowPlaying = useMemo(
-    () => ({
-      videoId: voice.youtube.videoId,
-      title: voice.youtube.title,
-      thumbnailUrl: voice.youtube.thumbnailUrl,
-      durationSec: voice.youtube.durationSec,
-      positionSec: voice.youtube.positionSec,
-      // useVoiceChannel types `status` as `string` (it's whatever the
-      // poll endpoint returns), so we narrow explicitly here. A
-      // disjunction through the type-guard ternary would still leave
-      // the truthy branch as `string`; the const triple is the
-      // cleanest narrow that fits SparContextValue's literal union.
-      status: ((): "playing" | "paused" | "idle" => {
-        if (voice.youtube.status === "playing") return "playing";
-        if (voice.youtube.status === "paused") return "paused";
-        return "idle";
-      })(),
-    }),
-    [
-      voice.youtube.videoId,
-      voice.youtube.title,
-      voice.youtube.thumbnailUrl,
-      voice.youtube.durationSec,
-      voice.youtube.positionSec,
-      voice.youtube.status,
-    ],
-  );
-
-  // News clips — same unified gate, plus an explicit `!vadActive`
-  // check to preserve stop-on-VAD behaviour. (vadActive was removed
-  // from hardCutoff because the YouTube hook now handles VAD via
-  // mute rather than pause; news has no ducking affordance of its
-  // own, so it continues to fully stop during user speech and
-  // restart after the 800 ms decay.)
-  const { hasContent: fillerHasContent } = useThinkingFiller(
-    fillerShouldPlay && !vadActive && wantsNews,
-  );
-
-  // Hum fallback — explicit "hum" mode, news mode with empty pool,
-  // or YouTube mode without a selection (and no news to fall back
-  // to). Same `!vadActive` gate as news for the same reason.
-  const humFallbackForNews = wantsNews && !fillerHasContent;
-  const humFallbackForYoutube =
-    wantsYoutube && mode === "youtube" && !ytSelected && !fillerHasContent;
-  useThinkingHum(
-    fillerShouldPlay &&
-      !vadActive &&
-      (wantsHum || humFallbackForNews || humFallbackForYoutube),
-  );
+  // The fallback gate: news will pick up automatically once YouTube
+  // goes idle (no track selected) — see `wantsNews` above. Used by
+  // the queue UI to show "News" as the upcoming entry after the
+  // last YouTube track. Kept conservative: only true when there is
+  // actual news content to play AND we're in a config that would
+  // hand off to news.
+  const newsUpNextAfterYoutube =
+    fillerHasContent &&
+    (mode === "youtube" || mode === "news") &&
+    !wantsTtsContent;
 
   // TTS-spoken filler content (fun-facts, calendar). Owns its own
   // <audio> element and fetch chain — see useTtsFillerContent for
@@ -968,11 +692,15 @@ export default function SparProvider({
   //      with controls regardless of whether the iframe happens to be
   //      in a thinking window or paused between turns.
   //   3. Spar TTS is actually emitting — the assistant is talking.
-  //   4. User VAD is hot — they're speaking right now.
-  //   5. News filler currently audible (gating mirrors useThinkingFiller).
-  //   6. Hum currently audible (mirrors useThinkingHum gate).
-  //   7. Just thinking, no audible filler.
-  //   8. Idle.
+  //   4. News filler is the active background mode and there's content
+  //      to play. Mirrors the YouTube branch: the card stays visible
+  //      with full transport controls regardless of whether the WAV
+  //      pool happens to be paused (TTS / VAD / between clips). Sits
+  //      ABOVE the VAD-listening branch so a brief user utterance
+  //      doesn't strip the play / pause / skip buttons.
+  //   5. User VAD is hot — they're speaking right now (no news track).
+  //   6. Just thinking, no audible filler.
+  //   7. Idle.
   // Conditions mirror the actual hook gates above so the indicator
   // can't drift from what the user hears.
   //
@@ -1016,17 +744,22 @@ export default function SparProvider({
       };
     }
     if (ttsAudible || !ttsIdle) return { kind: "speaking" };
+    // News surfaces whenever the user has opted into news mode and
+    // there's content to play — same shape as the YouTube branch
+    // above. Sits ABOVE the listening branch on purpose: VAD-driven
+    // pauses are handled by the playback gate (newsShouldPlay), but
+    // the card itself should stay mounted with its transport buttons
+    // visible the whole time.
+    if (wantsNews && fillerHasContent) {
+      return {
+        kind: "news",
+        clipId: newsCurrentClip?.id ?? null,
+        title: newsCurrentClip?.title ?? null,
+        source: newsCurrentClip?.source ?? null,
+        paused: newsPaused,
+      };
+    }
     if (listening && vadActive) return { kind: "listening" };
-    if (fillerShouldPlay && !vadActive && wantsNews && fillerHasContent) {
-      return { kind: "news" };
-    }
-    if (
-      fillerShouldPlay &&
-      !vadActive &&
-      (wantsHum || humFallbackForNews || humFallbackForYoutube)
-    ) {
-      return { kind: "hum" };
-    }
     if (busy) return { kind: "thinking" };
     return { kind: "idle" };
   }, [
@@ -1040,12 +773,10 @@ export default function SparProvider({
     ttsIdle,
     listening,
     vadActive,
-    fillerShouldPlay,
     wantsNews,
-    wantsHum,
     fillerHasContent,
-    humFallbackForNews,
-    humFallbackForYoutube,
+    newsCurrentClip,
+    newsPaused,
     busy,
   ]);
   // "Mic is open" chime — shares the same WAV the Python service
@@ -1229,10 +960,149 @@ export default function SparProvider({
     });
   }, [voice.channel, voice.turns, voice.turnCount]);
 
-  // Persist the transcript per-user in localStorage so reloads don't wipe
-  // context, and so the server's slice(-30) cap is mirrored client-side.
+  // Server-side persistence is the new source of truth for spar
+  // transcripts: every turn is written to spar_messages so reloads,
+  // device switches, and the new sidebar thread list all read from
+  // the same row set. The legacy localStorage cache stays as a
+  // first-paint cache (so the chat doesn't flash empty while the
+  // hydration GET races) but the server's response always wins.
   const transcriptKey = `${TRANSCRIPT_KEY_PREFIX}${currentUser.id}`;
   const transcriptLoadedRef = useRef(false);
+  const [conversations, setConversations] = useState<SparConversationSummary[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
+  const activeConversationIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      const res = await fetch("/api/spar/conversations", { cache: "no-store" });
+      if (!res.ok) return;
+      const body = (await res.json()) as { conversations?: SparConversationSummary[] };
+      if (Array.isArray(body.conversations)) {
+        setConversations(body.conversations);
+      }
+    } catch {
+      /* network blip — sidebar keeps last-known state */
+    }
+  }, []);
+
+  type ServerStep = {
+    id?: string;
+    name?: string;
+    label?: string;
+    detail?: string;
+    source?: string | null;
+    status?: "running" | "ok" | "error";
+    summary?: string;
+  };
+  const hydrateMessages = useCallback(
+    async (id: number) => {
+      setLoadingConversation(true);
+      try {
+        const res = await fetch(`/api/spar/conversations/${id}`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          conversation?: {
+            id: number;
+            title: string | null;
+            createdAt: number;
+            updatedAt: number;
+            driftNotice: string | null;
+          };
+          messages?: Array<{
+            id: number;
+            role: "user" | "assistant" | "system";
+            content: string;
+            toolCalls: unknown | null;
+            createdAt: number;
+          }>;
+        };
+        // Server is the source of truth for drift state when we
+        // switch threads — sync the sidebar row so the chat banner
+        // re-paints without waiting on the next WS broadcast.
+        if (body.conversation) {
+          const conv = body.conversation;
+          setConversations((prev) => {
+            const exists = prev.some((c) => c.id === conv.id);
+            if (!exists) return prev;
+            return prev.map((c) =>
+              c.id === conv.id
+                ? {
+                    ...c,
+                    title: conv.title,
+                    driftNotice: conv.driftNotice,
+                    updatedAt: conv.updatedAt,
+                  }
+                : c,
+            );
+          });
+        }
+        const incoming = Array.isArray(body.messages) ? body.messages : [];
+        const next: Msg[] = [];
+        let nextLocalId = 1;
+        for (const m of incoming) {
+          if (m.role !== "user" && m.role !== "assistant") continue;
+          const role: Role = m.role;
+          let steps: ToolStep[] | undefined;
+          let sources: string[] | undefined;
+          if (role === "assistant" && Array.isArray(m.toolCalls)) {
+            const arr = m.toolCalls as ServerStep[];
+            steps = arr
+              .filter(
+                (s): s is { id: string; label: string } & ServerStep =>
+                  !!s && typeof s.id === "string" && typeof s.label === "string",
+              )
+              .map((s, idx) => ({
+                id: s.id,
+                label: s.label,
+                detail: typeof s.detail === "string" ? s.detail : "",
+                status:
+                  s.status === "running"
+                    ? ("ok" as const)
+                    : ((s.status ?? "ok") as "ok" | "error"),
+                summary: typeof s.summary === "string" ? s.summary : "",
+                startedAt: m.createdAt - (arr.length - idx) * 10,
+                completedAt: m.createdAt,
+              }));
+            const seen = new Set<string>();
+            const collected: string[] = [];
+            for (const s of arr) {
+              if (s && typeof s.source === "string" && s.source && !seen.has(s.source)) {
+                collected.push(s.source);
+                seen.add(s.source);
+              }
+            }
+            sources = collected.length > 0 ? collected : undefined;
+          }
+          next.push({
+            id: nextLocalId++,
+            role,
+            content: m.content,
+            persistedId: m.id,
+            ...(role === "assistant" ? { completedAt: m.createdAt } : {}),
+            ...(steps ? { steps } : {}),
+            ...(sources ? { sources } : {}),
+          });
+        }
+        nextIdRef.current = nextLocalId;
+        setMessages(next.slice(-MAX_TRANSCRIPT));
+        setActiveConversationId(id);
+      } finally {
+        setLoadingConversation(false);
+      }
+    },
+    [],
+  );
+
+  // First-paint cache: read the local snapshot synchronously so the
+  // text-mode chat list isn't blank while the conversation list GET
+  // is in flight. Anything older than the server's reply gets
+  // overwritten by hydrateMessages below.
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(transcriptKey);
@@ -1250,6 +1120,25 @@ export default function SparProvider({
     } finally {
       transcriptLoadedRef.current = true;
     }
+    // Server-side hydration: pull the user's conversation list and
+    // load whichever one was most recently touched. This wins over
+    // the localStorage cache the moment it returns.
+    void (async () => {
+      try {
+        const res = await fetch("/api/spar/conversations", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          conversations?: SparConversationSummary[];
+        };
+        const list = Array.isArray(body.conversations) ? body.conversations : [];
+        setConversations(list);
+        if (list.length > 0) {
+          await hydrateMessages(list[0].id);
+        }
+      } catch {
+        /* offline — caller stays on the localStorage snapshot */
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
@@ -1262,6 +1151,75 @@ export default function SparProvider({
     }
   }, [messages, transcriptKey]);
 
+  const selectConversation = useCallback(
+    async (id: number) => {
+      if (activeConversationIdRef.current === id) return;
+      await hydrateMessages(id);
+    },
+    [hydrateMessages],
+  );
+
+  const newConversation = useCallback(() => {
+    setMessages([]);
+    setActiveConversationId(null);
+    nextIdRef.current = 1;
+    try {
+      window.localStorage.removeItem(transcriptKey);
+    } catch {
+      /* ignore */
+    }
+  }, [transcriptKey]);
+
+  const deleteConversationApi = useCallback(
+    async (id: number) => {
+      try {
+        const res = await fetch(`/api/spar/conversations/${id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) return;
+      } catch {
+        return;
+      }
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (activeConversationIdRef.current === id) {
+        setMessages([]);
+        setActiveConversationId(null);
+        try {
+          window.localStorage.removeItem(transcriptKey);
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [transcriptKey],
+  );
+
+  // Optimistically clear the active conversation's drift notice and
+  // tell the server to forget it. The server's response broadcasts a
+  // spar:conversation event so sibling tabs converge on the cleared
+  // state too.
+  const dismissDriftNotice = useCallback(async () => {
+    const id = activeConversationIdRef.current;
+    if (id == null) return;
+    setConversations((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, driftNotice: null } : c)),
+    );
+    try {
+      await fetch(`/api/spar/conversations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ driftNotice: null }),
+      });
+    } catch {
+      /* network blip — server will reconcile on next broadcast */
+    }
+  }, []);
+
+  // Autopilot is stored server-side (autopilot_users table) so the
+  // 5-min cron in lib/autopilot.ts keeps draining open remarks even
+  // when no browser tab is open. We still mirror the last-known value
+  // in localStorage so the toggle paints instantly on next mount
+  // instead of flickering off → on after the GET resolves.
   const autopilotKey = `${AUTOPILOT_KEY_PREFIX}${currentUser.id}`;
   const autopilotLoadedRef = useRef(false);
   useEffect(() => {
@@ -1270,9 +1228,24 @@ export default function SparProvider({
       if (raw === "1") setAutopilot(true);
     } catch {
       /* ignore */
-    } finally {
-      autopilotLoadedRef.current = true;
     }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/spar/autopilot", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { enabled?: boolean };
+        if (cancelled) return;
+        if (typeof body.enabled === "boolean") setAutopilot(body.enabled);
+      } catch {
+        /* network blip — keep whatever localStorage gave us */
+      } finally {
+        autopilotLoadedRef.current = true;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
@@ -1284,12 +1257,76 @@ export default function SparProvider({
     }
   }, [autopilot, autopilotKey]);
 
+  // Mirror of the saved autopilot directive (north star). The
+  // sidebar owns editing; SparProvider only reads it so the
+  // completion-path prompt can fold it into the autonomous-loop
+  // block. Refetched whenever the sidebar saves (sidebar fires a
+  // `spar:autopilot-directive-changed` window event after a
+  // successful POST) so the loop sees the new directive on the very
+  // next dispatch completion without a page reload.
+  const autopilotDirectiveRef = useRef<string>("");
+  useEffect(() => {
+    let cancelled = false;
+    const fetchDirective = async () => {
+      try {
+        const res = await fetch("/api/spar/autopilot/directive", {
+          cache: "no-store",
+        });
+        if (!res.ok || cancelled) return;
+        const json = (await res.json()) as { directive?: string };
+        autopilotDirectiveRef.current =
+          typeof json.directive === "string" ? json.directive : "";
+      } catch {
+        /* network blip — keep whatever we had */
+      }
+    };
+    void fetchDirective();
+    const handler = () => {
+      void fetchDirective();
+    };
+    window.addEventListener("spar:autopilot-directive-changed", handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(
+        "spar:autopilot-directive-changed",
+        handler,
+      );
+    };
+  }, []);
+
   const toggleAutopilot = useCallback(() => {
-    setAutopilot((v) => !v);
+    setAutopilot((prev) => {
+      const next = !prev;
+      // Optimistic flip; on a network failure we revert so the UI
+      // doesn't lie about the cron's actual state.
+      void (async () => {
+        try {
+          const res = await fetch("/api/spar/autopilot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: next }),
+          });
+          if (!res.ok) throw new Error(`status ${res.status}`);
+        } catch (err) {
+          console.warn("[autopilot] toggle persist failed:", err);
+          setAutopilot(prev);
+        }
+      })();
+      return next;
+    });
+  }, []);
+
+  const appendNotice = useCallback((content: string) => {
+    setMessages((prev) => [
+      ...prev,
+      { id: nextIdRef.current++, role: "assistant", content },
+    ]);
   }, []);
 
   const clearTranscript = useCallback(() => {
     setMessages([]);
+    setActiveConversationId(null);
+    nextIdRef.current = 1;
     try {
       window.localStorage.removeItem(transcriptKey);
     } catch {
@@ -1349,7 +1386,12 @@ export default function SparProvider({
   }, [callSeconds]);
 
   function newMsg(role: Role, content = ""): Msg {
-    return { id: nextIdRef.current++, role, content };
+    return {
+      id: nextIdRef.current++,
+      role,
+      content,
+      ...(role === "assistant" ? { startedAt: Date.now() } : {}),
+    };
   }
 
   function ensureAnalyser() {
@@ -1558,7 +1600,11 @@ export default function SparProvider({
   }, []);
 
   function speakChunk(text: string) {
-    if (ttsMutedRef.current) return;
+    // Mute is text-chat only — when the user is actively in a call
+    // we always speak regardless of the persisted preference. The
+    // call leg owns the audio output, so respecting the mute there
+    // would silence the assistant mid-conversation.
+    if (ttsMutedRef.current && !inCallRef.current) return;
     // Shared session moved to Telegram → the phone call is voicing
     // the reply. Skipping here prevents the laptop from echoing it
     // 200 ms later (the call's audio path is longer than the local
@@ -1597,7 +1643,10 @@ export default function SparProvider({
   }
 
   function flushSpokenText(fullText: string, final: boolean) {
-    if (ttsMutedRef.current) {
+    // Same call-aware gate as speakChunk. Marking the cursor as
+    // fully consumed prevents a later un-mute from suddenly
+    // back-speaking the entire reply.
+    if (ttsMutedRef.current && !inCallRef.current) {
       spokenCharsRef.current = fullText.length;
       return;
     }
@@ -1627,10 +1676,41 @@ export default function SparProvider({
     }
   }
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
+  const addAttachments = useCallback((files: File[]) => {
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        console.warn(`[spar] skipping ${file.name}: exceeds 10 MB`);
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const att: Attachment = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          type: file.type || "application/octet-stream",
+          size: file.size,
+          dataUrl: reader.result as string,
+        };
+        setPendingAttachments((prev) => [...prev, att]);
+      };
+      reader.readAsDataURL(file);
+    }
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const clearAttachments = useCallback(() => {
+    setPendingAttachments([]);
+  }, []);
+
   const sendMessage = useCallback(
     async (raw: string, opts?: { kickoff?: boolean }) => {
       const text = raw.trim();
-      if (!opts?.kickoff && !text) return;
+      if (!opts?.kickoff && !text && !pendingAttachmentsRef.current.length) return;
       if (busyRef.current) return;
       ttsCancel();
       spokenCharsRef.current = 0;
@@ -1643,7 +1723,11 @@ export default function SparProvider({
       if (!opts?.kickoff && text && !telegramActiveRef.current) {
         playMessageSentChime();
       }
-      const userMsg = opts?.kickoff ? null : newMsg("user", text);
+      const snapshotAttachments = pendingAttachmentsRef.current.length > 0 ? [...pendingAttachmentsRef.current] : undefined;
+      if (snapshotAttachments) setPendingAttachments([]);
+      const userMsg = opts?.kickoff
+        ? null
+        : { ...newMsg("user", text), attachments: snapshotAttachments };
       const assistantMsg = newMsg("assistant", "");
       setMessages((prev) =>
         userMsg ? [...prev, userMsg, assistantMsg] : [...prev, assistantMsg],
@@ -1672,7 +1756,18 @@ export default function SparProvider({
         let realChunksEmitted = false;
         let httpFailureText: string | null = null;
         let allAttemptsFailed = false;
-        let accumulated = "";
+        // Visible assistant text accumulated across all turns of the
+        // agentic loop. The wire is NDJSON now — one JSON event per
+        // line — so we can't just decode().concat the raw bytes; we
+        // line-buffer inside the read loop and route by event type.
+        let accumulatedText = "";
+        let accumulatedSteps: ToolStep[] = [];
+        // Sources consulted to build this assistant reply. Seeded by
+        // the server's first `sources` event (always-injected baseline),
+        // then appended by each read-shape tool_use that carries a
+        // `source` field. Deduped on insert.
+        let accumulatedSources: string[] = [];
+        let serverError: string | null = null;
 
         for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
           if (RETRY_DELAYS_MS[attempt] > 0) {
@@ -1681,10 +1776,15 @@ export default function SparProvider({
             );
             // Reset between attempts — only reachable when no real
             // content was emitted, so this is just keepalive bytes.
-            accumulated = "";
+            accumulatedText = "";
+            accumulatedSteps = [];
+            accumulatedSources = [];
+            serverError = null;
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantMsg.id ? { ...m, content: "" } : m,
+                m.id === assistantMsg.id
+                  ? { ...m, content: "", steps: [], sources: [] }
+                  : m,
               ),
             );
           }
@@ -1696,9 +1796,15 @@ export default function SparProvider({
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 autopilot: autopilotRef.current,
+                conversationId: activeConversationIdRef.current,
                 messages: priorHistory
                   .slice(-MAX_TRANSCRIPT)
                   .map((m) => ({ role: m.role, content: m.content })),
+                attachments: snapshotAttachments?.map((a) => ({
+                  name: a.name,
+                  type: a.type,
+                  dataUrl: a.dataUrl,
+                })),
               }),
             });
           } catch (err) {
@@ -1721,26 +1827,166 @@ export default function SparProvider({
           const reader = r.body.getReader();
           const decoder = new TextDecoder();
           let streamFailed = false;
+          let lineBuf = "";
+          // Apply a single batched setMessages per network read instead
+          // of per event — events arrive in tight bursts (assistant turn
+          // emits text + tool_use back-to-back) and one render per burst
+          // is plenty smooth.
+          const applyEvent = (evt: Record<string, unknown>) => {
+            const t = evt.t;
+            if (t === "ping") return;
+            if (t === "conversation" && typeof evt.id === "number") {
+              // Server lazily created or confirmed the active row.
+              // Pin client-side state to it so subsequent retries and
+              // the next turn target the same conversation.
+              if (activeConversationIdRef.current !== evt.id) {
+                activeConversationIdRef.current = evt.id;
+                setActiveConversationId(evt.id);
+              }
+              return;
+            }
+            if (t === "text" && typeof evt.v === "string") {
+              accumulatedText += evt.v;
+              return;
+            }
+            if (t === "sources" && Array.isArray(evt.v)) {
+              // Seed (or top up) the baseline sources from the server.
+              // Server emits this once per turn, before tools fire.
+              const seen = new Set(accumulatedSources);
+              for (const s of evt.v as unknown[]) {
+                if (typeof s === "string" && s && !seen.has(s)) {
+                  accumulatedSources = [...accumulatedSources, s];
+                  seen.add(s);
+                }
+              }
+              return;
+            }
+            if (
+              t === "tool_use" &&
+              typeof evt.id === "string" &&
+              typeof evt.label === "string"
+            ) {
+              const detail =
+                typeof evt.detail === "string" ? evt.detail : "";
+              accumulatedSteps = [
+                ...accumulatedSteps,
+                {
+                  id: evt.id,
+                  label: evt.label,
+                  detail,
+                  status: "running",
+                  startedAt: Date.now(),
+                },
+              ];
+              // Tool calls that read a source contribute to the
+              // sources strip too. Action tools (write/dispatch/send)
+              // arrive without a `source` field and don't show up.
+              if (typeof evt.source === "string" && evt.source) {
+                if (!accumulatedSources.includes(evt.source)) {
+                  accumulatedSources = [...accumulatedSources, evt.source];
+                }
+              }
+              return;
+            }
+            if (t === "tool_result" && typeof evt.id === "string") {
+              const ok = evt.ok !== false;
+              const summary =
+                typeof evt.summary === "string" ? evt.summary : "";
+              accumulatedSteps = accumulatedSteps.map((step) =>
+                step.id === evt.id
+                  ? {
+                      ...step,
+                      status: ok ? "ok" : "error",
+                      summary,
+                      completedAt: Date.now(),
+                    }
+                  : step,
+              );
+              return;
+            }
+            if (t === "error" && typeof evt.v === "string") {
+              serverError = evt.v;
+              return;
+            }
+          };
           try {
             while (true) {
               const { value, done } = await reader.read();
               if (done) break;
-              accumulated += decoder.decode(value, { stream: true });
-              if (!realChunksEmitted) {
-                // ZWSP-only output is keepalive, not visible content —
-                // a drop here can still be retried without duplication.
-                const visible = accumulated.replace(/​/g, "").trim();
-                if (visible.length > 0) realChunksEmitted = true;
+              lineBuf += decoder.decode(value, { stream: true });
+              let nl: number;
+              let touched = false;
+              while ((nl = lineBuf.indexOf("\n")) !== -1) {
+                const line = lineBuf.slice(0, nl).trim();
+                lineBuf = lineBuf.slice(nl + 1);
+                if (!line) continue;
+                let evt: unknown;
+                try {
+                  evt = JSON.parse(line);
+                } catch {
+                  // Tolerate a malformed line (e.g. proxy injected
+                  // some HTML mid-stream) — drop it and keep going.
+                  continue;
+                }
+                if (!evt || typeof evt !== "object") continue;
+                const before = realChunksEmitted;
+                applyEvent(evt as Record<string, unknown>);
+                touched = true;
+                // Anything beyond a ping counts as real content for
+                // retry-safety — we won't retry once the user has seen
+                // text or a tool step.
+                if (
+                  !before &&
+                  (evt as { t?: string }).t &&
+                  (evt as { t?: string }).t !== "ping" &&
+                  (evt as { t?: string }).t !== "conversation"
+                ) {
+                  realChunksEmitted = true;
+                }
               }
-              const soFar = accumulated;
+              if (!touched) continue;
+              const soFarText = accumulatedText;
+              const soFarSteps = accumulatedSteps;
+              const soFarSources = accumulatedSources;
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.id === assistantMsg.id ? { ...m, content: soFar } : m,
+                  m.id === assistantMsg.id
+                    ? {
+                        ...m,
+                        content: soFarText,
+                        steps: soFarSteps,
+                        sources: soFarSources,
+                      }
+                    : m,
                 ),
               );
-              flushSpokenText(soFar, false);
+              flushSpokenText(soFarText, false);
             }
-            accumulated += decoder.decode();
+            // Drain any final partial line (no trailing newline).
+            const tail = lineBuf.trim();
+            lineBuf = "";
+            if (tail) {
+              try {
+                const evt = JSON.parse(tail);
+                if (evt && typeof evt === "object") {
+                  applyEvent(evt as Record<string, unknown>);
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantMsg.id
+                        ? {
+                            ...m,
+                            content: accumulatedText,
+                            steps: accumulatedSteps,
+                            sources: accumulatedSources,
+                          }
+                        : m,
+                    ),
+                  );
+                }
+              } catch {
+                /* ignore — tail wasn't a complete JSON line */
+              }
+            }
           } catch (err) {
             streamFailed = true;
             if (realChunksEmitted) {
@@ -1766,11 +2012,24 @@ export default function SparProvider({
           ? `[error: ${httpFailureText.slice(0, 200)}]`
           : allAttemptsFailed
             ? "Connection lost after 3 attempts — please try again."
-            : accumulated;
+            : serverError
+              ? accumulatedText
+                ? accumulatedText + `\n[error: ${serverError}]`
+                : `[error: ${serverError}]`
+              : accumulatedText;
 
+        const completedAt = Date.now();
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantMsg.id ? { ...m, content: finalContent } : m,
+            m.id === assistantMsg.id
+              ? {
+                  ...m,
+                  content: finalContent,
+                  completedAt,
+                  steps: accumulatedSteps,
+                  sources: accumulatedSources,
+                }
+              : m,
           ),
         );
         flushSpokenText(finalContent, true);
@@ -1806,38 +2065,859 @@ export default function SparProvider({
         }
       } finally {
         setBusy(false);
+        // Refresh the sidebar list so the new title (if the server
+        // just back-filled one from the user's first message) and
+        // the bumped updated_at re-sort the threads. Fire-and-forget.
+        void refreshConversations();
       }
     },
-    [playMessageSentChime],
+    [playMessageSentChime, refreshConversations],
   );
 
-  // Auto-report: when a previously-sent dispatch just picked up a
-  // completedAt, nudge spar to summarize it aloud. Tracks which ids
-  // we've already reacted to so a dispatch is only reported once; only
-  // fires while in-call and spar isn't mid-reply so we don't talk over
-  // the user or ourselves.
-  const reportedCompletionsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!inCall) return;
-    if (busyRef.current) return;
-    if (!ttsIdleRef.current) return;
-    const pending = dispatches
-      .filter(
-        (d) =>
-          d.status === "sent" &&
-          d.completedAt != null &&
-          Date.now() - d.completedAt < 5 * 60_000 &&
-          !reportedCompletionsRef.current.has(d.id),
-      )
-      .sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
-    const next = pending[0];
-    if (!next) return;
-    reportedCompletionsRef.current.add(next.id);
-    void sendMessage(
-      `The task on ${next.projectId} just finished — check its recent output and give me a brief summary of what it did.`,
-    );
+  // Server-driven assistant turn. Used by the dispatch-completion
+  // auto-reporter and any future event-driven path where the spar
+  // should speak up without the user having said anything. The
+  // directive is fed to /api/spar as the latest user-role turn
+  // (prefixed `[system]`) so Claude's existing tool loop runs
+  // unchanged — but the dashboard renders no user bubble for it,
+  // and the route skips writing it to the shared voice session.
+  //
+  // Mirrors the streaming + retry behaviour of sendMessage (line-
+  // buffered NDJSON, ZWSP-aware retry safety, fade-in to ttsIdle)
+  // minus the user-side ergonomics: no chime, no attachments, no
+  // learning-pipeline POST, no kickoff branch. Returns early if the
+  // assistant is already mid-reply — the queueCompletion path will
+  // re-arm and try again once busy clears.
+  const sendSystemInjection = useCallback(
+    async (visibleUserPrompt: string, systemAddon?: string) => {
+      const trimmed = visibleUserPrompt.trim();
+      if (!trimmed) return;
+      if (busyRef.current) return;
+      ttsCancel();
+      spokenCharsRef.current = 0;
+      setBusy(true);
+      // Render the auto-report as a regular user-typed bubble. The visible
+      // prompt is a clean, conversational sentence ("Updates on X — what
+      // happened?") that blends into the transcript exactly like a turn the
+      // operator typed themselves. The transcript-only assistant turn the
+      // old design produced confused the chat (a reply with no question);
+      // this version reads as a normal user → assistant pair.
+      //
+      // Optional `systemAddon` (e.g. the autopilot prompt block) still
+      // travels through the route's `systemInjection` field — it carries
+      // operational rules we don't want to render in the user's bubble.
+      // Tag the bubble as auto-generated so the renderer can show an
+      // "Auto-report" badge above it — visually distinguishes work the
+      // system kicked off from work the operator typed. Session-only;
+      // see Msg.isAutoReport in SparContext for the persistence note.
+      const userMsg: Msg = { ...newMsg("user", trimmed), isAutoReport: true };
+      const assistantMsg = newMsg("assistant", "");
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      // History includes the freshly-inserted user turn so the route's
+      // persistence path stores it as a real user message and Claude
+      // sees it as the latest user prompt.
+      const priorHistory = [...messagesRef.current, userMsg];
+      const systemInjectionField = systemAddon?.trim() || undefined;
+      try {
+        const RETRY_DELAYS_MS = [0, 500, 1500];
+        let realChunksEmitted = false;
+        let httpFailureText: string | null = null;
+        let allAttemptsFailed = false;
+        let accumulatedText = "";
+        let accumulatedSteps: ToolStep[] = [];
+        // Sources consulted to build this assistant reply. Seeded by
+        // the server's first `sources` event (always-injected baseline),
+        // then appended by each read-shape tool_use that carries a
+        // `source` field. Deduped on insert.
+        let accumulatedSources: string[] = [];
+        let serverError: string | null = null;
+
+        for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+          if (RETRY_DELAYS_MS[attempt] > 0) {
+            await new Promise<void>((r) =>
+              setTimeout(r, RETRY_DELAYS_MS[attempt]),
+            );
+            accumulatedText = "";
+            accumulatedSteps = [];
+            accumulatedSources = [];
+            serverError = null;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsg.id
+                  ? { ...m, content: "", steps: [], sources: [] }
+                  : m,
+              ),
+            );
+          }
+
+          let r: Response;
+          try {
+            r = await fetch("/api/spar", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                autopilot: autopilotRef.current,
+                conversationId: activeConversationIdRef.current,
+                messages: priorHistory
+                  .slice(-MAX_TRANSCRIPT)
+                  .map((m) => ({ role: m.role, content: m.content })),
+                ...(systemInjectionField
+                  ? { systemInjection: systemInjectionField }
+                  : {}),
+              }),
+            });
+          } catch (err) {
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[spar] system-injection fetch failed (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+              continue;
+            }
+            allAttemptsFailed = true;
+            break;
+          }
+
+          if (!r.ok || !r.body) {
+            httpFailureText = await r.text().catch(() => "spar failed");
+            break;
+          }
+
+          const reader = r.body.getReader();
+          const decoder = new TextDecoder();
+          let streamFailed = false;
+          let lineBuf = "";
+          const applyEvent = (evt: Record<string, unknown>) => {
+            const t = evt.t;
+            if (t === "ping") return;
+            if (t === "text" && typeof evt.v === "string") {
+              accumulatedText += evt.v;
+              return;
+            }
+            if (t === "sources" && Array.isArray(evt.v)) {
+              // Seed (or top up) the baseline sources from the server.
+              // Server emits this once per turn, before tools fire.
+              const seen = new Set(accumulatedSources);
+              for (const s of evt.v as unknown[]) {
+                if (typeof s === "string" && s && !seen.has(s)) {
+                  accumulatedSources = [...accumulatedSources, s];
+                  seen.add(s);
+                }
+              }
+              return;
+            }
+            if (
+              t === "tool_use" &&
+              typeof evt.id === "string" &&
+              typeof evt.label === "string"
+            ) {
+              const detail =
+                typeof evt.detail === "string" ? evt.detail : "";
+              accumulatedSteps = [
+                ...accumulatedSteps,
+                {
+                  id: evt.id,
+                  label: evt.label,
+                  detail,
+                  status: "running",
+                  startedAt: Date.now(),
+                },
+              ];
+              // Tool calls that read a source contribute to the
+              // sources strip too. Action tools (write/dispatch/send)
+              // arrive without a `source` field and don't show up.
+              if (typeof evt.source === "string" && evt.source) {
+                if (!accumulatedSources.includes(evt.source)) {
+                  accumulatedSources = [...accumulatedSources, evt.source];
+                }
+              }
+              return;
+            }
+            if (t === "tool_result" && typeof evt.id === "string") {
+              const ok = evt.ok !== false;
+              const summary =
+                typeof evt.summary === "string" ? evt.summary : "";
+              accumulatedSteps = accumulatedSteps.map((step) =>
+                step.id === evt.id
+                  ? {
+                      ...step,
+                      status: ok ? "ok" : "error",
+                      summary,
+                      completedAt: Date.now(),
+                    }
+                  : step,
+              );
+              return;
+            }
+            if (t === "error" && typeof evt.v === "string") {
+              serverError = evt.v;
+              return;
+            }
+          };
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              lineBuf += decoder.decode(value, { stream: true });
+              let nl: number;
+              let touched = false;
+              while ((nl = lineBuf.indexOf("\n")) !== -1) {
+                const line = lineBuf.slice(0, nl).trim();
+                lineBuf = lineBuf.slice(nl + 1);
+                if (!line) continue;
+                let evt: unknown;
+                try {
+                  evt = JSON.parse(line);
+                } catch {
+                  continue;
+                }
+                if (!evt || typeof evt !== "object") continue;
+                const before = realChunksEmitted;
+                applyEvent(evt as Record<string, unknown>);
+                touched = true;
+                if (
+                  !before &&
+                  (evt as { t?: string }).t &&
+                  (evt as { t?: string }).t !== "ping"
+                ) {
+                  realChunksEmitted = true;
+                }
+              }
+              if (!touched) continue;
+              const soFarText = accumulatedText;
+              const soFarSteps = accumulatedSteps;
+              const soFarSources = accumulatedSources;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsg.id
+                    ? {
+                        ...m,
+                        content: soFarText,
+                        steps: soFarSteps,
+                        sources: soFarSources,
+                      }
+                    : m,
+                ),
+              );
+              flushSpokenText(soFarText, false);
+            }
+            const tail = lineBuf.trim();
+            lineBuf = "";
+            if (tail) {
+              try {
+                const evt = JSON.parse(tail);
+                if (evt && typeof evt === "object") {
+                  applyEvent(evt as Record<string, unknown>);
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantMsg.id
+                        ? {
+                            ...m,
+                            content: accumulatedText,
+                            steps: accumulatedSteps,
+                            sources: accumulatedSources,
+                          }
+                        : m,
+                    ),
+                  );
+                }
+              } catch {
+                /* ignore */
+              }
+            }
+          } catch (err) {
+            streamFailed = true;
+            if (realChunksEmitted) break;
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[spar] system-injection stream dropped (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+              continue;
+            }
+            allAttemptsFailed = true;
+            break;
+          }
+
+          if (!streamFailed) break;
+        }
+
+        const finalContent = httpFailureText
+          ? `[error: ${httpFailureText.slice(0, 200)}]`
+          : allAttemptsFailed
+            ? "Connection lost after 3 attempts — please try again."
+            : serverError
+              ? accumulatedText
+                ? accumulatedText + `\n[error: ${serverError}]`
+                : `[error: ${serverError}]`
+              : accumulatedText;
+
+        const completedAt = Date.now();
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsg.id
+              ? {
+                  ...m,
+                  content: finalContent,
+                  completedAt,
+                  steps: accumulatedSteps,
+                  sources: accumulatedSources,
+                }
+              : m,
+          ),
+        );
+        flushSpokenText(finalContent, true);
+      } finally {
+        setBusy(false);
+      }
+    },
+    // No deps from the closure — everything we read is via refs or
+    // module-stable functions. Matches sendMessage's pattern.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dispatches, inCall, busy, ttsIdle]);
+    [],
+  );
+
+  // Auto-report when a dispatched task finishes. Two paths feed this:
+  //
+  //   1. WS push (`dispatch_completed` event from lib/ws.ts) — fires
+  //      within ~ms of the project's Claude session going idle. This
+  //      is the primary path and carries projectName so the directive
+  //      reads naturally ("the task on Badkamerstijl just finished").
+  //
+  //   2. Polling fallback over /api/spar/dispatches (existing). Catches
+  //      tabs that connected AFTER the WS broadcast fired (e.g. user
+  //      switched tabs back, browser was throttled). Only the projectId
+  //      is available on this path.
+  //
+  // `reportedCompletionsRef` is shared between both so a dispatch is
+  // only summarised once, no matter which path saw it first. We don't
+  // gate on `inCall` anymore — the user wants to know when work
+  // finishes regardless of whether they're in a voice session, and
+  // sendSystemInjection produces a transcript-only assistant turn
+  // when the call is offline (no audio talked-over).
+  const reportedCompletionsRef = useRef<Set<string>>(new Set());
+
+  // Buffer for completions arriving over the WS bus so a burst
+  // (multiple projects finishing within seconds) becomes one combined
+  // summary turn instead of N spammy ones.
+  type PendingCompletion = {
+    projectId: string;
+    projectName: string;
+    dispatchId: string;
+  };
+  const pendingCompletionsRef = useRef<PendingCompletion[]>([]);
+  const completionFlushTimerRef = useRef<number | null>(null);
+  // Coalescing window. 3s is long enough to bundle near-simultaneous
+  // finishes (two dispatches submitted in the same turn) and short
+  // enough that the user doesn't notice a delay on a single completion.
+  const COMPLETION_BATCH_MS = 3_000;
+  // Re-arm interval while the conversation is mid-exchange. We keep
+  // checking for an idle gap rather than racing the user's reply.
+  const COMPLETION_DEFER_MS = 1_500;
+
+  /**
+   * Returns the visible user-bubble text for an auto-report. Reads like
+   * something the operator might type, so it blends into the chat
+   * naturally. The technical instruction (use read_terminal_scrollback,
+   * etc.) is implicit — the spar system prompt already documents the
+   * tool, so Claude knows to invoke it when asked about a project.
+   * Project IDs travel inline so disambiguation works for multi-project
+   * batches even when projectName is missing.
+   */
+  function buildCompletionPrompt(items: PendingCompletion[]): string {
+    if (items.length === 0) return "";
+    if (items.length === 1) {
+      const it = items[0];
+      const idHint =
+        it.projectName === it.projectId ? "" : ` (${it.projectId})`;
+      return `Update on ${it.projectName}${idHint} — what happened?`;
+    }
+    const list = items
+      .map((it) => {
+        const idHint =
+          it.projectName === it.projectId ? "" : ` (${it.projectId})`;
+        return `${it.projectName}${idHint}`;
+      })
+      .join(", ");
+    return `Updates on ${list} — what happened on each?`;
+  }
+
+  /**
+   * Optional autopilot suffix that travels via the route's
+   * systemInjection field rather than the visible user bubble. Carries
+   * operational rules (the autonomous loop's decision chain) we don't
+   * want to surface in the transcript. Returns undefined when autopilot
+   * is off — the user-bubble prompt is then the only thing Claude sees.
+   */
+  function buildCompletionSystemAddon(): string | undefined {
+    if (!autopilotRef.current) return undefined;
+    return buildAutopilotPromptBlock({
+      directive: autopilotDirectiveRef.current,
+    });
+  }
+
+  function flushPendingCompletions() {
+    completionFlushTimerRef.current = null;
+    const queue = pendingCompletionsRef.current;
+    if (queue.length === 0) return;
+    // Defer if the assistant is mid-stream OR TTS is still speaking.
+    // The user is in the middle of a turn; a second stream would race
+    // the active one. Re-arm a short retry instead of dropping the
+    // queue — the buffered ids stay pending and flush as soon as the
+    // current exchange settles.
+    if (busyRef.current || !ttsIdleRef.current) {
+      completionFlushTimerRef.current = window.setTimeout(
+        flushPendingCompletions,
+        COMPLETION_DEFER_MS,
+      );
+      return;
+    }
+    // Drain the buffer atomically — if a new completion arrives while
+    // the spar API call is in-flight, it'll re-arm a fresh timer and
+    // flush in the next batch.
+    const items = queue.slice();
+    pendingCompletionsRef.current = [];
+    for (const it of items) reportedCompletionsRef.current.add(it.dispatchId);
+    const visiblePrompt = buildCompletionPrompt(items);
+    if (visiblePrompt) {
+      void sendSystemInjection(visiblePrompt, buildCompletionSystemAddon());
+    }
+  }
+
+  function queueCompletion(item: PendingCompletion) {
+    if (reportedCompletionsRef.current.has(item.dispatchId)) return;
+    // Dedupe within the buffer too (shouldn't happen — server fires
+    // once per dispatch — but a cheap guard against reconnect storms).
+    if (
+      pendingCompletionsRef.current.some((p) => p.dispatchId === item.dispatchId)
+    ) {
+      return;
+    }
+    pendingCompletionsRef.current.push(item);
+    if (completionFlushTimerRef.current !== null) {
+      window.clearTimeout(completionFlushTimerRef.current);
+    }
+    completionFlushTimerRef.current = window.setTimeout(
+      flushPendingCompletions,
+      COMPLETION_BATCH_MS,
+    );
+  }
+
+  /**
+   * Apply a cross-device spar:message broadcast. Three cases:
+   *
+   *   1. Wrong conversation id → bump the sidebar list ordering only.
+   *   2. Right conversation, message id already attached to a local
+   *      Msg → drop. The other tab is just echoing what we already
+   *      have on screen.
+   *   3. Right conversation, no matching id locally → either attach
+   *      the id to the most recent matching local message (own-tab
+   *      echo of an optimistic insert) or append a brand-new bubble
+   *      (a sibling tab / phone produced this turn).
+   *
+   * Heuristic for case 3: walk the local list backwards looking for a
+   * persistedId-less message of the same role with the same content;
+   * if found, attach. Otherwise insert.
+   */
+  const handleSparMessageBroadcast = useCallback((rawPayload: unknown) => {
+    if (!rawPayload || typeof rawPayload !== "object") return;
+    const payload = rawPayload as {
+      conversationId?: number;
+      message?: {
+        id?: number;
+        role?: "user" | "assistant" | "system";
+        content?: string;
+        toolCalls?: unknown;
+        createdAt?: number;
+      };
+    };
+    const convId = payload.conversationId;
+    const m = payload.message;
+    if (typeof convId !== "number" || !m) return;
+    if (typeof m.id !== "number" || typeof m.content !== "string") return;
+    if (m.role !== "user" && m.role !== "assistant") return;
+    const role: Role = m.role;
+    const messageId = m.id;
+    const content = m.content;
+    const createdAt = m.createdAt ?? Date.now();
+    const toolCallsRaw = m.toolCalls;
+
+    void refreshConversations();
+    if (activeConversationIdRef.current !== convId) return;
+
+    setMessages((prev) => {
+      // Case 2: already attached → no-op.
+      if (prev.some((p) => p.persistedId === messageId)) return prev;
+
+      // Case 3a: own-tab optimistic insert. Walk from the end and
+      // attach the id to the first matching unmarked message.
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const candidate = prev[i];
+        if (candidate.role !== role) continue;
+        if (candidate.persistedId !== undefined) continue;
+        if (candidate.content.trim() !== content.trim()) continue;
+        const next = prev.slice();
+        next[i] = { ...candidate, persistedId: messageId };
+        return next;
+      }
+
+      // Case 3b: brand-new content from another device. Build the
+      // tool-step list out of the persisted snapshot so step cards
+      // re-paint identically across tabs.
+      let steps: ToolStep[] | undefined;
+      let sources: string[] | undefined;
+      if (role === "assistant" && Array.isArray(toolCallsRaw)) {
+        const arr = toolCallsRaw as Array<{
+          id?: string;
+          label?: string;
+          detail?: string;
+          source?: string | null;
+          status?: "running" | "ok" | "error";
+          summary?: string;
+        }>;
+        steps = arr
+          .filter(
+            (s): s is { id: string; label: string } & typeof s =>
+              !!s && typeof s.id === "string" && typeof s.label === "string",
+          )
+          .map((s, idx) => ({
+            id: s.id,
+            label: s.label,
+            detail: typeof s.detail === "string" ? s.detail : "",
+            status:
+              s.status === "running"
+                ? ("ok" as const)
+                : ((s.status ?? "ok") as "ok" | "error"),
+            summary: typeof s.summary === "string" ? s.summary : "",
+            startedAt: createdAt - (arr.length - idx) * 10,
+            completedAt: createdAt,
+          }));
+        const seen = new Set<string>();
+        const collected: string[] = [];
+        for (const s of arr) {
+          if (s && typeof s.source === "string" && s.source && !seen.has(s.source)) {
+            collected.push(s.source);
+            seen.add(s.source);
+          }
+        }
+        sources = collected.length > 0 ? collected : undefined;
+      }
+      const newMsg: Msg = {
+        id: nextIdRef.current++,
+        role,
+        content,
+        persistedId: messageId,
+        ...(role === "assistant" ? { completedAt: createdAt } : {}),
+        ...(steps ? { steps } : {}),
+        ...(sources ? { sources } : {}),
+      };
+      return [...prev, newMsg].slice(-MAX_TRANSCRIPT);
+    });
+  }, [refreshConversations]);
+
+  /**
+   * Apply a spar:conversation broadcast (title rename / drift
+   * notice update). Updates both the sidebar list and, when the
+   * active thread is the target, the chat-level drift banner.
+   * Same per-user fan-out semantics as spar:message — the server
+   * already filters by user id before sending.
+   */
+  const handleSparConversationBroadcast = useCallback((rawPayload: unknown) => {
+    if (!rawPayload || typeof rawPayload !== "object") return;
+    const payload = rawPayload as {
+      conversationId?: number;
+      title?: string | null;
+      driftNotice?: string | null;
+      updatedAt?: number;
+    };
+    const convId = payload.conversationId;
+    if (typeof convId !== "number") return;
+
+    setConversations((prev) => {
+      let touched = false;
+      const next = prev.map((c) => {
+        if (c.id !== convId) return c;
+        touched = true;
+        return {
+          ...c,
+          ...(typeof payload.title !== "undefined"
+            ? { title: payload.title ?? null }
+            : {}),
+          ...(typeof payload.driftNotice !== "undefined"
+            ? { driftNotice: payload.driftNotice ?? null }
+            : {}),
+          updatedAt: payload.updatedAt ?? c.updatedAt,
+        };
+      });
+      // If this user opened the conversation in another tab and the
+      // sidebar list hasn't seen it yet (e.g. created very recently
+      // by a fresh /api/spar call elsewhere), refresh the list so
+      // the new row pops in.
+      if (!touched) {
+        void refreshConversations();
+        return prev;
+      }
+      // Resort by updatedAt desc so the renamed thread floats to the
+      // top, matching what listConversations would return on a
+      // refetch.
+      return next.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  }, [refreshConversations]);
+
+  /**
+   * Apply a spar:remote_control broadcast. The spar voice assistant
+   * (or any caller of /api/spar/remote-control) issues these to drive
+   * UI state remotely — toggle autopilot, open/close a sidebar, start
+   * a new conversation, set the directive. Each branch:
+   *
+   *   - mutates whichever piece of local state owns the truth
+   *   - dispatches a window CustomEvent for state that lives in
+   *     siblings (left sidebar in SparPageShell, right sidebar in
+   *     SparFullView)
+   *   - flashes a subtle visual cue so the user can see something
+   *     happened — body class toggle that the spar layout's CSS
+   *     can react to.
+   *
+   * Server has already mutated the durable side (autopilot table,
+   * directive table); the local mutation is just keeping the UI in
+   * sync. Unknown actions are dropped silently so the wire format
+   * can grow without a coordinated client deploy.
+   */
+  const handleRemoteControlBroadcast = useCallback((rawPayload: unknown) => {
+    if (!rawPayload || typeof rawPayload !== "object") return;
+    const wrapper = rawPayload as {
+      id?: unknown;
+      issuedAt?: unknown;
+      payload?: unknown;
+    };
+    if (
+      typeof wrapper.id !== "string" ||
+      typeof wrapper.issuedAt !== "number" ||
+      !wrapper.payload ||
+      typeof wrapper.payload !== "object"
+    ) {
+      return;
+    }
+    // Drop replays older than 30s (reconnect storms / queued buffers).
+    if (Date.now() - wrapper.issuedAt > 30_000) return;
+    const inner = wrapper.payload as { action?: unknown };
+    const action = inner.action;
+    if (typeof action !== "string") return;
+
+    const flashCue = () => {
+      try {
+        document.body.classList.add("spar-remote-flash");
+        window.setTimeout(() => {
+          document.body.classList.remove("spar-remote-flash");
+        }, 450);
+      } catch {
+        /* SSR / DOM gone — non-fatal */
+      }
+    };
+
+    switch (action) {
+      case "toggle_autopilot": {
+        const value = (inner as { value?: unknown }).value;
+        if (typeof value !== "boolean") return;
+        // Server already wrote the autopilot_users row in the route
+        // handler — bypass toggleAutopilot's API call (it would
+        // double-write) and just sync local state.
+        setAutopilot(value);
+        flashCue();
+        return;
+      }
+      case "new_conversation": {
+        newConversationRef.current?.();
+        flashCue();
+        return;
+      }
+      case "set_directive": {
+        // Directive lives server-side; AutopilotSidebar refetches
+        // when it sees this event, and our own directive ref
+        // refetches via the same listener. No local state to set.
+        try {
+          window.dispatchEvent(
+            new CustomEvent("spar:autopilot-directive-changed"),
+          );
+        } catch {
+          /* ignore */
+        }
+        flashCue();
+        return;
+      }
+      case "open_sidebar":
+      case "close_sidebar": {
+        const side = (inner as { side?: unknown }).side;
+        if (side !== "left" && side !== "right") return;
+        try {
+          window.dispatchEvent(
+            new CustomEvent("spar:remote-sidebar", {
+              detail: { side, open: action === "open_sidebar" },
+            }),
+          );
+        } catch {
+          /* ignore */
+        }
+        flashCue();
+        return;
+      }
+      default:
+        return;
+    }
+    // Stable: setAutopilot is a setState (stable identity); the ref
+    // wraps newConversation so this callback never goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Capture the latest newConversation in a ref so the WS handler
+  // (which re-binds only on mount) always calls the current one.
+  const newConversationRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    newConversationRef.current = newConversation;
+  }, [newConversation]);
+
+  // WS subscriber: connect to the main dashboard sync bus and listen
+  // for dispatch_completed events targeted at this user. Reconnects
+  // with a fixed 3s backoff (matches ProjectsLiveRefresh). The bus
+  // does not replay missed events on connect, so the polling fallback
+  // below is what catches completions that fired before this socket
+  // came up.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    let ws: WebSocket | null = null;
+    let closed = false;
+    let reconnectTimer: number | null = null;
+
+    function connect() {
+      if (closed) return;
+      try {
+        ws = new WebSocket(`${proto}//${window.location.host}/api/sync`);
+      } catch {
+        // URL construction can throw on weird hosts; back off and retry.
+        reconnectTimer = window.setTimeout(connect, 3000);
+        return;
+      }
+      ws.addEventListener("message", (e) => {
+        let msg: { type?: string } & Record<string, unknown>;
+        try {
+          msg = JSON.parse(typeof e.data === "string" ? e.data : "");
+        } catch {
+          return;
+        }
+        if (msg.type === "spar:message") {
+          handleSparMessageBroadcast(msg.payload as unknown);
+          return;
+        }
+        if (msg.type === "spar:conversation") {
+          handleSparConversationBroadcast(msg.payload as unknown);
+          return;
+        }
+        if (msg.type === "spar:remote_control") {
+          handleRemoteControlBroadcast(msg.payload as unknown);
+          return;
+        }
+        if (msg.type !== "dispatch_completed") return;
+        const projectId = typeof msg.projectId === "string" ? msg.projectId : "";
+        const projectName =
+          typeof msg.projectName === "string" && msg.projectName.trim()
+            ? msg.projectName
+            : projectId;
+        const dispatchId = typeof msg.dispatchId === "string" ? msg.dispatchId : "";
+        console.log(
+          `[spar-ws] dispatch_completed received project=${projectId} dispatchId=${dispatchId}`,
+        );
+        if (!projectId || !dispatchId) {
+          console.warn(
+            "[spar-ws] dispatch_completed dropped — missing projectId or dispatchId",
+          );
+          return;
+        }
+        queueCompletion({ projectId, projectName, dispatchId });
+      });
+      ws.addEventListener("close", () => {
+        if (closed) return;
+        reconnectTimer = window.setTimeout(connect, 3000);
+      });
+      ws.addEventListener("error", () => {
+        // close fires after error — let the close handler reconnect.
+      });
+    }
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (completionFlushTimerRef.current !== null) {
+        window.clearTimeout(completionFlushTimerRef.current);
+        completionFlushTimerRef.current = null;
+      }
+      try {
+        ws?.close();
+      } catch {
+        /* already closed */
+      }
+    };
+    // Subscribe-once on mount; the queueCompletion / flush helpers
+    // read refs and never close over stale state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tracks whether we've ever absorbed a dispatches snapshot. The first
+  // snapshot — taken at mount, or after the SparProvider has been
+  // suspended/throttled by the browser long enough for the WS to drop
+  // events — represents historic state, not a fresh in-session
+  // completion. Without this gate, every page navigation that triggered
+  // a re-evaluation of the polling effect would replay an auto-report
+  // for any dispatch that finished within the last 5 minutes — which
+  // looks to the operator like "clicking a project triggered a report"
+  // because the click and the replay happen back-to-back. Auto-reports
+  // should only fire for dispatches that flip from incomplete →
+  // complete during the live session.
+  const dispatchesSeededRef = useRef(false);
+
+  // Polling fallback. Same guarantees as the WS path but slower —
+  // catches events the socket missed (network blip while the tab was
+  // foregrounded). Single source of dedupe via reportedCompletionsRef
+  // means the WS and polling paths can't double-fire for the same
+  // dispatch. The first time this effect runs, we seed reportedCompletionsRef
+  // with everything that's already completed so the historic state is
+  // treated as "already reported" — only NEW completions during the
+  // session will fire.
+  useEffect(() => {
+    if (!dispatchesSeededRef.current) {
+      for (const d of dispatches) {
+        if (d.completedAt != null) {
+          reportedCompletionsRef.current.add(d.id);
+        }
+      }
+      dispatchesSeededRef.current = true;
+      return;
+    }
+    const pending = dispatches.filter(
+      (d) =>
+        d.status === "sent" &&
+        d.completedAt != null &&
+        Date.now() - d.completedAt < 5 * 60_000 &&
+        !reportedCompletionsRef.current.has(d.id) &&
+        !pendingCompletionsRef.current.some((p) => p.dispatchId === d.id),
+    );
+    for (const d of pending) {
+      // No projectName available from the dispatches API (it predates
+      // the WS event). Fall back to projectId as the human label —
+      // slightly less polished than the WS path but correct, and only
+      // hit when the WS broadcast was missed entirely.
+      queueCompletion({
+        projectId: d.projectId,
+        projectName: d.projectId,
+        dispatchId: d.id,
+      });
+    }
+    // queueCompletion is recreated each render but only reads refs;
+    // adding it to deps would re-run this effect on every render
+    // and re-scan the dispatch list pointlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatches]);
 
   // Kickoff greeting fires when the user actually starts a call (or types
   // their first message). Running it on mount caused a "Load failed" on
@@ -1856,6 +2936,7 @@ export default function SparProvider({
     // the laptop mic mid-call and goes unnoticed for weeks. Hard-stop
     // here so there is exactly one place that owns the rule.
     if (telegramActiveRef.current) return;
+    if (ttsAudibleRef.current) return;
     const SR =
       (window as unknown as { SpeechRecognition?: new () => SpeechRecognitionLike })
         .SpeechRecognition ??
@@ -1984,7 +3065,8 @@ export default function SparProvider({
           !recognitionRef.current &&
           !busyRef.current &&
           !micMutedRef.current &&
-          !telegramActiveRef.current
+          !telegramActiveRef.current &&
+          !ttsAudibleRef.current
         ) {
           startRecognition();
         }
@@ -2304,6 +3386,20 @@ export default function SparProvider({
     setTtsMuted((v) => !v);
   }, []);
 
+  // When the user toggles TTS off (and isn't on a call), drop any
+  // already-fetched audio on the floor — the queue model has us
+  // pre-fetching the next chunk while the current one plays, so
+  // without this the user hears a sentence-and-a-half of trailing
+  // speech after hitting the toggle. ttsCancel bumps the gen so
+  // any /api/tts POST currently in-flight discards its result.
+  useEffect(() => {
+    if (ttsMuted && !inCall) {
+      ttsCancel();
+    }
+    // ttsCancel is a stable closure over refs only — safe to omit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsMuted, inCall]);
+
   // Re-arm the mic once Haiku's reply finishes playing.
   // Also gated on telegram: while the phone call holds the audio
   // channel, the phone's mic is the authoritative input and Web
@@ -2315,6 +3411,53 @@ export default function SparProvider({
   // whenever the effect runs keeps us from chiming on every state
   // shuffle — e.g. a micMuted toggle or a channel change would
   // otherwise double-fire.
+  const ttsAudibleRef = useRef(false);
+  useEffect(() => {
+    ttsAudibleRef.current = ttsAudible;
+  }, [ttsAudible]);
+
+  // Kill recognition the instant TTS starts emitting audio so the mic
+  // never picks up the speaker output and feeds it back as user input.
+  useEffect(() => {
+    if (!ttsAudible) return;
+    if (!recognitionRef.current) return;
+    try {
+      recognitionRef.current.stop();
+    } catch {
+      /* already stopping */
+    }
+  }, [ttsAudible]);
+
+  // Falling-edge tail window for filler suppression. See the
+  // `ttsTailSettling` declaration above for the why. Cancel any
+  // pending clear if TTS becomes audible again mid-tail (next chunk,
+  // re-queue) so we don't drop the gate while audio is still playing.
+  useEffect(() => {
+    const POST_TTS_TAIL_MS = 450;
+    if (ttsAudible) {
+      if (ttsTailTimerRef.current !== null) {
+        window.clearTimeout(ttsTailTimerRef.current);
+        ttsTailTimerRef.current = null;
+      }
+      setTtsTailSettling(false);
+      return;
+    }
+    setTtsTailSettling(true);
+    if (ttsTailTimerRef.current !== null) {
+      window.clearTimeout(ttsTailTimerRef.current);
+    }
+    ttsTailTimerRef.current = window.setTimeout(() => {
+      ttsTailTimerRef.current = null;
+      setTtsTailSettling(false);
+    }, POST_TTS_TAIL_MS);
+    return () => {
+      if (ttsTailTimerRef.current !== null) {
+        window.clearTimeout(ttsTailTimerRef.current);
+        ttsTailTimerRef.current = null;
+      }
+    };
+  }, [ttsAudible]);
+
   const ttsActiveRef = useRef(false);
   useEffect(() => {
     const ttsActiveNow = busy || !ttsIdle;
@@ -2342,11 +3485,12 @@ export default function SparProvider({
         wantListeningRef.current &&
         !busyRef.current &&
         !micMutedRef.current &&
-        !telegramActiveRef.current
+        !telegramActiveRef.current &&
+        !ttsAudibleRef.current
       ) {
         startRecognition();
       }
-    }, 400);
+    }, 1200);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inCall, busy, listening, ttsIdle, micMuted, voice.channel]);
@@ -2408,7 +3552,12 @@ export default function SparProvider({
     onTelegram && !telegramThinking && !telegramSpeaking;
 
   const effectiveBusy = busy || telegramThinking;
-  const effectiveTtsIdle = ttsIdle && !telegramSpeaking;
+  // While TTS is muted (and we're not in a call) the speech path is
+  // bypassed entirely — surface that as "idle" to consumers so the
+  // user-message queue drains the moment streaming finishes instead
+  // of waiting for a speech window that will never open.
+  const effectiveTtsIdle =
+    (ttsMuted && !inCall) || (ttsIdle && !telegramSpeaking);
   const effectiveListening = listening || telegramListening;
 
   // Telegram-call audio policy: the dashboard stays SILENT while the
@@ -2494,20 +3643,44 @@ export default function SparProvider({
       youtubeRemoveFromQueue,
       youtubeReorderQueue,
       fillerNow,
+      newsUpcoming,
+      newsPause,
+      newsResume,
+      newsSkip,
+      newsUpNextAfterYoutube,
       startCall,
       endCall,
       toggleMicMute,
       toggleTtsMute,
       toggleAutopilot,
+      pendingAttachments,
+      addAttachments,
+      removeAttachment,
+      clearAttachments,
       sendMessage,
       saveHeartbeat,
       loadHeartbeatFor,
       clearTranscript,
+      appendNotice,
+      conversations,
+      activeConversationId,
+      loadingConversation,
+      selectConversation,
+      newConversation,
+      deleteConversation: deleteConversationApi,
+      refreshConversations,
+      activeDriftNotice:
+        activeConversationId == null
+          ? null
+          : conversations.find((c) => c.id === activeConversationId)
+              ?.driftNotice ?? null,
+      dismissDriftNotice,
     }),
     [
       currentUser,
       canManageOthers,
       messages,
+      pendingAttachments,
       effectiveBusy,
       interimText,
       status,
@@ -2537,15 +3710,32 @@ export default function SparProvider({
       youtubeRemoveFromQueue,
       youtubeReorderQueue,
       fillerNow,
+      newsUpcoming,
+      newsPause,
+      newsResume,
+      newsSkip,
+      newsUpNextAfterYoutube,
       startCall,
       endCall,
       toggleMicMute,
       toggleTtsMute,
       toggleAutopilot,
+      addAttachments,
+      removeAttachment,
+      clearAttachments,
       sendMessage,
       saveHeartbeat,
       loadHeartbeatFor,
       clearTranscript,
+      appendNotice,
+      conversations,
+      activeConversationId,
+      loadingConversation,
+      selectConversation,
+      newConversation,
+      deleteConversationApi,
+      refreshConversations,
+      dismissDriftNotice,
     ],
   );
 
