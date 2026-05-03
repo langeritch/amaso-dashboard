@@ -19,22 +19,24 @@ export default async function AdminUsersPage() {
   return (
     <div className="min-h-[100dvh]">
       <Topbar user={user} />
-      <main className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
-        <header className="mb-5 flex flex-col gap-1 sm:mb-6 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
-          <h1 className="text-2xl font-semibold">Users</h1>
-          <p className="text-sm text-neutral-500">
+      <main className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-12">
+        <header className="mb-6 flex flex-col gap-1.5 sm:mb-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            Users
+          </h1>
+          <p className="text-sm leading-relaxed text-neutral-500">
             Team members see all projects. Clients see only what you grant them.
           </p>
         </header>
         {showActivity && (
-          <section className="mb-6">
+          <section className="mb-8">
             <header className="mb-3 flex items-baseline justify-between gap-3">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-400">
+              <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-400">
                 Recent activity
               </h2>
               <a
                 href="/activity"
-                className="text-xs text-neutral-500 underline-offset-2 hover:text-neutral-300 hover:underline"
+                className="amaso-fx text-xs text-neutral-500 underline-offset-2 hover:text-neutral-200 hover:underline"
               >
                 Full feed →
               </a>

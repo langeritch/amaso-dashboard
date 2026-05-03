@@ -746,7 +746,7 @@ export default function ChatClient({
                     sending ||
                     (!body.trim() && pendingFiles.length === 0)
                   }
-                  className="flex min-h-[40px] items-center gap-1 rounded bg-white px-4 py-2 text-sm font-medium text-black disabled:opacity-40 sm:min-h-0"
+                  className="amaso-fx amaso-press flex min-h-[40px] items-center gap-1 rounded-md bg-orange-500 px-4 py-2 text-sm font-semibold text-neutral-950 shadow-[0_2px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none sm:min-h-0"
                   aria-label="Send message"
                 >
                   <Send className="h-4 w-4 sm:h-3.5 sm:w-3.5" />

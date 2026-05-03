@@ -56,7 +56,7 @@ export default function LoginForm() {
       <button
         type="submit"
         disabled={pending}
-        className="min-h-[44px] w-full rounded bg-white px-3 py-2 text-base font-medium text-black transition disabled:opacity-50 sm:text-sm"
+        className="amaso-fx amaso-press min-h-[44px] w-full rounded-md bg-orange-500 px-3 py-2 text-base font-semibold text-neutral-950 shadow-[0_2px_12px_rgba(255,107,61,0.25)] hover:bg-orange-400 hover:shadow-[0_2px_16px_rgba(255,107,61,0.35)] disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none sm:text-sm"
       >
         {pending ? "Signing in…" : "Sign in"}
       </button>
@@ -88,7 +88,7 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         autoComplete={autoComplete}
         required={required}
-        className="min-h-[44px] w-full rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-base outline-none focus:border-neutral-600 sm:min-h-0 sm:text-sm"
+        className="min-h-[44px] w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-base outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-orange-500/50 focus:bg-neutral-900/80 focus:shadow-[0_0_0_3px_rgba(255,107,61,0.12)] sm:min-h-0 sm:text-sm"
       />
     </label>
   );

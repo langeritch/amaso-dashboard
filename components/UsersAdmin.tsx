@@ -55,7 +55,7 @@ export default function UsersAdmin({
         <button
           type="button"
           onClick={() => setCreating((v) => !v)}
-          className="flex min-h-[40px] items-center gap-1.5 rounded border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm hover:border-neutral-700 sm:min-h-0"
+          className="amaso-fx amaso-press flex min-h-[40px] items-center gap-1.5 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-1.5 text-sm hover:border-neutral-700 hover:bg-neutral-800/70 sm:min-h-0"
         >
           <Plus className="h-3.5 w-3.5" /> New user
         </button>
@@ -77,7 +77,7 @@ export default function UsersAdmin({
       ) : users.length === 0 ? (
         <p className="text-sm text-neutral-500">No users yet.</p>
       ) : (
-        <ul className="divide-y divide-neutral-800 rounded border border-neutral-800">
+        <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/30 shadow-[0_1px_2px_rgba(0,0,0,0.2)]">
           {users.map((u) => (
             <li key={u.id} className="p-4">
               <div className="flex items-start justify-between gap-4">
@@ -109,7 +109,7 @@ export default function UsersAdmin({
                 <select
                   value={u.role}
                   onChange={(e) => patch(u.id, { role: e.target.value as Role })}
-                  className="rounded border border-neutral-800 bg-neutral-950 px-2 py-1"
+                  className="amaso-fx rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-1 hover:border-neutral-700"
                 >
                   <option value="admin">admin</option>
                   <option value="team">team</option>
@@ -138,10 +138,10 @@ export default function UsersAdmin({
                               : [...u.projects, p.id];
                             patch(u.id, { projects: next });
                           }}
-                          className={`rounded-full border px-2 py-0.5 text-xs transition ${
+                          className={`amaso-fx rounded-full border px-2.5 py-0.5 text-xs ${
                             enabled
-                              ? "border-orange-700 bg-orange-900/30 text-orange-300"
-                              : "border-neutral-800 text-neutral-500 hover:border-neutral-700"
+                              ? "border-orange-500/40 bg-orange-500/15 text-orange-200 shadow-[0_0_0_1px_rgba(255,107,61,0.15)]"
+                              : "border-neutral-800 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300"
                           }`}
                         >
                           {p.name}
@@ -241,7 +241,7 @@ function CreateUserForm({
   return (
     <form
       onSubmit={submit}
-      className="space-y-3 rounded border border-neutral-800 bg-neutral-900/50 p-4"
+      className="space-y-3 rounded-xl border border-neutral-800/80 bg-neutral-900/50 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.2)]"
     >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="text-xs">
@@ -250,7 +250,7 @@ function CreateUserForm({
             required
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="min-h-[40px] w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-base sm:min-h-0 sm:text-sm"
+            className="min-h-[40px] w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5 text-base outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-orange-500/50 focus:shadow-[0_0_0_3px_rgba(255,107,61,0.12)] sm:min-h-0 sm:text-sm"
           />
         </label>
         <label className="text-xs">
@@ -260,7 +260,7 @@ function CreateUserForm({
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="min-h-[40px] w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-base sm:min-h-0 sm:text-sm"
+            className="min-h-[40px] w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5 text-base outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-orange-500/50 focus:shadow-[0_0_0_3px_rgba(255,107,61,0.12)] sm:min-h-0 sm:text-sm"
           />
         </label>
         <label className="text-xs">
@@ -271,7 +271,7 @@ function CreateUserForm({
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             minLength={8}
-            className="min-h-[40px] w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-base sm:min-h-0 sm:text-sm"
+            className="min-h-[40px] w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5 text-base outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-orange-500/50 focus:shadow-[0_0_0_3px_rgba(255,107,61,0.12)] sm:min-h-0 sm:text-sm"
           />
         </label>
         <label className="text-xs">
@@ -279,7 +279,7 @@ function CreateUserForm({
           <select
             value={role}
             onChange={(e) => setRole(e.target.value as Role)}
-            className="min-h-[40px] w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-base sm:min-h-0 sm:text-sm"
+            className="min-h-[40px] w-full rounded-md border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5 text-base outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-orange-500/50 focus:shadow-[0_0_0_3px_rgba(255,107,61,0.12)] sm:min-h-0 sm:text-sm"
           >
             <option value="team">team</option>
             <option value="client">client</option>
@@ -304,10 +304,10 @@ function CreateUserForm({
                         : [...cur, p.id],
                     )
                   }
-                  className={`rounded-full border px-2 py-0.5 text-xs ${
+                  className={`amaso-fx rounded-full border px-2.5 py-0.5 text-xs ${
                     enabled
-                      ? "border-orange-700 bg-orange-900/30 text-orange-300"
-                      : "border-neutral-800 text-neutral-500 hover:border-neutral-700"
+                      ? "border-orange-500/40 bg-orange-500/15 text-orange-200 shadow-[0_0_0_1px_rgba(255,107,61,0.15)]"
+                      : "border-neutral-800 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300"
                   }`}
                 >
                   {p.name}
@@ -322,14 +322,14 @@ function CreateUserForm({
         <button
           type="button"
           onClick={onCancel}
-          className="min-h-[40px] rounded border border-neutral-800 px-3 py-1.5 text-sm text-neutral-300 sm:min-h-0"
+          className="amaso-fx amaso-press min-h-[40px] rounded-md border border-neutral-800 px-3 py-1.5 text-sm text-neutral-300 hover:border-neutral-700 hover:text-neutral-100 sm:min-h-0"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={pending}
-          className="min-h-[40px] rounded bg-white px-4 py-1.5 text-sm font-medium text-black disabled:opacity-50 sm:min-h-0"
+          className="amaso-fx amaso-press min-h-[40px] rounded-md bg-orange-500 px-4 py-1.5 text-sm font-semibold text-neutral-950 shadow-[0_2px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none sm:min-h-0"
         >
           {pending ? "Creating…" : "Create"}
         </button>
@@ -413,7 +413,7 @@ function PasswordChange({
         type="button"
         onClick={() => void save()}
         disabled={saving || password.length < 8}
-        className="rounded bg-white px-2 py-1 text-xs font-medium text-black disabled:opacity-50"
+        className="amaso-fx amaso-press rounded-md bg-orange-500 px-2.5 py-1 text-xs font-semibold text-neutral-950 hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400"
       >
         {saving ? "Saving…" : "Save"}
       </button>

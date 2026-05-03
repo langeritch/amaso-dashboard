@@ -605,7 +605,7 @@ export default function RemarksPanel({
           <button
             type="submit"
             disabled={pending || !body.trim()}
-            className="ml-auto min-h-[40px] rounded bg-white px-4 py-1.5 text-sm font-medium text-black disabled:opacity-40 sm:min-h-0"
+            className="amaso-fx amaso-press ml-auto min-h-[40px] rounded-md bg-orange-500 px-4 py-1.5 text-sm font-semibold text-neutral-950 shadow-[0_2px_8px_rgba(255,107,61,0.3)] hover:bg-orange-400 disabled:bg-neutral-700 disabled:text-neutral-400 disabled:shadow-none sm:min-h-0"
           >
             {pending ? "Posting…" : "Post remark"}
           </button>

@@ -41,10 +41,12 @@ export default async function RemarksPage() {
   return (
     <div className="min-h-[100dvh]">
       <Topbar user={user} />
-      <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10">
-        <header className="mb-5 sm:mb-6">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Remarks</h1>
-          <p className="mt-2 text-sm text-neutral-400">
+      <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-12">
+        <header className="mb-6 sm:mb-8">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            Remarks
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-neutral-400">
             All remarks across every project you can see.
           </p>
         </header>
