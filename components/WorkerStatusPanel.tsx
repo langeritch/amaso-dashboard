@@ -270,7 +270,7 @@ export default function WorkerStatusPanel() {
 
   return (
     <section className="relative z-30 max-w-sm px-4 py-2">
-      <div className="rounded-lg border border-neutral-800 bg-neutral-950/70 backdrop-blur">
+      <div className="rounded-xl border border-neutral-800/80 bg-neutral-950/75 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-md backdrop-saturate-150">
         <header className="flex items-center justify-between gap-3 px-3 py-2">
           <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-neutral-500">
             <span>Workers</span>
@@ -298,7 +298,7 @@ export default function WorkerStatusPanel() {
           <button
             type="button"
             onClick={() => setCollapsed((c) => !c)}
-            className="rounded px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-500 transition hover:bg-neutral-800 hover:text-neutral-200"
+            className="amaso-fx rounded-md px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-500 hover:bg-neutral-800/80 hover:text-neutral-100"
             aria-expanded={!collapsed}
           >
             {collapsed ? "show" : "hide"}
@@ -438,7 +438,7 @@ function WorkerRow({
           href={`/projects/${projectId}${
             showLabel ? `?session=${encodeURIComponent(sessionId)}` : ""
           }`}
-          className="flex flex-1 items-center gap-3 px-3 py-2 transition hover:bg-neutral-900/60"
+          className="amaso-fx flex flex-1 items-center gap-3 px-3 py-2.5 hover:bg-neutral-900/70"
         >
           <StatusDot tone={visual.tone} pulsing={visual.pulsing} />
           <div className="min-w-0 flex-1">
@@ -477,7 +477,7 @@ function WorkerRow({
             disabled={killing}
             aria-label={`Stop session ${ordinal}`}
             title={`Stop session #${ordinal}`}
-            className="flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 transition hover:bg-rose-900/40 hover:text-rose-300 disabled:opacity-40"
+            className="amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-rose-900/40 hover:text-rose-300 disabled:opacity-40"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -492,7 +492,7 @@ function WorkerRow({
           disabled={spawning}
           aria-label={`Spawn another session for ${w.name}`}
           title="Spawn another session for this project"
-          className="flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 transition hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40"
+          className="amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40"
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
@@ -506,7 +506,7 @@ function WorkerRow({
           aria-expanded={open}
           aria-label={open ? "Hide worker details" : "Show worker details"}
           title="Worker details"
-          className={`flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 transition hover:bg-neutral-900/60 hover:text-neutral-300 ${
+          className={`amaso-fx flex h-auto w-8 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-neutral-900/60 hover:text-neutral-300 ${
             pinned ? "bg-neutral-900/60 text-neutral-300" : ""
           }`}
         >
