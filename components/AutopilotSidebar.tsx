@@ -191,7 +191,7 @@ export default function AutopilotSidebar({
           <button
             type="button"
             onClick={onClose}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition hover:bg-neutral-900 hover:text-neutral-200"
+            className="amaso-fx amaso-press flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200 sm:h-7 sm:w-7"
             aria-label="close autopilot panel"
           >
             <X className="h-4 w-4" />

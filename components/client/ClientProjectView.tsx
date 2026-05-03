@@ -78,7 +78,7 @@ export default function ClientProjectView({
               <button
                 type="button"
                 onClick={() => setIframeKey((k) => k + 1)}
-                className="amaso-fx amaso-press flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100"
+                className="amaso-fx amaso-press flex h-9 w-9 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100 sm:h-7 sm:w-7"
                 title="Refresh preview"
                 aria-label="Refresh preview"
               >

@@ -242,7 +242,7 @@ function TerminalsCard({
           <div className="amaso-skeleton h-4 w-2/3" />
         </div>
       ) : terminals.items.length === 0 ? (
-        <p className="text-[12px] italic text-neutral-600">
+        <p className="text-sm italic text-neutral-600 sm:text-[12px]">
           No terminals running. Spawn one from a project page.
         </p>
       ) : (
@@ -256,7 +256,7 @@ function TerminalsCard({
                 <TerminalStateDot state={t.state} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="truncate text-[13px] font-medium text-neutral-100">
+                    <span className="truncate text-sm font-medium text-neutral-100 sm:text-[13px]">
                       {t.name}
                     </span>
                     <span
@@ -365,7 +365,7 @@ function OpenLoopsCard({ loops }: { loops: string[] | null }) {
           <div className="amaso-skeleton h-4 w-3/4" />
         </div>
       ) : loops.length === 0 ? (
-        <p className="text-[12px] italic text-neutral-600">
+        <p className="text-sm italic text-neutral-600 sm:text-[12px]">
           Heartbeat is clear — no open loops right now.
         </p>
       ) : (
@@ -373,7 +373,7 @@ function OpenLoopsCard({ loops }: { loops: string[] | null }) {
           {loops.map((loop, i) => (
             <li
               key={i}
-              className="flex gap-2 text-[13px] leading-snug text-neutral-200"
+              className="flex gap-2 text-sm leading-snug text-neutral-200 sm:text-[13px]"
             >
               <span className="mt-2 h-1 w-1 flex-shrink-0 rounded-full bg-orange-500/70" />
               <span className="break-words">{loop}</span>
@@ -402,7 +402,7 @@ function RemarksCard({ remarks }: { remarks: RemarkSummary[] | null }) {
           <div className="amaso-skeleton h-4 w-2/3" />
         </div>
       ) : remarks.length === 0 ? (
-        <p className="text-[12px] italic text-neutral-600">
+        <p className="text-sm italic text-neutral-600 sm:text-[12px]">
           No unresolved remarks. Inbox zero.
         </p>
       ) : (
@@ -422,7 +422,7 @@ function RemarksCard({ remarks }: { remarks: RemarkSummary[] | null }) {
                     {formatRelativeTime(r.createdAt) ?? ""}
                   </span>
                 </div>
-                <p className="mt-0.5 line-clamp-2 text-[13px] leading-snug text-neutral-200">
+                <p className="mt-0.5 line-clamp-2 text-sm leading-snug text-neutral-200 sm:text-[13px]">
                   {r.body}
                 </p>
               </Link>

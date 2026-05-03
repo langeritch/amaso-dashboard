@@ -385,7 +385,7 @@ function DrawerHeader({ onClose }: { onClose: () => void }) {
         type="button"
         onClick={onClose}
         aria-label="close drawer"
-        className="flex h-7 w-7 items-center justify-center rounded-full text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-100"
+        className="amaso-fx amaso-press flex h-9 w-9 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 sm:h-7 sm:w-7"
       >
         <X className="h-4 w-4" />
       </button>

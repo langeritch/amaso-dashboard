@@ -50,19 +50,20 @@ export default function ClientShell({
               onClick={logout}
               title="Sign out"
               aria-label="Sign out"
-              className="amaso-fx amaso-press flex h-10 w-10 items-center justify-center rounded-full border border-neutral-800/80 bg-neutral-900/60 text-neutral-400 hover:border-neutral-700 hover:text-neutral-100"
+              className="amaso-fx amaso-press flex h-11 w-11 items-center justify-center rounded-full border border-neutral-800/80 bg-neutral-900/60 text-neutral-400 hover:border-neutral-700 hover:text-neutral-100 sm:h-10 sm:w-10"
             >
               <LogOut className="h-4 w-4" />
             </button>
           </div>
         </div>
         {onProjectDetail && (
-          <div className="mx-auto max-w-5xl px-4 pb-2 sm:px-6">
+          <div className="mx-auto max-w-5xl px-2 pb-1 sm:px-4">
             <Link
               href="/client"
-              className="amaso-fx text-xs text-neutral-500 hover:text-neutral-200"
+              className="amaso-fx amaso-press inline-flex min-h-[36px] items-center gap-1 rounded-md px-2 text-xs text-neutral-500 hover:bg-neutral-900/60 hover:text-neutral-200"
             >
-              ← All projects
+              <span aria-hidden>←</span>
+              <span>All projects</span>
             </Link>
           </div>
         )}

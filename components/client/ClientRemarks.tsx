@@ -154,7 +154,7 @@ export default function ClientRemarks({
           </button>
         </div>
         {error && (
-          <p className="mt-2 text-[11px] text-rose-300">{error}</p>
+          <p className="mt-2 text-xs text-rose-300">{error}</p>
         )}
         <p className="mt-2 text-[10px] text-neutral-600">
           ⌘/Ctrl + Enter to send
