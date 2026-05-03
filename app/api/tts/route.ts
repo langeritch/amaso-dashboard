@@ -23,6 +23,12 @@ export async function POST(req: NextRequest) {
   // This also protects any TTS consumer that hasn't internally gated
   // itself yet (dashboard chat, future voice features).
   const user = await getCurrentUser();
+  // Defence in depth: TTS is an internal-tool feature; the client
+  // portal never reaches it. Reject explicitly so a hand-crafted
+  // request with a client cookie can't burn Kokoro cycles.
+  if (user?.role === "client") {
+    return new Response("forbidden", { status: 403 });
+  }
   if (user) {
     const session = getSession(user.id);
     if (session?.channel === "telegram") {

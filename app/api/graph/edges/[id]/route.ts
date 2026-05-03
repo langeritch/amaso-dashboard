@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -10,7 +10,7 @@ export async function DELETE(
   _req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
   const { id } = await ctx.params;
   const edgeId = Number(id);

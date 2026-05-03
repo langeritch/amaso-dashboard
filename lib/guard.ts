@@ -54,6 +54,32 @@ export async function apiRequireUser(): Promise<
   return { ok: true, user };
 }
 
+/**
+ * API-route helper for internal-tool endpoints. Identical to
+ * `apiRequireUser` except it 403s when the caller's role is "client".
+ * Apply to spar / activity / claude-accounts / graph / filler /
+ * telegram (dashboard-side) / tts / youtube routes — anything the
+ * client portal doesn't legitimately reach.
+ *
+ * Page-level isolation already redirects clients away from the
+ * surfaces that fire these requests, so a 403 here is a defence-in-
+ * depth fence against a hand-crafted request, not a flow the UI is
+ * expected to hit.
+ */
+export async function apiRequireNonClient(): Promise<
+  { ok: true; user: User } | { ok: false; res: NextResponse }
+> {
+  const result = await apiRequireUser();
+  if (!result.ok) return result;
+  if (result.user.role === "client") {
+    return {
+      ok: false,
+      res: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+    };
+  }
+  return result;
+}
+
 export async function apiRequireAdmin(): Promise<
   { ok: true; user: User } | { ok: false; res: NextResponse }
 > {

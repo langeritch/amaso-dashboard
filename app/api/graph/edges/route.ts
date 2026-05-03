@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -15,7 +15,7 @@ interface CreateEdgeBody {
  *  exist (FOREIGN KEY constraint enforced by SQLite). Self-loops are
  *  refused — they have no useful meaning in the current model. */
 export async function POST(req: Request) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const body = (await req.json().catch(() => null)) as CreateEdgeBody | null;

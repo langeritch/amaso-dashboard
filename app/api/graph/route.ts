@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
  * when CLAUDE.md files grow.
  */
 export async function GET() {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const db = getDb();

@@ -16,7 +16,7 @@
 // `start`).
 
 import { NextRequest, NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { visibleProjects } from "@/lib/access";
 import {
   listSessionsForProject,
@@ -26,7 +26,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const body = (await req.json().catch(() => null)) as

@@ -10,7 +10,7 @@
 // worker-status row that surfaced the kill button.
 
 import { NextRequest, NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { visibleProjects } from "@/lib/access";
 import { stop as stopTerminal } from "@/lib/terminal-backend";
 
@@ -20,7 +20,7 @@ export async function DELETE(
   req: NextRequest,
   ctx: { params: Promise<{ sessionId: string }> },
 ) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const { sessionId } = await ctx.params;

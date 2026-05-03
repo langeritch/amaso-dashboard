@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import {
   getYouTubeState,
   playYouTube,
@@ -12,7 +12,7 @@ import {
   removeFromQueue,
   reorderQueue,
 } from "@/lib/youtube-state";
-import { setFillerMode } from "@/lib/filler-mode";
+import { enableYouTubeMode, disableYouTubeMode } from "@/lib/filler-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,7 +34,7 @@ export const dynamic = "force-dynamic";
  */
 
 export async function GET() {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
   return NextResponse.json({ state: getYouTubeState(auth.user.id) });
 }
@@ -54,7 +54,7 @@ interface PostBody {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   let body: PostBody;
@@ -85,13 +85,12 @@ export async function POST(req: NextRequest) {
             ? body.duration_sec
             : null,
       });
-      // Flip filler mode to "youtube" so the selection actually
-      // takes effect on the dashboard — matches the MCP youtube_play
-      // tool's side effect. Non-fatal on failure (mode is already
-      // "youtube" in the most common path, and the selection itself
-      // is what we're here to set).
+      // Flip filler mode to "youtube" automatically. enableYouTubeMode
+      // snapshots the user's current mode into previousMode so the
+      // matching disableYouTubeMode call (on stop / advance-to-empty)
+      // can restore it instead of hard-coding "news".
       try {
-        await setFillerMode("youtube");
+        await enableYouTubeMode();
       } catch {
         /* non-fatal */
       }
@@ -102,11 +101,11 @@ export async function POST(req: NextRequest) {
     }
     case "stop": {
       const state = stopYouTube(uid);
-      // Symmetric with the MCP youtube_stop tool: clearing the
-      // selection returns filler-mode to the news default so the
-      // next thinking window hears something instead of silence.
+      // Restore the user's pre-YouTube mode (news / fun-facts /
+      // calendar / quiet — whatever the dropdown was on before
+      // playback started). No-op if mode wasn't currently "youtube".
       try {
-        await setFillerMode("news");
+        await disableYouTubeMode();
       } catch {
         /* non-fatal */
       }
@@ -141,11 +140,13 @@ export async function POST(req: NextRequest) {
       });
       // If the enqueue promoted into now-playing (state.videoId now
       // matches what we just enqueued AND status flipped to playing),
-      // also flip the filler mode to "youtube" so playback actually
-      // takes effect — same logic as the play branch.
+      // auto-switch the filler mode to "youtube" via enableYouTubeMode
+      // so the previousMode snapshot is captured. Otherwise leave
+      // mode alone — user might be in news mode and just stacking
+      // tracks for later.
       if (state.videoId === videoId && state.status === "playing") {
         try {
-          await setFillerMode("youtube");
+          await enableYouTubeMode();
         } catch {
           /* non-fatal */
         }
@@ -179,11 +180,11 @@ export async function POST(req: NextRequest) {
     case "advance": {
       const state = advanceYouTube(uid);
       // Empty queue → advance falls back to stop semantics, which
-      // mirrors the explicit /stop branch — return filler mode to
-      // "news" so the next thinking window has something to play.
+      // mirrors the explicit /stop branch — restore the user's
+      // pre-YouTube mode rather than hard-coding "news".
       if (!state.videoId) {
         try {
-          await setFillerMode("news");
+          await disableYouTubeMode();
         } catch {
           /* non-fatal */
         }

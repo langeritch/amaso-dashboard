@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 /**
  * Python-facing YouTube state endpoint. The dashboard's own
  * `/api/youtube/state` and `/api/telegram/session` are cookie-gated
- * (apiRequireUser); the Python service has no session cookie, so it
+ * (apiRequireNonClient); the Python service has no session cookie, so it
  * uses the same X-Auth + service-token pattern as
  * `/api/telegram/acquire` and `/respond`.
  *

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { searchYouTube, DEFAULT_SEARCH_LIMIT } from "@/lib/youtube-search";
 
 export const runtime = "nodejs";
@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 const MAX_QUERY_LEN = 200;
 
 export async function GET(req: NextRequest) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const query = (req.nextUrl.searchParams.get("query") ?? "").trim();

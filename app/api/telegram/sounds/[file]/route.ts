@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
+import { apiRequireNonClient } from "@/lib/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,6 +55,8 @@ export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ file: string }> },
 ): Promise<NextResponse> {
+  const auth = await apiRequireNonClient();
+  if (!auth.ok) return auth.res;
   const { file } = await ctx.params;
   if (!ALLOWED.has(file)) {
     return new NextResponse("not allowed", { status: 400 });

@@ -10,7 +10,7 @@
 // worker — same noise filter, same wording for state.
 
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { visibleProjects } from "@/lib/access";
 import { listSessionsForProject } from "@/lib/terminal-backend";
 import { cleanScrollback } from "@/lib/spar-tools-context";
@@ -117,7 +117,7 @@ function truncatePrompt(s: string, max = 80): string {
 }
 
 export async function GET() {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const projects = visibleProjects(auth.user);

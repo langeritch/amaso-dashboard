@@ -18,7 +18,7 @@
 // ~5s by the SparTodayPanel.
 
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { visibleProjects } from "@/lib/access";
 import { listSessionsForProject } from "@/lib/terminal-backend";
 import { detectWorkerState } from "@/lib/terminal-state";
@@ -85,7 +85,7 @@ const MAX_TERMINALS = 6;
 const MAX_REMARKS = 8;
 
 export async function GET() {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
   const user = auth.user;
 

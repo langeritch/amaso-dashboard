@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const NODE_TYPES = ["project", "person", "tech", "blocker", "decision"] as const;
+const NODE_TYPES = [
+  "project",
+  "person",
+  "tech",
+  "blocker",
+  "decision",
+  "milestone",
+] as const;
 type NodeType = (typeof NODE_TYPES)[number];
 
 interface CreateNodeBody {
@@ -23,7 +30,7 @@ function isNodeType(t: unknown): t is NodeType {
 /** POST /api/graph/nodes — create a new node. Server enforces the type
  *  whitelist and requires a non-empty id + label. */
 export async function POST(req: Request) {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
 
   const body = (await req.json().catch(() => null)) as CreateNodeBody | null;

@@ -24,6 +24,7 @@ function parseUserId(raw: string | null, fallback: number): number {
 export async function GET(req: NextRequest) {
   const me = await getCurrentUser();
   if (!me) return new Response("unauthorized", { status: 401 });
+  if (me.role === "client") return new Response("forbidden", { status: 403 });
   const url = new URL(req.url);
   const ownerId = parseUserId(url.searchParams.get("user"), me.id);
   if (ownerId !== me.id && !isSuperUser(me)) {
@@ -36,6 +37,7 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const me = await getCurrentUser();
   if (!me) return new Response("unauthorized", { status: 401 });
+  if (me.role === "client") return new Response("forbidden", { status: 403 });
   const tooLarge = tooLargeByContentLength(req, MAX_HEARTBEAT_BYTES);
   if (tooLarge) return tooLarge;
   let json: { userId?: number; body?: string } | null = null;

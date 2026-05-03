@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { apiRequireUser } from "@/lib/guard";
+import { apiRequireNonClient } from "@/lib/guard";
 import { getSession } from "@/lib/voice-session";
 import { getYouTubeState } from "@/lib/youtube-state";
 import { getFillerMode } from "@/lib/filler-mode";
@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
  * the latency we want for filler transitions.
  */
 export async function GET() {
-  const auth = await apiRequireUser();
+  const auth = await apiRequireNonClient();
   if (!auth.ok) return auth.res;
   const [youtube, fillerMode] = await Promise.all([
     Promise.resolve(getYouTubeState(auth.user.id)),

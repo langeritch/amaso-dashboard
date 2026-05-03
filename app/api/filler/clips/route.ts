@@ -1,6 +1,7 @@
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { apiRequireNonClient } from "@/lib/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +30,14 @@ const SILENCE_RE = /^silence-(\d+)ms\.wav$/i;
 interface ClipMeta {
   id: string;     // filename without .wav — URL-safe ids
   kind: "news";
+  /** Headline title from the sidecar JSON the Python service writes
+   *  next to the WAV. Null when the sidecar is missing (older clips
+   *  rendered before the sidecar feature shipped) so the client can
+   *  fall back to a generic "News headline" label. */
+  title: string | null;
+  /** Source label (e.g. "BBC News Middle East"). Same caveat as
+   *  `title`. */
+  source: string | null;
 }
 
 interface IndexResponse {
@@ -36,7 +45,33 @@ interface IndexResponse {
   silenceBridgeId: string | null;
 }
 
+async function readSidecar(
+  name: string,
+): Promise<{ title: string | null; source: string | null }> {
+  const sidecarPath = path.join(
+    CACHE_ROOT,
+    `${name.replace(/\.wav$/i, "")}.json`,
+  );
+  try {
+    const raw = await readFile(sidecarPath, "utf-8");
+    const parsed = JSON.parse(raw) as { title?: unknown; label?: unknown };
+    const title =
+      typeof parsed.title === "string" && parsed.title.trim()
+        ? parsed.title.trim()
+        : null;
+    const source =
+      typeof parsed.label === "string" && parsed.label.trim()
+        ? parsed.label.trim()
+        : null;
+    return { title, source };
+  } catch {
+    return { title: null, source: null };
+  }
+}
+
 export async function GET(): Promise<NextResponse> {
+  const auth = await apiRequireNonClient();
+  if (!auth.ok) return auth.res;
   let entries: string[];
   try {
     entries = await readdir(CACHE_ROOT);
@@ -48,13 +83,14 @@ export async function GET(): Promise<NextResponse> {
   }
   const clips: ClipMeta[] = [];
   let silenceBridgeId: string | null = null;
+  // Collect WAV names first so we can read their sidecars in parallel
+  // — readdir + many readFile calls are cheap enough that the index
+  // endpoint stays sub-millisecond on a warm cache.
+  const wavNames: string[] = [];
   for (const name of entries) {
     const clipMatch = name.match(CLIP_RE);
     if (clipMatch) {
-      clips.push({
-        id: name.replace(/\.wav$/i, ""),
-        kind: "news",
-      });
+      wavNames.push(name);
       continue;
     }
     const silenceMatch = name.match(SILENCE_RE);
@@ -70,6 +106,15 @@ export async function GET(): Promise<NextResponse> {
         silenceBridgeId = name.replace(/\.wav$/i, "");
       }
     }
+  }
+  const sidecars = await Promise.all(wavNames.map(readSidecar));
+  for (let i = 0; i < wavNames.length; i++) {
+    clips.push({
+      id: wavNames[i].replace(/\.wav$/i, ""),
+      kind: "news",
+      title: sidecars[i].title,
+      source: sidecars[i].source,
+    });
   }
   return NextResponse.json({ clips, silenceBridgeId } satisfies IndexResponse, {
     headers: {
