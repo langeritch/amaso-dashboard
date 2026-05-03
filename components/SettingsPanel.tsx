@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Activity, LogOut, Moon, MonitorDown, Shield, Sun } from "lucide-react";
 import type { User } from "@/lib/db";
+import ClaudeAccountsSection from "./ClaudeAccountsSection";
 import PushToggle from "./PushToggle";
 
 type Theme = "dark" | "light";
@@ -36,23 +37,25 @@ export default function SettingsPanel({ user }: { user: User }) {
 
   return (
     <div className="flex flex-col gap-6">
+      {user.role === "admin" && <ClaudeAccountsSection />}
+
       <Section title="Account">
         <div className="flex items-center gap-3 px-4 py-3">
-          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-neutral-800 text-base text-neutral-200">
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-neutral-700 to-neutral-800 text-base font-medium text-neutral-100 ring-1 ring-white/5">
             {user.name.slice(0, 1).toUpperCase()}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm text-neutral-200">{user.name}</div>
+            <div className="truncate text-sm font-medium text-neutral-100">{user.name}</div>
             <div className="truncate text-xs text-neutral-500">{user.email}</div>
           </div>
-          <span className="rounded-full border border-neutral-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-neutral-400">
+          <span className="rounded-full border border-neutral-700/80 px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-neutral-400">
             {user.role}
           </span>
         </div>
         <button
           type="button"
           onClick={logout}
-          className="flex min-h-[48px] w-full items-center gap-3 border-t border-neutral-800 px-4 text-base text-neutral-300 hover:bg-neutral-900"
+          className="amaso-fx flex min-h-[48px] w-full items-center gap-3 border-t border-neutral-800/70 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
         >
           <LogOut className="h-5 w-5" />
           <span>Sign out</span>
@@ -71,30 +74,28 @@ export default function SettingsPanel({ user }: { user: User }) {
         <Section title="Admin">
           <Link
             href="/admin/install"
-            className="flex min-h-[48px] items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900"
+            className="amaso-fx flex min-h-[48px] items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
           >
             <MonitorDown className="h-5 w-5" />
             <span>Install app</span>
           </Link>
           <Link
             href="/admin/users"
-            className="flex min-h-[48px] items-center gap-3 border-t border-neutral-800 px-4 text-base text-neutral-300 hover:bg-neutral-900"
+            className="amaso-fx flex min-h-[48px] items-center gap-3 border-t border-neutral-800/70 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
           >
             <Shield className="h-5 w-5" />
             <span>Users</span>
           </Link>
-          {/* Super-user only — same email check the server-side gate
-              uses. The page redirects non-super admins anyway, but
-              hiding the link keeps the surface tidy. */}
-          {user.email === "sander@vanderkraayswanjones.com" && (
-            <Link
-              href="/admin/activity"
-              className="flex min-h-[48px] items-center gap-3 border-t border-neutral-800 px-4 text-base text-neutral-300 hover:bg-neutral-900"
-            >
-              <Activity className="h-5 w-5" />
-              <span>Activity</span>
-            </Link>
-          )}
+          {/* /activity is admin-gated now (was super-user only when it
+              lived at /admin/activity). Anyone with the admin role can
+              see the cross-team feed. */}
+          <Link
+            href="/activity"
+            className="amaso-fx flex min-h-[48px] items-center gap-3 border-t border-neutral-800/70 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
+          >
+            <Activity className="h-5 w-5" />
+            <span>Activity</span>
+          </Link>
         </Section>
       )}
     </div>
@@ -109,8 +110,8 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950/60">
-      <h2 className="px-4 pb-2 pt-3 text-xs font-medium uppercase tracking-wider text-neutral-500">
+    <section className="overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-950/60 shadow-[0_1px_2px_rgba(0,0,0,0.2)]">
+      <h2 className="px-4 pb-2 pt-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
         {title}
       </h2>
       <div className="flex flex-col">{children}</div>
@@ -155,7 +156,7 @@ function ThemeRow() {
     <button
       type="button"
       onClick={toggle}
-      className="flex min-h-[48px] w-full items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900"
+      className="amaso-fx flex min-h-[48px] w-full items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
       aria-label="Toggle color theme"
     >
       {isLight ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}
