@@ -121,9 +121,12 @@ export default function SparTodayPanel() {
   return (
     <section
       aria-label="Today at a glance"
-      className="border-b border-neutral-800/70 bg-neutral-950/40"
+      className="flex-shrink-0 border-b border-neutral-800/70 bg-neutral-950/40"
     >
-      <header className="flex items-center justify-between gap-3 px-4 pt-3 pb-1.5 sm:px-5">
+      {/* Left padding leaves room for SparPageShell's floating
+          hamburger (`absolute top-2 left-2`) which would otherwise
+          sit on top of the "Today at a glance" label. */}
+      <header className="flex items-center justify-between gap-3 px-4 pt-3 pb-1.5 pl-12 sm:px-5 sm:pl-5">
         <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
           <Sparkles className="h-3 w-3 text-orange-500/80" />
           <span>Today at a glance</span>
@@ -149,7 +152,11 @@ export default function SparTodayPanel() {
       {!collapsed && (
         <div
           id="spar-today-content"
-          className="flex flex-col gap-3 px-4 pb-3 sm:px-5 sm:pb-4 lg:grid lg:grid-cols-3"
+          // Mobile: horizontal swipe strip with snap points so all
+          // three cards stay reachable without burning vertical space
+          // (a stacked column would push the chat composer below the
+          // fold on a phone). lg+: 3-column grid.
+          className="flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-3 sm:px-5 sm:pb-4 lg:grid lg:grid-cols-3 lg:overflow-visible lg:snap-none"
         >
           <TerminalsCard terminals={data?.terminals ?? null} />
           <OpenLoopsCard loops={data?.openLoops ?? null} />
@@ -173,7 +180,7 @@ function CardFrame({
   children: React.ReactNode;
 }) {
   return (
-    <div className="amaso-fx flex min-h-[120px] flex-col overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/50 hover:border-neutral-700/80">
+    <div className="amaso-fx flex h-[180px] w-[82%] max-w-sm flex-shrink-0 snap-start flex-col overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/50 hover:border-neutral-700/80 sm:w-[60%] lg:h-[200px] lg:w-auto lg:max-w-none lg:flex-shrink">
       <div className="flex items-center gap-2 border-b border-neutral-800/70 px-3 py-2">
         <Icon className="h-3.5 w-3.5 text-neutral-400" />
         <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-neutral-400">
@@ -370,19 +377,6 @@ function OpenLoopsCard({ loops }: { loops: string[] | null }) {
 }
 
 function RemarksCard({ remarks }: { remarks: RemarkSummary[] | null }) {
-  // Group by category so frontend / backend / other are visually
-  // distinct without needing per-row pills.
-  const grouped = useMemo(() => {
-    if (!remarks) return null;
-    const map = new Map<RemarkSummary["category"], RemarkSummary[]>();
-    for (const r of remarks) {
-      const arr = map.get(r.category) ?? [];
-      arr.push(r);
-      map.set(r.category, arr);
-    }
-    return map;
-  }, [remarks]);
-
   return (
     <CardFrame
       title="Open remarks"
@@ -427,10 +421,6 @@ function RemarksCard({ remarks }: { remarks: RemarkSummary[] | null }) {
           ))}
         </ul>
       )}
-      {/* Suppress the unused warning when remarks is empty/null. The
-          grouped memo is precomputed so future card variants (e.g. a
-          tabbed view per category) can adopt it without re-walking. */}
-      {grouped ? null : null}
     </CardFrame>
   );
 }

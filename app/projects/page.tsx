@@ -71,7 +71,7 @@ export default async function ProjectsPage() {
                 Team activity
               </h2>
               <Link
-                href="/admin/activity"
+                href="/activity"
                 className="amaso-fx text-xs text-neutral-500 underline-offset-2 hover:text-neutral-200 hover:underline"
               >
                 Full feed →

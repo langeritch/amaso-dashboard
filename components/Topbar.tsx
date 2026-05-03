@@ -320,22 +320,29 @@ function MobileDrawer({
             <div className="px-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
               More
             </div>
-            {SECONDARY_NAV.map(({ href, label, icon: Icon }) => {
-              const active = isActive(pathname, href);
-              const badge = href === "/" ? unreadTotal : 0;
-              return (
-                <DrawerLink
-                  key={href}
-                  href={href}
-                  label={label}
-                  icon={Icon}
-                  active={active}
-                  onClose={onClose}
-                  badge={badge}
-                  compact
-                />
-              );
-            })}
+            {SECONDARY_NAV
+              // /activity is admin-gated server-side (requireAdmin
+              // bounces non-admins back to /), so showing the row to
+              // team users would just dead-end them. Filter here.
+              .filter(
+                ({ href }) => href !== "/activity" || user.role === "admin",
+              )
+              .map(({ href, label, icon: Icon }) => {
+                const active = isActive(pathname, href);
+                const badge = href === "/" ? unreadTotal : 0;
+                return (
+                  <DrawerLink
+                    key={href}
+                    href={href}
+                    label={label}
+                    icon={Icon}
+                    active={active}
+                    onClose={onClose}
+                    badge={badge}
+                    compact
+                  />
+                );
+              })}
           </div>
         </nav>
       </div>
