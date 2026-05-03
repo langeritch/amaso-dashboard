@@ -1133,7 +1133,7 @@ function NewDmDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
@@ -1141,7 +1141,7 @@ function NewDmDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-medium">Start a DM</h2>
+          <h2 className="text-sm font-semibold tracking-tight">Start a DM</h2>
           <button
             type="button"
             onClick={onClose}

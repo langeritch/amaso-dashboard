@@ -100,7 +100,7 @@ export default function AutomationsList({
               </button>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <h2 className="truncate font-medium text-neutral-100">
+                  <h2 className="truncate font-semibold tracking-tight text-neutral-100">
                     {a.name}
                   </h2>
                   {!a.enabled && (

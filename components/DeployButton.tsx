@@ -117,7 +117,7 @@ export default function DeployButton({
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
           onClick={() => !pending && setOpen(false)}
         >
           <form
@@ -127,7 +127,7 @@ export default function DeployButton({
           >
             <div className="flex items-start justify-between">
               <div>
-                <h2 className="flex items-center gap-1.5 text-base font-medium">
+                <h2 className="flex items-center gap-1.5 text-base font-semibold tracking-tight">
                   <Rocket className="h-4 w-4 text-orange-400" /> Push to live
                 </h2>
                 <p className="mt-1 text-xs text-neutral-500">

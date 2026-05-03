@@ -12,26 +12,36 @@ export default async function RecordingListPage() {
     <div className="flex h-[100dvh] flex-col">
       <Topbar user={user} />
       <main className="flex-1 overflow-y-auto bg-neutral-950 text-neutral-100">
-        <div className="mx-auto max-w-3xl px-4 py-8">
-          <header className="mb-6 flex items-baseline justify-between">
-            <h1 className="text-lg font-medium">Recordings</h1>
-            <span className="text-xs text-neutral-500">{sessions.length} total</span>
+        <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
+          <header className="mb-6 flex items-baseline justify-between sm:mb-8">
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              Recordings
+            </h1>
+            <span className="text-xs text-neutral-500">
+              {sessions.length} total
+            </span>
           </header>
           {sessions.length === 0 ? (
-            <p className="text-sm text-neutral-500">
-              No recordings yet. Click the red circle in the header to start
-              one — Chrome will launch with the recorder extension loaded.
-            </p>
+            <div className="amaso-fade-in-slow flex flex-col items-center rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+              <p className="text-sm font-medium text-neutral-300">
+                No recordings yet
+              </p>
+              <p className="mt-1 max-w-sm text-xs leading-relaxed text-neutral-500">
+                Click the red circle in the header to start one — Chrome
+                launches with the recorder extension loaded.
+              </p>
+            </div>
           ) : (
             <ul className="flex flex-col gap-2">
-              {sessions.map((s) => (
+              {sessions.map((s, idx) => (
                 <li
                   key={s.id}
-                  className="rounded-xl border border-neutral-800/80 bg-neutral-900/50"
+                  className="amaso-fade-in rounded-xl border border-neutral-800/80 bg-neutral-900/50"
+                  style={{ animationDelay: `${Math.min(idx, 8) * 30}ms` }}
                 >
                   <Link
                     href={`/recording/${s.id}`}
-                    className="flex items-center gap-3 px-3 py-2 hover:bg-neutral-900"
+                    className="amaso-fx amaso-press flex items-center gap-3 px-3 py-2.5 hover:bg-neutral-900/80"
                   >
                     <span
                       className={`h-2 w-2 rounded-full ${
