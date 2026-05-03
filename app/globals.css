@@ -31,6 +31,13 @@ body {
    * chrome — every scroll region in the app is internal. */
   overscroll-behavior: none;
 }
+/* Safety against accidental horizontal overflow at the document root.
+ * Applied to `html` so sticky positioning on body's direct children
+ * keeps working — `body { overflow-x: hidden }` would create a new
+ * scroll container and break <Topbar>'s `sticky top-0`. */
+html {
+  overflow-x: clip;
+}
 html.light,
 html.light body {
   background: #fafafa;
