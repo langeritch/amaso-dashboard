@@ -12,102 +12,108 @@
 import { NextResponse } from "next/server";
 import { apiRequireUser } from "@/lib/guard";
 import { visibleProjects } from "@/lib/access";
-import { getSession } from "@/lib/terminal";
+import { listSessionsForProject } from "@/lib/terminal-backend";
+import { cleanScrollback } from "@/lib/spar-tools-context";
+import { recentDispatches } from "@/lib/spar-dispatch";
 import {
-  ANSI_REGEX,
-  TUI_CHROME_REGEX,
-  cleanScrollback,
-  detectTerminalState,
-} from "@/lib/spar-tools-context";
+  ACTIVITY_LINE_REGEX,
+  detectWorkerState,
+} from "@/lib/terminal-state";
 
 export const dynamic = "force-dynamic";
 
-// Tail size for state detection. Smaller than the MCP tool's default
-// because we run this for every visible project on every poll —
-// 16 KB × N projects × every-3s would burn CPU on the regex sweeps.
-// 8 KB is plenty for the last-line + state heuristic.
-const TAIL_BYTES = 8_192;
-
-// How many trailing lines of cleaned scrollback to scan for the
-// "summary" line. We pick the last non-empty line that isn't pure
-// chrome — the heuristic filters in cleanScrollback already drop the
-// status spinners, so this just walks backward until something
-// useful surfaces.
-const SUMMARY_SCAN_LINES = 8;
-
-// How far up the partially-cleaned tail to look for a live activity
-// line when state === "thinking". Status lines always sit at the
-// bottom of the TUI; 40 is plenty.
-const ACTIVITY_SCAN_LINES = 40;
-
-// "Active status" line shape: a verb in "-ing" form anywhere on the
-// line plus a parenthesised timer. Examples:
-//   "✢ Elucidating… (28s · ↓ 1.0k tokens · still thinking)"
-//   "* Cogitating (4s · esc to interrupt)"
-//   "✻ Cogitating… (1m 11s · ↓ 2.4k tokens · still thinking)"
-// The optional "Nm " prefix matches Claude Code's switch from "(Ns"
-// to "(Nm Ms" once the timer crosses 60 seconds — without it the
-// status line stops being recognised at the one-minute mark.
-const ACTIVITY_LINE_REGEX =
-  /\b[A-Za-z]+ing\b[^\n]{0,80}\(\s*(?:\d+\s*m\s*)?\d+\s*s\b/i;
-
 interface WorkerStatus {
+  /** Stable React key. `<projectId>:<sessionId>` so multiple sessions
+   *  for the same project don't collide. For single-session projects
+   *  this collapses to `<projectId>:<projectId>` — different from the
+   *  pre-Stage-2 `id = projectId` shape, but UI consumers only treat
+   *  it as an opaque key. `projectId` is broken out separately for
+   *  any caller that needs it. */
   id: string;
+  /** The owning project id (still useful for navigation / grouping). */
+  projectId: string;
+  /** Specific terminal session this row reflects. Equals projectId for
+   *  the legacy single-session case, otherwise a `<projectId>__s…` id
+   *  allocated by the spawn endpoint or the dispatch resolver. */
+  sessionId: string;
+  /** 1-based ordinal among this project's currently-live sessions,
+   *  oldest-first. UI uses this to render "#1", "#2", … labels when
+   *  the project has more than one session. Always >= 1 for running
+   *  rows; 0 for the synthetic "no terminal" placeholder. */
+  sessionOrdinal: number;
+  /** Total live sessions for this project right now. Lets the UI
+   *  decide whether to show the "#N" suffix (only when > 1). */
+  projectSessionCount: number;
   name: string;
   visibility: "team" | "client" | "public";
   running: boolean;
   startedAt: number | null;
-  state: "thinking" | "permission_gate" | "at_prompt" | "unknown" | "idle";
+  state:
+    | "thinking"
+    | "permission_gate"
+    | "at_prompt"
+    | "awaiting_input"
+    | "unknown"
+    | "idle";
   hint: string;
   /** One-line summary pulled from the terminal tail. Empty when the
    *  PTY isn't running or no usable line was found. */
   lastLine: string;
+  /** Most recent prompt the user submitted into this terminal,
+   *  truncated. Sourced from cleaned scrollback by scanning for "> ..."
+   *  lines, so it covers both spar dispatches and manually-typed
+   *  prompts. Empty when the buffer has no prompt history. */
+  lastPrompt: string;
+  /** Slightly richer summary line for the hover card — same picker as
+   *  `lastLine` but without the spinner-skip preference, so the popover
+   *  can show what Claude actually said last instead of what it's
+   *  currently thinking about. */
+  lastOutputSummary: string;
+  /** Count of distinct submitted prompts in the visible scrollback
+   *  window. Approximate: the ring buffer caps how far back we can see,
+   *  so very-long sessions undercount. Sufficient for "how many things
+   *  has this worker chewed through this session" at a glance. */
+  promptCount: number;
 }
 
-function pickSummaryLine(clean: string): string {
+// Tail used only for the output-summary picker. State detection has
+// its own tail size in lib/terminal-state.ts; the picker wants a touch
+// more context so it can walk past recent spinner rows to find an
+// actual sentence.
+const SUMMARY_TAIL_BYTES = 32_000;
+// Bare prompt-marker / input-box residue from Claude Code's TUI.
+// After cleanScrollback strips box-drawing chars, the multi-line
+// input box collapses down to a lone `❯` (or `>`/`$`/`›`) — never the
+// user's typed text on the same line. So scrollback parsing can't
+// recover the prompt content. Dispatch-log sourcing is reliable.
+const PROMPT_MARKER_RX = /^[>│▌$›❯]\s*$/;
+
+// Same backward-walk picker as pickSummaryLine but with a longer cap
+// so the popover can carry a fuller sentence. Still skips prompts and
+// in-flight activity rows — the popover is for "what Claude SAID",
+// not "what it's doing now" (the badge already conveys state).
+function pickOutputSummary(clean: string, lookback = 16): string {
   const lines = clean
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
-  // Walk backward but cap at SUMMARY_SCAN_LINES so a very long clean
-  // tail doesn't waste cycles. A bare `>` prompt isn't useful — skip
-  // it and keep looking.
-  const tail = lines.slice(-SUMMARY_SCAN_LINES);
+  const tail = lines.slice(-lookback);
+  const cap = (s: string) => (s.length > 220 ? s.slice(0, 217) + "…" : s);
+  const COMPLETION_RX = /\w+(?:ed|t)\s+for\s+(?:\d+\s*m\s+)?\d+\s*s/i;
   for (let i = tail.length - 1; i >= 0; i--) {
     const line = tail[i];
     if (!line) continue;
-    if (/^[>│▌$›]\s*$/.test(line)) continue;
-    if (/^>/.test(line)) continue;
-    // Trim very long lines so the panel layout stays sane.
-    return line.length > 140 ? line.slice(0, 137) + "…" : line;
+    if (PROMPT_MARKER_RX.test(line)) continue;
+    if (COMPLETION_RX.test(line)) continue;
+    if (ACTIVITY_LINE_REGEX.test(line)) continue;
+    return cap(line);
   }
   return "";
 }
 
-// Pulls the live "Elucidating… (28s · …)" status row out of the partially
-// cleaned tail. Operates on `forState` (ANSI + TUI-chrome stripped, but
-// carriage-return overwrites and noise lines preserved) so the row Claude
-// Code rewrites in place is still visible. cleanScrollback drops these
-// rows on purpose — for the MCP scrollback tool you don't want spinners
-// — but the workers panel's whole job is to surface them.
-function pickActivityLine(forState: string): string {
-  const lines = forState.split(/\n/);
-  const start = Math.max(0, lines.length - ACTIVITY_SCAN_LINES);
-  for (let i = lines.length - 1; i >= start; i--) {
-    // Each logical line may contain \r-overwritten variants where the
-    // TUI rewrote the same row repeatedly. Only the segment after the
-    // final \r is what the user actually sees on screen — so walk
-    // those right-to-left and pick the first non-empty match.
-    const segs = lines[i].split("\r");
-    for (let j = segs.length - 1; j >= 0; j--) {
-      const seg = segs[j].trim();
-      if (!seg) continue;
-      if (ACTIVITY_LINE_REGEX.test(seg)) {
-        return seg.length > 140 ? seg.slice(0, 137) + "…" : seg;
-      }
-    }
-  }
-  return "";
+function truncatePrompt(s: string, max = 80): string {
+  const single = s.replace(/\s+/g, " ").trim();
+  return single.length > max ? single.slice(0, max - 1).trimEnd() + "…" : single;
 }
 
 export async function GET() {
@@ -115,11 +121,44 @@ export async function GET() {
   if (!auth.ok) return auth.res;
 
   const projects = visibleProjects(auth.user);
-  const workers: WorkerStatus[] = projects.map((p) => {
-    const session = getSession(p.id);
-    if (!session) {
-      return {
-        id: p.id,
+  // Per-project dispatch summary built once and reused. recentDispatches
+  // returns this user's last MAX_LOG_PER_USER (~20) dispatches across
+  // all projects newest-first; we group by projectId. The promptCount
+  // is bounded by that ring, so very-busy users can undercount — fine
+  // for a "current session" hover card.
+  const myDispatches = recentDispatches(auth.user.id, 20);
+  const dispatchByProject = new Map<
+    string,
+    { count: number; latestPrompt: string }
+  >();
+  for (const d of myDispatches) {
+    const cur = dispatchByProject.get(d.projectId) ?? {
+      count: 0,
+      latestPrompt: "",
+    };
+    cur.count += 1;
+    if (!cur.latestPrompt) cur.latestPrompt = d.prompt;
+    dispatchByProject.set(d.projectId, cur);
+  }
+
+  // One row per live session. Projects with no live session emit a
+  // single placeholder row (running=false) so the panel can still
+  // surface a "+ start" affordance and the historical lastPrompt.
+  // Sessions are sorted oldest-first so the ordinal labels (#1, #2)
+  // stay stable across polls — index 0 → "#1".
+  const workers: WorkerStatus[] = [];
+  for (const p of projects) {
+    const sessions = [...listSessionsForProject(p.id)].sort(
+      (a, b) => a.startedAt - b.startedAt,
+    );
+    const dispatchInfo = dispatchByProject.get(p.id);
+    if (sessions.length === 0) {
+      workers.push({
+        id: `${p.id}:${p.id}`,
+        projectId: p.id,
+        sessionId: p.id,
+        sessionOrdinal: 0,
+        projectSessionCount: 0,
         name: p.name,
         visibility: p.visibility,
         running: false,
@@ -127,40 +166,55 @@ export async function GET() {
         state: "idle",
         hint: "No terminal running.",
         lastLine: "",
-      };
+        // Even with no live PTY we still surface the latest prompt the
+        // user/spar dispatched here — it's the easiest way to remember
+        // "what was this worker doing before it exited" at a glance.
+        lastPrompt: dispatchInfo
+          ? truncatePrompt(dispatchInfo.latestPrompt)
+          : "",
+        lastOutputSummary: "",
+        promptCount: dispatchInfo?.count ?? 0,
+      });
+      continue;
     }
-    const sb = session.scrollback;
-    const rawTail = sb.slice(Math.max(0, sb.length - TAIL_BYTES));
-    // State detection runs on the raw-tail minus ANSI/box-drawing
-    // (matches the MCP tool's path). Summary line uses the fully
-    // cleaned tail so the user sees a readable sentence, not a
-    // spinner row.
-    const forState = rawTail
-      .replace(ANSI_REGEX, "")
-      .replace(TUI_CHROME_REGEX, "");
-    const { state, hint } = detectTerminalState(forState);
-    const cleaned = cleanScrollback(rawTail);
-    // Always try the live activity row first, regardless of state.
-    // Claude Code's TUI renders a `❯` prompt character below the
-    // status line even while it's still thinking, which makes
-    // `detectTerminalState` return "at_prompt" — so gating the
-    // activity-line lookup on state === "thinking" hides the row in
-    // exactly the case we want it most. The activity regex requires
-    // both an "-ing" verb and a parenthesised timer, so a stale row
-    // from a finished turn won't false-positive here.
-    let lastLine = pickActivityLine(forState);
-    if (!lastLine) lastLine = pickSummaryLine(cleaned);
-    return {
-      id: p.id,
-      name: p.name,
-      visibility: p.visibility,
-      running: true,
-      startedAt: session.startedAt,
-      state: state as WorkerStatus["state"],
-      hint,
-      lastLine,
-    };
-  });
+    // Recent-dispatch info is per-project (the log doesn't currently
+    // carry sessionId on every row), so every session for a project
+    // sees the same lastPrompt / promptCount fallback. Acceptable —
+    // the WorkerRow already disambiguates by session label and
+    // scrollback tail.
+    sessions.forEach((session, idx) => {
+      const sb = session.scrollback;
+      // detectWorkerState shares its tail/regex set with
+      // terminal-idle.ts, so the row's badge always matches what
+      // would actually fire an auto-report.
+      const { state: finalState, hint: finalHint, lastLine } =
+        detectWorkerState(sb, p.id, session.startedAt);
+      const summaryTail = sb.slice(
+        Math.max(0, sb.length - SUMMARY_TAIL_BYTES),
+      );
+      const cleanedSummary = cleanScrollback(summaryTail);
+      const outputSummary = pickOutputSummary(cleanedSummary) || lastLine;
+      workers.push({
+        id: `${p.id}:${session.sessionId}`,
+        projectId: p.id,
+        sessionId: session.sessionId,
+        sessionOrdinal: idx + 1,
+        projectSessionCount: sessions.length,
+        name: p.name,
+        visibility: p.visibility,
+        running: true,
+        startedAt: session.startedAt,
+        state: finalState,
+        hint: finalHint,
+        lastLine,
+        lastPrompt: dispatchInfo
+          ? truncatePrompt(dispatchInfo.latestPrompt)
+          : "",
+        lastOutputSummary: outputSummary,
+        promptCount: dispatchInfo?.count ?? 0,
+      });
+    });
+  }
 
   return NextResponse.json({ workers });
 }
