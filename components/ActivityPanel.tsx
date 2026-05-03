@@ -113,23 +113,49 @@ export default function ActivityPanel() {
           </div>
         )}
         {data === null ? (
-          <p className="text-sm text-neutral-500">Loading…</p>
+          <ul className="space-y-3">
+            {[0, 1].map((i) => (
+              <li
+                key={i}
+                className="amaso-fade-in flex items-center gap-3 rounded-xl border border-neutral-800/80 bg-neutral-900/30 p-4"
+                style={{ animationDelay: `${i * 50}ms` }}
+              >
+                <span className="amaso-skeleton h-9 w-9 flex-shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="amaso-skeleton h-3 w-1/3" />
+                  <div className="amaso-skeleton h-2.5 w-2/3" />
+                </div>
+              </li>
+            ))}
+          </ul>
         ) : data.online.length === 0 ? (
-          <p className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
-            No live sessions right now.
-          </p>
+          <div className="amaso-fade-in-slow flex flex-col items-center rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+            <p className="text-sm font-medium text-neutral-300">
+              No live sessions right now
+            </p>
+            <p className="mt-1 max-w-sm text-xs leading-relaxed text-neutral-500">
+              When teammates are online, they&rsquo;ll show up here.
+            </p>
+          </div>
         ) : (
           <ul className="space-y-3">
-            {data.online.map((u) => (
-              <UserCard
+            {data.online.map((u, i) => (
+              <li
                 key={u.userId}
-                user={u}
-                now={data.now}
-                selected={filterUser === u.userId}
-                onSelect={() =>
-                  setFilterUser((prev) => (prev === u.userId ? null : u.userId))
-                }
-              />
+                className="amaso-fade-in"
+                style={{ animationDelay: `${Math.min(i, 6) * 35}ms` }}
+              >
+                <UserCard
+                  user={u}
+                  now={data.now}
+                  selected={filterUser === u.userId}
+                  onSelect={() =>
+                    setFilterUser((prev) =>
+                      prev === u.userId ? null : u.userId,
+                    )
+                  }
+                />
+              </li>
             ))}
           </ul>
         )}
@@ -144,22 +170,48 @@ export default function ActivityPanel() {
             <button
               type="button"
               onClick={() => setFilterUser(null)}
-              className="rounded px-2 py-0.5 text-xs text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200"
+              className="amaso-fx amaso-press rounded-md px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
             >
               clear filter
             </button>
           )}
         </header>
         {data === null ? (
-          <p className="text-sm text-neutral-500">Loading…</p>
+          <ol className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-950/50">
+            {[0, 1, 2].map((i) => (
+              <li
+                key={i}
+                className="amaso-fade-in flex items-start gap-3 px-3 py-2.5"
+                style={{ animationDelay: `${i * 35}ms` }}
+              >
+                <span className="amaso-skeleton mt-1 h-2 w-2 flex-shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="amaso-skeleton h-3 w-2/5" />
+                  <div className="amaso-skeleton h-2.5 w-3/4" />
+                </div>
+              </li>
+            ))}
+          </ol>
         ) : recent.length === 0 ? (
-          <p className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
-            No recorded activity yet.
-          </p>
+          <div className="amaso-fade-in-slow flex flex-col items-center rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+            <p className="text-sm font-medium text-neutral-300">
+              No recorded activity yet
+            </p>
+            <p className="mt-1 max-w-sm text-xs leading-relaxed text-neutral-500">
+              Events show up here as people work — dispatches, file changes,
+              page visits.
+            </p>
+          </div>
         ) : (
-          <ol className="divide-y divide-neutral-800/70 rounded-xl border border-neutral-800/80 bg-neutral-950/50">
-            {recent.map((r) => (
-              <ActivityListItem key={r.id} row={r} now={data.now} />
+          <ol className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-950/50">
+            {recent.map((r, i) => (
+              <li
+                key={r.id}
+                className="amaso-fade-in"
+                style={{ animationDelay: `${Math.min(i, 8) * 25}ms` }}
+              >
+                <ActivityListItem row={r} now={data.now} />
+              </li>
             ))}
           </ol>
         )}
@@ -182,16 +234,15 @@ function UserCard({
   const sessionDuration = formatDuration(now - user.oldestConnectedAt);
   const lastSeen = formatRelative(now - user.latestSeenAt);
   return (
-    <li>
-      <button
-        type="button"
-        onClick={onSelect}
-        className={`block w-full rounded-lg border p-4 text-left transition ${
-          selected
-            ? "border-orange-700 bg-orange-900/15"
-            : "border-neutral-800 bg-neutral-900/40 hover:border-neutral-700"
-        }`}
-      >
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`amaso-fx amaso-press block w-full rounded-xl border p-4 text-left ${
+        selected
+          ? "border-orange-500/40 bg-orange-500/10"
+          : "border-neutral-800/80 bg-neutral-900/40 hover:border-orange-500/30 hover:bg-neutral-900/70"
+      }`}
+    >
         <div className="flex items-start gap-3">
           <span className="relative mt-1 flex h-2 w-2 flex-shrink-0">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400/60" />
@@ -245,7 +296,6 @@ function UserCard({
           </div>
         </div>
       </button>
-    </li>
   );
 }
 
@@ -253,7 +303,7 @@ function ActivityListItem({ row, now }: { row: ActivityRow; now: number }) {
   const ago = formatRelative(now - row.at);
   const detailText = row.detail ? formatDetail(row.detail) : null;
   return (
-    <li className="flex items-start gap-3 px-3 py-2">
+    <div className="flex items-start gap-3 px-3 py-2">
       <span className="mt-1.5 flex-shrink-0">
         <Circle
           className={`h-2 w-2 ${
@@ -280,7 +330,7 @@ function ActivityListItem({ row, now }: { row: ActivityRow; now: number }) {
           </p>
         )}
       </div>
-    </li>
+    </div>
   );
 }
 

@@ -73,13 +73,37 @@ export default function UsersAdmin({
       )}
 
       {loading ? (
-        <p className="text-sm text-neutral-500">Loading…</p>
+        <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/30 shadow-[0_1px_2px_rgba(0,0,0,0.2)]">
+          {[0, 1, 2].map((i) => (
+            <li
+              key={i}
+              className="amaso-fade-in flex items-center gap-3 p-4"
+              style={{ animationDelay: `${i * 50}ms` }}
+            >
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="amaso-skeleton h-3 w-1/3" />
+                <div className="amaso-skeleton h-2.5 w-2/3" />
+              </div>
+              <div className="amaso-skeleton h-5 w-14 rounded-full" />
+            </li>
+          ))}
+        </ul>
       ) : users.length === 0 ? (
-        <p className="text-sm text-neutral-500">No users yet.</p>
+        <div className="amaso-fade-in-slow flex flex-col items-center rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-6 py-10 text-center">
+          <p className="text-sm font-medium text-neutral-300">No users yet</p>
+          <p className="mt-1 max-w-sm text-xs leading-relaxed text-neutral-500">
+            Tap <span className="text-neutral-300">New user</span> above to
+            create the first one.
+          </p>
+        </div>
       ) : (
         <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/80 bg-neutral-900/30 shadow-[0_1px_2px_rgba(0,0,0,0.2)]">
-          {users.map((u) => (
-            <li key={u.id} className="p-4">
+          {users.map((u, idx) => (
+            <li
+              key={u.id}
+              className="amaso-fade-in p-4"
+              style={{ animationDelay: `${Math.min(idx, 8) * 35}ms` }}
+            >
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
