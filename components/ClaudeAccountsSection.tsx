@@ -143,7 +143,7 @@ export default function ClaudeAccountsSection() {
           <button
             type="button"
             onClick={startOAuth}
-            className="flex items-center gap-1 rounded-md border border-orange-700 bg-orange-900/40 px-2.5 py-1 text-xs text-orange-200 hover:bg-orange-900/60"
+            className="amaso-fx amaso-press flex items-center gap-1 rounded-md border border-orange-500/40 bg-orange-500/15 px-2.5 py-1 text-xs font-medium text-orange-200 hover:border-orange-400/60 hover:bg-orange-500/25"
           >
             <Plus className="h-3 w-3" /> Add account
           </button>
@@ -159,7 +159,7 @@ export default function ClaudeAccountsSection() {
       </p>
 
       {error && (
-        <div className="mx-4 mb-3 rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <div className="mx-4 mb-3 rounded-md border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-xs text-rose-300">
           {error}
         </div>
       )}

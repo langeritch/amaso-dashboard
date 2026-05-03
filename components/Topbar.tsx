@@ -119,6 +119,12 @@ export default function Topbar({ user }: { user: User }) {
               >
                 <Icon className="h-3.5 w-3.5 transition-colors duration-200" />
                 <span>{label}</span>
+                {active && (
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-3 -bottom-[7px] h-[2px] rounded-full bg-orange-500 shadow-[0_0_6px_rgba(255,107,61,0.55)]"
+                  />
+                )}
               </Link>
             );
           })}
@@ -155,7 +161,7 @@ export default function Topbar({ user }: { user: User }) {
         <div className="hidden min-w-0 items-center justify-self-end gap-3 text-neutral-400 sm:flex">
           <Link
             href="/settings"
-            className={`amaso-fx flex h-9 w-9 items-center justify-center rounded-md ${
+            className={`amaso-fx relative flex h-9 w-9 items-center justify-center rounded-md ${
               isActive(pathname, "/settings")
                 ? "bg-neutral-800/90 text-neutral-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
                 : "hover:bg-neutral-900/80 hover:text-neutral-100"
@@ -164,6 +170,12 @@ export default function Topbar({ user }: { user: User }) {
             aria-label="Settings"
           >
             <Settings className="h-4 w-4" />
+            {isActive(pathname, "/settings") && (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-x-2 -bottom-[7px] h-[2px] rounded-full bg-orange-500 shadow-[0_0_6px_rgba(255,107,61,0.55)]"
+              />
+            )}
           </Link>
         </div>
 

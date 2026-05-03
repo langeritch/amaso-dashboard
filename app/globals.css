@@ -208,6 +208,34 @@ html.light .amaso-skeleton {
   100% { background-position: -200% 0; }
 }
 
+/* Page-transition wrapper used by app/template.tsx. The template
+ * re-mounts on every Next.js route boundary, which restarts this
+ * keyframe so a route change reads as a soft fade-up instead of a
+ * hard cut. Kept short (180ms) so it never feels like the page is
+ * blocked behind an animation. Reduced-motion users get an instant
+ * paint via the @media query below. The `display: contents`
+ * preserves the layout — the wrapper itself contributes no box,
+ * so existing flex/grid layouts (SparPageShell, ClientShell, etc.)
+ * see the page as if the wrapper weren't there. We swap to a normal
+ * block during the animation so transform/opacity have something
+ * to act on.
+ *
+ * Two-stage trick: animation is on the outer wrapper, but
+ * `will-change` is reset after to free GPU layers. */
+.amaso-page-transition {
+  animation: amasoPageEnter 180ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  will-change: opacity, transform;
+}
+@keyframes amasoPageEnter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .amaso-page-transition {
+    animation: none;
+  }
+}
+
 /* Fade-in (with a hint of upward drift) used by data cards and
  * skeletons-to-content transitions. Applied via class so the runtime
  * can opt in / out without managing keyframes per component. */

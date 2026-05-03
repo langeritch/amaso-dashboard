@@ -171,7 +171,7 @@ export default function PushToggle({
       type="button"
       onClick={on ? disable : enable}
       disabled={busy || denied}
-      className="flex min-h-[48px] w-full items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900 disabled:opacity-60"
+      className="amaso-fx flex min-h-[48px] w-full items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100 disabled:opacity-60"
     >
       {on ? (
         <Bell className="h-5 w-5 text-orange-400" />
