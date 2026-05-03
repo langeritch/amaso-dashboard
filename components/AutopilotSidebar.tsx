@@ -157,14 +157,14 @@ export default function AutopilotSidebar({
         aria-label="close autopilot panel"
         tabIndex={-1}
         onClick={onClose}
-        className={`fixed inset-0 z-30 bg-black/60 transition-opacity ${
+        className={`fixed inset-0 z-30 bg-black/70 backdrop-blur-sm transition-opacity duration-300 ease-out ${
           open ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
       />
       <aside
         aria-label="autopilot sidebar"
         aria-hidden={!open}
-        className={`fixed inset-y-0 right-0 z-40 flex w-72 max-w-[85vw] flex-col border-l border-neutral-800 bg-neutral-950/95 shadow-2xl backdrop-blur transition-transform duration-300 ease-out ${
+        className={`fixed inset-y-0 right-0 z-40 flex w-72 max-w-[85vw] flex-col border-l border-neutral-800/80 bg-neutral-950/95 shadow-2xl backdrop-blur-md backdrop-saturate-150 transition-transform duration-[280ms] ease-[cubic-bezier(0.32,0.72,0,1)] ${
           open ? "translate-x-0" : "translate-x-full"
         }`}
       >
@@ -222,7 +222,7 @@ export default function AutopilotSidebar({
                   type="button"
                   onClick={() => applyPreset(p.text)}
                   disabled={directiveLoading}
-                  className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400 transition hover:border-orange-500/50 hover:text-orange-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400 amaso-fx hover:border-orange-500/50 hover:text-orange-200 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {p.label}
                 </button>
@@ -333,7 +333,7 @@ function NeedsHumanList({
               onClick={() => {
                 /* placeholder — wiring lands later */
               }}
-              className="rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400 transition hover:border-neutral-700 hover:text-neutral-200"
+              className="rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400 amaso-fx hover:border-neutral-700 hover:text-neutral-200"
             >
               Handle
             </button>

@@ -148,7 +148,7 @@ function PwaInstallCard() {
           type="button"
           onClick={handleInstall}
           disabled={state === "prompting"}
-          className="inline-flex items-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-orange-800"
+          className="inline-flex items-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white amaso-fx amaso-press hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-orange-800"
         >
           <MonitorDown className="h-4 w-4" />
           {state === "prompting" ? "Awaiting browser prompt…" : "Install app"}
@@ -343,7 +343,7 @@ function CompanionDownload({
       <div className="flex flex-wrap items-center gap-2">
         <a
           href={primaryUrl}
-          className="inline-flex items-center gap-2 rounded-md bg-neutral-200 px-3 py-1.5 text-sm font-medium text-neutral-900 transition hover:bg-white"
+          className="inline-flex items-center gap-2 rounded-md bg-neutral-200 px-3 py-1.5 text-sm font-medium text-neutral-900 amaso-fx amaso-press hover:bg-white"
         >
           <Download className="h-4 w-4" />
           Download for {primary === "arm64" ? "Apple Silicon" : "Intel"}

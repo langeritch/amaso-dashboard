@@ -87,12 +87,12 @@ export default function AutomationsList({
           {items.map((a) => (
             <li
               key={a.id}
-              className="group flex items-start gap-3 rounded-xl border border-neutral-800/80 bg-neutral-900/50 p-4 transition hover:border-neutral-700"
+              className="group flex items-start gap-3 rounded-xl border border-neutral-800/80 bg-neutral-900/50 p-4 amaso-fx hover:border-neutral-700"
             >
               <button
                 type="button"
                 onClick={() => run(a)}
-                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border border-orange-500/40 bg-orange-500/10 text-orange-300 transition hover:border-orange-400 hover:bg-orange-500/20"
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border border-orange-500/40 bg-orange-500/10 text-orange-300 amaso-fx amaso-press hover:border-orange-400 hover:bg-orange-500/20"
                 aria-label={`Run ${a.name}`}
                 title={`Run ${a.name}`}
               >
@@ -119,11 +119,11 @@ export default function AutomationsList({
                 </p>
                 <StatsRow stats={a.stats} />
               </div>
-              <div className="flex flex-shrink-0 flex-col gap-1 opacity-0 transition group-hover:opacity-100">
+              <div className="flex flex-shrink-0 flex-col gap-1 opacity-0 transition group-hover:opacity-100 amaso-fx">
                 <button
                   type="button"
                   onClick={() => setEditing(a)}
-                  className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+                  className="amaso-fx amaso-press rounded-md p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
                   aria-label={`Edit ${a.name}`}
                   title="Edit"
                 >
@@ -132,7 +132,7 @@ export default function AutomationsList({
                 <button
                   type="button"
                   onClick={() => handleDelete(a)}
-                  className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-rose-300"
+                  className="amaso-fx amaso-press rounded-md p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-rose-300"
                   aria-label={`Delete ${a.name}`}
                   title="Delete"
                 >
@@ -148,7 +148,7 @@ export default function AutomationsList({
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className="mt-4 flex items-center gap-2 rounded-md border border-dashed border-neutral-700 px-3 py-2 text-sm text-neutral-400 transition hover:border-neutral-500 hover:text-neutral-200"
+          className="mt-4 flex items-center gap-2 rounded-md border border-dashed border-neutral-700 px-3 py-2 text-sm text-neutral-400 amaso-fx hover:border-neutral-500 hover:text-neutral-200"
         >
           <Plus className="h-4 w-4" />
           Add automation
