@@ -26,10 +26,10 @@ interface Me {
 
 const RECENT_HISTORY_MAX = 6;
 
-// WebSocket reconnect backoff. Same shape as BrowserViewer.tsx so a
-// laptop wake-from-sleep doesn't hammer the server with a tight retry
-// loop, and a server that's actually down stops trying after the
-// budget is exhausted instead of pinging forever.
+// WebSocket reconnect backoff so a laptop wake-from-sleep doesn't
+// hammer the server with a tight retry loop, and a server that's
+// actually down stops trying after the budget is exhausted instead of
+// pinging forever.
 const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 16_000];
 const MAX_RECONNECT_ATTEMPTS = RECONNECT_DELAYS_MS.length;
 
@@ -677,10 +677,13 @@ export default function ProjectView({
             {centre}
           </section>
 
-          {/* Remarks column: always visible lg+, on mobile only when tab === remarks */}
+          {/* Remarks column: always visible lg+, on mobile only when tab === remarks.
+           * `min-h-0` is what lets the inner panel's scroll region collapse to
+           * the available space on mobile — without it the column grows to fit
+           * its content and the input form gets pushed below the viewport. */}
           <div
-            className={`border-neutral-800 lg:flex lg:flex-col ${
-              tab === "remarks" ? "flex flex-col" : "hidden"
+            className={`min-h-0 border-neutral-800 lg:flex lg:flex-col ${
+              tab === "remarks" ? "flex flex-1 flex-col" : "hidden"
             }`}
           >
             <RemarksPanel {...remarksPanelProps} />
@@ -718,10 +721,10 @@ function TabBtn({
     <button
       type="button"
       onClick={onClick}
-      className={`flex min-h-[36px] flex-shrink-0 items-center whitespace-nowrap rounded px-3 transition sm:min-h-0 sm:px-2.5 sm:py-1 ${
+      className={`amaso-fx flex min-h-[36px] flex-shrink-0 items-center whitespace-nowrap rounded-md px-3 sm:min-h-0 sm:px-2.5 sm:py-1 ${
         active
-          ? "bg-neutral-800 text-white"
-          : "text-neutral-400 hover:text-neutral-200"
+          ? "bg-neutral-800/90 text-neutral-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+          : "text-neutral-400 hover:bg-neutral-900/60 hover:text-neutral-100"
       }`}
     >
       {children}
