@@ -176,6 +176,15 @@ export default function SparProvider({
   // read by the recognition guards that run outside the React cycle.
   const [fillerAudible, setFillerAudible] = useState(false);
   const fillerAudibleRef = useRef(false);
+  // Mirror of ttsTailSettling for non-React callers (the post-acquire
+  // guard inside `acquireMicStream`). The state already drives the
+  // consolidated mic-gate effect; the ref lets the async getUserMedia
+  // resolution check the latest value without going stale on a closure
+  // captured before the edge.
+  const ttsTailSettlingRef = useRef(false);
+  useEffect(() => {
+    ttsTailSettlingRef.current = ttsTailSettling;
+  }, [ttsTailSettling]);
   // Post-TTS tail window. Stays true for ~450 ms after `ttsAudible`
   // falls to false. Filler gates AND-in `!ttsTailSettling` so they
   // can't snap back on between the audio element's `ended` event and
@@ -3163,17 +3172,29 @@ export default function SparProvider({
           sampleSize: { ideal: 16 },
         },
       });
-      micStreamRef.current = stream;
-      // Sync the freshly-acquired tracks with the current mic-gate
-      // state. The consolidated effect that owns this only re-fires on
-      // its dependency changes, so a stream acquired *after* one of
-      // them was already true (e.g. a resume mid-thought) would
-      // otherwise come up live and light the OS indicator.
-      const shouldDisable =
-        micMutedRef.current || ttsAudibleRef.current || fillerAudibleRef.current;
-      for (const track of stream.getAudioTracks()) {
-        track.enabled = !shouldDisable;
+      // Race guard: getUserMedia is async (~50–100 ms). If a gate
+      // condition flipped true between the call and resolution, the
+      // consolidated effect already ran with `micStreamRef.current ===
+      // null` and did nothing — landing this stream now would leave
+      // the OS capture (and the orange indicator) live for the rest
+      // of the disable window. Stop the freshly-acquired tracks
+      // immediately and don't publish them; the next gate-clear edge
+      // will re-acquire.
+      const shouldSilence =
+        micMutedRef.current ||
+        ttsAudibleRef.current ||
+        ttsTailSettlingRef.current ||
+        fillerAudibleRef.current ||
+        busyRef.current;
+      if (shouldSilence) {
+        try {
+          for (const t of stream.getTracks()) t.stop();
+        } catch {
+          /* ignore */
+        }
+        return;
       }
+      micStreamRef.current = stream;
       // Log the active settings so it's obvious from the console
       // whether AEC/NS/AGC actually engaged on this device. Some
       // Bluetooth headsets and OS-level audio routings silently drop
@@ -3488,30 +3509,47 @@ export default function SparProvider({
     return subscribeFillerAudible(setFillerAudible);
   }, []);
 
-  // Consolidated hardware mic gate. The macOS / Windows OS-level
-  // capture indicator (orange dot, taskbar mic) tracks whether *any*
-  // audio track on a live MediaStream is enabled — calling
-  // recognition.stop() releases SR's internal mic path but does
-  // nothing to our long-held getUserMedia stream, so the indicator
-  // stays lit through every reply unless we toggle track.enabled
-  // ourselves.
+  // Consolidated hardware mic gate. macOS / Windows light their
+  // OS-level capture indicator (the orange menu-bar dot) for any
+  // process that holds a live MediaStreamTrack on a recording device.
+  // Setting `track.enabled = false` only mutes the data flowing
+  // through JS — the OS still considers the device captured, so the
+  // dot stayed lit through every reply. The only way to turn the
+  // indicator off is to release the device with `track.stop()`,
+  // which is what we do here. Permission has already been granted
+  // for the page so the re-acquire on the way back is a sync flip
+  // for the user (no prompt) — costs ~50–100 ms, well under the
+  // 450 ms tail window we already wait through.
   //
   // Rule: if anything is producing — or about to produce — audio
   // ('busy' for the thinking phase that may launch filler, 'ttsAudible'
   // / 'ttsTailSettling' for the reply itself, 'fillerAudible' for the
   // YouTube / news / fun-fact / ambient sources, 'micMuted' for the
-  // user's explicit gate), the OS-level capture goes dark. Capture
-  // resumes only when we're fully silent and waiting on the user.
-  // track.enabled is sync (no permission re-prompt), so a single sync
-  // effect over the merged condition is the simplest correct answer.
+  // user's explicit gate), the device goes dark. Capture resumes only
+  // when we're fully silent and waiting on the user.
   useEffect(() => {
-    const stream = micStreamRef.current;
-    if (!stream) return;
-    const shouldDisable =
+    const shouldSilence =
       micMuted || ttsAudible || ttsTailSettling || fillerAudible || busy;
-    for (const track of stream.getAudioTracks()) {
-      track.enabled = !shouldDisable;
+    if (shouldSilence) {
+      const stream = micStreamRef.current;
+      if (!stream) return;
+      try {
+        for (const track of stream.getTracks()) track.stop();
+      } catch {
+        /* ignore — best-effort release */
+      }
+      micStreamRef.current = null;
+      return;
     }
+    // All gates cleared. Re-acquire only inside an active spar call
+    // (no point holding the device when no one is listening) and only
+    // when Telegram isn't holding the audio session (the phone owns
+    // the mic in that mode). acquireMicStream is idempotent on
+    // micStreamRef so a redundant call is a cheap early return.
+    if (!inCallRef.current) return;
+    if (telegramActiveRef.current) return;
+    if (micStreamRef.current) return;
+    void acquireMicStream();
   }, [micMuted, ttsAudible, ttsTailSettling, fillerAudible, busy]);
 
   // Falling-edge tail window for filler suppression. See the
