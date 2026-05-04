@@ -90,24 +90,27 @@ export default function HeartbeatPanel({
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [open, editing]);
 
+  // Hard-unmount when closed: keeping the wrapper in the DOM with only
+  // `pointer-events-none` has bitten us — the inner panel could still
+  // catch hover/focus on its translated-off-screen box, and a navigation
+  // away from /spar that races React's unmount left a phantom panel
+  // visible on the next page. Returning null when closed sidesteps both.
+  if (!open) return null;
+
   return (
     <div
-      className={`fixed inset-0 z-40 ${open ? "" : "pointer-events-none"}`}
-      aria-hidden={!open}
+      className="pointer-events-auto fixed inset-0 z-50"
+      aria-hidden={false}
     >
       <button
         type="button"
         aria-label="close heartbeat"
         tabIndex={-1}
         onClick={onClose}
-        className={`absolute inset-0 bg-black/60 transition-opacity duration-300 ${
-          open ? "opacity-100" : "opacity-0"
-        }`}
+        className="absolute inset-0 bg-black/60"
       />
       <div
-        className={`absolute inset-y-0 right-0 flex w-full max-w-md flex-col bg-neutral-950 shadow-xl transition-transform duration-300 ease-out ${
-          open ? "translate-x-0" : "translate-x-full"
-        }`}
+        className="pointer-events-auto absolute inset-y-0 right-0 flex w-full max-w-md flex-col bg-neutral-950 shadow-xl"
         role="dialog"
         aria-label="heartbeat panel"
       >

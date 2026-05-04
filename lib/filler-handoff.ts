@@ -108,6 +108,32 @@ export function awaitFillerHandoff(bufferMs = 150): Promise<void> {
   });
 }
 
+/** Subscribe to audibility changes. Returns an unsubscribe function. */
+export function onFillerAudibleChange(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
+/** Subscribe to "is any filler currently audible?" with the current
+ *  value pushed immediately and on every change. Returns an unsubscribe.
+ *  Use this when a consumer needs to react to filler audio start/stop
+ *  (e.g. mic gating) — it removes the boilerplate of pairing
+ *  onFillerAudibleChange with isAnyFillerAudible. */
+export function subscribeFillerAudible(
+  cb: (audible: boolean) => void,
+): () => void {
+  cb(audible.size > 0);
+  let last = audible.size > 0;
+  const wrapped = () => {
+    const now = audible.size > 0;
+    if (now === last) return;
+    last = now;
+    cb(now);
+  };
+  listeners.add(wrapped);
+  return () => { listeners.delete(wrapped); };
+}
+
 function notify(): void {
   // Snapshot — a listener removing itself during iteration would
   // otherwise skip the next entry.

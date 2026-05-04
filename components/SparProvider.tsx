@@ -16,8 +16,7 @@ import { useVoiceChannel } from "./useVoiceChannel";
 import { useThinkingFiller } from "./useThinkingFiller";
 import { useTtsFillerContent } from "./useTtsFillerContent";
 import { useAmbientPad } from "./useAmbientPad";
-import { awaitFillerHandoff } from "@/lib/filler-handoff";
-import { buildAutopilotPromptBlock } from "@/lib/autopilot-prompt";
+import { awaitFillerHandoff, isAnyFillerAudible, onFillerAudibleChange, subscribeFillerAudible } from "@/lib/filler-handoff";
 import { trackAction } from "./UserTracker";
 import { useMediaPlayer } from "./useMediaPlayer";
 import { useChime } from "./useChime";
@@ -170,6 +169,13 @@ export default function SparProvider({
   // before the YT iframe sees it). This one flips the frame the
   // browser actually starts outputting audio samples.
   const [ttsAudible, setTtsAudible] = useState(false);
+  // Mirrors `isAnyFillerAudible()` — flips true while any filler source
+  // (YouTube, news, fun-facts, ambient pad) is producing sound. We mute
+  // the laptop mic on this signal too so the filler audio doesn't bleed
+  // back in as user input. Subscribed once below; the ref version is
+  // read by the recognition guards that run outside the React cycle.
+  const [fillerAudible, setFillerAudible] = useState(false);
+  const fillerAudibleRef = useRef(false);
   // Post-TTS tail window. Stays true for ~450 ms after `ttsAudible`
   // falls to false. Filler gates AND-in `!ttsTailSettling` so they
   // can't snap back on between the audio element's `ended` event and
@@ -2433,11 +2439,6 @@ export default function SparProvider({
    */
   function buildCompletionPrompt(items: PendingCompletion[]): string {
     if (items.length === 0) return "";
-    // Append the session ordinal when the WS event carried one — it
-    // means the project had multiple live sessions at fire-time, and
-    // the user (and the autopilot) need to know which one completed.
-    // Solo-session events have sessionOrdinal undefined and render
-    // exactly like the pre-Stage-3 prompt.
     const label = (it: PendingCompletion): string => {
       const base = it.projectName;
       const idHint =
@@ -2456,17 +2457,25 @@ export default function SparProvider({
   }
 
   /**
-   * Optional autopilot suffix that travels via the route's
-   * systemInjection field rather than the visible user bubble. Carries
-   * operational rules (the autonomous loop's decision chain) we don't
-   * want to surface in the transcript. Returns undefined when autopilot
-   * is off — the user-bubble prompt is then the only thing Claude sees.
+   * Read-only constraint travelled alongside the auto-report's visible
+   * prompt. Auto-report is a *report*, not an action: Claude is allowed
+   * to inspect terminal output via `read_terminal_scrollback` and
+   * summarise it, but must NEVER dispatch new work or send anything
+   * back into a terminal — that path was creating runaway loops where
+   * each completion fired a fresh dispatch and the loop never ended.
    */
   function buildCompletionSystemAddon(): string | undefined {
-    if (!autopilotRef.current) return undefined;
-    return buildAutopilotPromptBlock({
-      directive: autopilotDirectiveRef.current,
-    });
+    return (
+      `[AUTO-REPORT — READ ONLY]\n` +
+      `A dispatched task just finished. Read the terminal scrollback ` +
+      `with read_terminal_scrollback if you need detail, then summarise ` +
+      `what happened in 1-2 sentences for the user.\n\n` +
+      `Hard constraints:\n` +
+      `- DO NOT call dispatch_to_project. No new terminal work.\n` +
+      `- DO NOT send keys, prompts, or any text into any terminal.\n` +
+      `- DO NOT create remarks, projects, or queue follow-up tasks.\n` +
+      `- This is a passive status report. Read, summarise, stop.`
+    );
   }
 
   function flushPendingCompletions() {
@@ -2858,13 +2867,12 @@ export default function SparProvider({
           );
           return;
         }
-        queueCompletion({
-          projectId,
-          projectName,
-          dispatchId,
-          sessionId,
-          sessionOrdinal,
-        });
+        // Auto-report disabled — was causing infinite dispatch loops.
+        // Push notification still fires server-side; the user can ask
+        // "what happened?" manually when they want a summary.
+        console.log(
+          `[spar-ws] dispatch_completed acknowledged project=${projectId} dispatchId=${dispatchId} (auto-report disabled)`,
+        );
       });
       ws.addEventListener("close", () => {
         if (closed) return;
@@ -2915,6 +2923,10 @@ export default function SparProvider({
   // with everything that's already completed so the historic state is
   // treated as "already reported" — only NEW completions during the
   // session will fire.
+  // Polling fallback disabled — same reason as the WS path (line 2863):
+  // auto-report model turns were dispatching new work into terminals,
+  // creating infinite loops. Server-side push notifications still fire
+  // when terminals finish; the user can ask "what happened?" manually.
   useEffect(() => {
     if (!dispatchesSeededRef.current) {
       for (const d of dispatches) {
@@ -2923,35 +2935,7 @@ export default function SparProvider({
         }
       }
       dispatchesSeededRef.current = true;
-      return;
     }
-    const pending = dispatches.filter(
-      (d) =>
-        d.status === "sent" &&
-        d.completedAt != null &&
-        Date.now() - d.completedAt < 5 * 60_000 &&
-        !reportedCompletionsRef.current.has(d.id) &&
-        !pendingCompletionsRef.current.some((p) => p.dispatchId === d.id),
-    );
-    for (const d of pending) {
-      // No projectName available from the dispatches API (it predates
-      // the WS event). Fall back to projectId as the human label —
-      // slightly less polished than the WS path but correct, and only
-      // hit when the WS broadcast was missed entirely. sessionOrdinal
-      // is computed at fire-time on the server and isn't persisted
-      // to the dispatch log, so the polling fallback can't reproduce
-      // the "session #N" suffix — we forward sessionId only and the
-      // bubble degrades to project-only phrasing.
-      queueCompletion({
-        projectId: d.projectId,
-        projectName: d.projectId,
-        dispatchId: d.id,
-        sessionId: d.sessionId,
-      });
-    }
-    // queueCompletion is recreated each render but only reads refs;
-    // adding it to deps would re-run this effect on every render
-    // and re-scan the dispatch list pointlessly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatches]);
 
@@ -2973,6 +2957,7 @@ export default function SparProvider({
     // here so there is exactly one place that owns the rule.
     if (telegramActiveRef.current) return;
     if (ttsAudibleRef.current) return;
+    if (fillerAudibleRef.current) return;
     const SR =
       (window as unknown as { SpeechRecognition?: new () => SpeechRecognitionLike })
         .SpeechRecognition ??
@@ -3102,7 +3087,8 @@ export default function SparProvider({
           !busyRef.current &&
           !micMutedRef.current &&
           !telegramActiveRef.current &&
-          !ttsAudibleRef.current
+          !ttsAudibleRef.current &&
+          !fillerAudibleRef.current
         ) {
           startRecognition();
         }
@@ -3178,6 +3164,16 @@ export default function SparProvider({
         },
       });
       micStreamRef.current = stream;
+      // Sync the freshly-acquired tracks with the current mic-gate
+      // state. The consolidated effect that owns this only re-fires on
+      // its dependency changes, so a stream acquired *after* one of
+      // them was already true (e.g. a resume mid-thought) would
+      // otherwise come up live and light the OS indicator.
+      const shouldDisable =
+        micMutedRef.current || ttsAudibleRef.current || fillerAudibleRef.current;
+      for (const track of stream.getAudioTracks()) {
+        track.enabled = !shouldDisable;
+      }
       // Log the active settings so it's obvious from the console
       // whether AEC/NS/AGC actually engaged on this device. Some
       // Bluetooth headsets and OS-level audio routings silently drop
@@ -3414,6 +3410,9 @@ export default function SparProvider({
           /* already stopping */
         }
       }
+      // track.enabled is driven by the consolidated mic-gate effect,
+      // which re-runs on `micMuted` and decides whether the hardware
+      // capture should currently be live.
       return next;
     });
   }, []);
@@ -3454,6 +3453,11 @@ export default function SparProvider({
 
   // Kill recognition the instant TTS starts emitting audio so the mic
   // never picks up the speaker output and feeds it back as user input.
+  // Hardware track.enabled flips live in the consolidated mic-gate
+  // effect below — keeping all the "should the OS see capture?" rules
+  // in one place means a new audio source (filler, busy/thinking,
+  // future modes) can be added by widening the OR there instead of
+  // remembering to flip tracks in three different effects.
   useEffect(() => {
     if (!ttsAudible) return;
     if (!recognitionRef.current) return;
@@ -3463,6 +3467,52 @@ export default function SparProvider({
       /* already stopping */
     }
   }, [ttsAudible]);
+
+  // Same gate, applied to filler audio (YouTube, news, fun-facts,
+  // ambient pad). Without this the laptop mic samples filler output and
+  // feeds it back as a transcript — feedback loop and wrong "user said"
+  // events. Mirrors the ttsAudible effect above so the mic-arming path
+  // stays the single owner of "open the mic".
+  useEffect(() => {
+    fillerAudibleRef.current = fillerAudible;
+    if (!fillerAudible) return;
+    if (!recognitionRef.current) return;
+    try {
+      recognitionRef.current.stop();
+    } catch {
+      /* already stopping */
+    }
+  }, [fillerAudible]);
+
+  useEffect(() => {
+    return subscribeFillerAudible(setFillerAudible);
+  }, []);
+
+  // Consolidated hardware mic gate. The macOS / Windows OS-level
+  // capture indicator (orange dot, taskbar mic) tracks whether *any*
+  // audio track on a live MediaStream is enabled — calling
+  // recognition.stop() releases SR's internal mic path but does
+  // nothing to our long-held getUserMedia stream, so the indicator
+  // stays lit through every reply unless we toggle track.enabled
+  // ourselves.
+  //
+  // Rule: if anything is producing — or about to produce — audio
+  // ('busy' for the thinking phase that may launch filler, 'ttsAudible'
+  // / 'ttsTailSettling' for the reply itself, 'fillerAudible' for the
+  // YouTube / news / fun-fact / ambient sources, 'micMuted' for the
+  // user's explicit gate), the OS-level capture goes dark. Capture
+  // resumes only when we're fully silent and waiting on the user.
+  // track.enabled is sync (no permission re-prompt), so a single sync
+  // effect over the merged condition is the simplest correct answer.
+  useEffect(() => {
+    const stream = micStreamRef.current;
+    if (!stream) return;
+    const shouldDisable =
+      micMuted || ttsAudible || ttsTailSettling || fillerAudible || busy;
+    for (const track of stream.getAudioTracks()) {
+      track.enabled = !shouldDisable;
+    }
+  }, [micMuted, ttsAudible, ttsTailSettling, fillerAudible, busy]);
 
   // Falling-edge tail window for filler suppression. See the
   // `ttsTailSettling` declaration above for the why. Cancel any
@@ -3485,6 +3535,10 @@ export default function SparProvider({
     ttsTailTimerRef.current = window.setTimeout(() => {
       ttsTailTimerRef.current = null;
       setTtsTailSettling(false);
+      // Re-enabling hardware tracks is owned by the consolidated
+      // mic-gate effect: when ttsTailSettling flips to false here, that
+      // effect re-evaluates and flips track.enabled back on (provided
+      // nothing else — busy, filler, mic-mute — still asks for silence).
     }, POST_TTS_TAIL_MS);
     return () => {
       if (ttsTailTimerRef.current !== null) {
@@ -3522,7 +3576,8 @@ export default function SparProvider({
         !busyRef.current &&
         !micMutedRef.current &&
         !telegramActiveRef.current &&
-        !ttsAudibleRef.current
+        !ttsAudibleRef.current &&
+        !fillerAudibleRef.current
       ) {
         startRecognition();
       }
