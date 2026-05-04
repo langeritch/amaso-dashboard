@@ -25,6 +25,13 @@ interface WorkerStatus {
   /** `<projectId>:<sessionId>` — stable React key, distinct per
    *  session even when the same project hosts several. */
   id: string;
+  /** Set by the client-side hysteresis layer in `useWorkerStatusPoll`,
+   *  not by the API. Overrides the raw regex check in
+   *  `isActivelyWorking` so a single quiet poll mid-turn (status line
+   *  briefly replaced by tool output) doesn't flip the row to "done"
+   *  for one second and back. See HYSTERESIS_* below for the specific
+   *  thresholds. */
+  _stableActive?: boolean;
   /** Owning project. Used for /projects/<id> nav and for grouping
    *  rows under one project header. Optional for the same
    *  forward-/backward-compat reason as the hover-card extras. */
@@ -77,11 +84,46 @@ const COMPLETION_RX =
 
 function isActivelyWorking(w: WorkerStatus): boolean {
   if (!w.running) return false;
-  // Completion line beats any active match: a past-tense "Brewed for
-  // 5s" overrides whatever `…(` residue is also visible in the tail.
+  // The hook below stabilizes the active/idle classification with poll-
+  // count hysteresis to kill the flicker we used to get when the live
+  // status row briefly disappeared mid-turn. When it ran (raw fetch
+  // outside the hook, or a future caller without stabilization) we
+  // fall back to the raw regex pair.
+  if (typeof w._stableActive === "boolean") return w._stableActive;
   if (COMPLETION_RX.test(w.lastLine)) return false;
   return ACTIVE_STATUS_RX.test(w.lastLine);
 }
+
+function rawIsActivelyWorking(w: WorkerStatus): boolean {
+  if (!w.running) return false;
+  if (COMPLETION_RX.test(w.lastLine)) return false;
+  return ACTIVE_STATUS_RX.test(w.lastLine);
+}
+
+// Hysteresis thresholds for the active/idle classification, expressed
+// in consecutive polls of POLL_INTERVAL_MS each:
+//
+//   - Going IDLE → ACTIVE needs sustained activity. A single poll that
+//     happens to land on a working line is enough to flag transient
+//     output (a rebuild log, a `git status` echo) as "working" and was
+//     part of the bounce. Two consecutive working polls (~2 s) is the
+//     line where it's almost certainly an actual turn.
+//
+//   - Going ACTIVE → IDLE needs the row to look quiet for longer than
+//     the longest pause we've seen Claude Code take between status
+//     ticks (status line replaced by tool output, or a brief
+//     permission-gate animation that doesn't match either regex).
+//     4 polls (~4 s) is comfortably past that and still snappy enough
+//     that a real "done" reads as "done" within a heartbeat.
+const HYSTERESIS_TO_ACTIVE_POLLS = 2;
+const HYSTERESIS_TO_IDLE_POLLS = 4;
+
+type StabilizedEntry = {
+  /** Most recently committed classification for this worker. */
+  committed: "active" | "idle";
+  /** Consecutive polls disagreeing with `committed`, awaiting commit. */
+  pending: number;
+};
 
 function useWorkerStatusPoll() {
   const [workers, setWorkers] = useState<WorkerStatus[] | null>(null);
@@ -95,13 +137,14 @@ function useWorkerStatusPoll() {
     refreshTokenRef.current += 1;
     setRefreshToken(refreshTokenRef.current);
   }, []);
+  // Hysteresis state, one entry per worker id. Survives across polls
+  // because it lives in a ref — re-creating it on every fetch would
+  // defeat the whole point. We GC entries for workers the API no
+  // longer reports so the map can't grow unbounded across long sessions
+  // (terminals come and go as the user spawns / kills sessions).
+  const stableMapRef = useRef<Map<string, StabilizedEntry>>(new Map());
   useEffect(() => {
     let cancelled = false;
-    // Stable signature of the (id, state) pairs so we only log when the
-    // server's view actually changes. Without this the console fills with
-    // a line per poll. Diagnostic for the "panel doesn't refresh on
-    // state transitions" investigation — confirms the API is returning
-    // updated data and React is receiving it. Cheap to leave on.
     let prevSig = "";
     async function tick() {
       try {
@@ -111,15 +154,52 @@ function useWorkerStatusPoll() {
         if (!res.ok) return;
         const body = (await res.json()) as { workers: WorkerStatus[] };
         if (cancelled) return;
-        const sig = body.workers.map((w) => `${w.id}:${w.state}`).join("|");
+        const stableMap = stableMapRef.current;
+        const seen = new Set<string>();
+        const stabilized: WorkerStatus[] = body.workers.map((w) => {
+          seen.add(w.id);
+          const rawActive = rawIsActivelyWorking(w);
+          const rawLabel: "active" | "idle" = rawActive ? "active" : "idle";
+          let entry = stableMap.get(w.id);
+          if (!entry) {
+            // First observation — adopt the raw classification with
+            // pending=0 so subsequent disagreements start counting from
+            // a clean slate. There's no "previous truth" to defend.
+            entry = { committed: rawLabel, pending: 0 };
+            stableMap.set(w.id, entry);
+          } else if (entry.committed === rawLabel) {
+            entry.pending = 0;
+          } else {
+            entry.pending += 1;
+            const threshold =
+              rawLabel === "active"
+                ? HYSTERESIS_TO_ACTIVE_POLLS
+                : HYSTERESIS_TO_IDLE_POLLS;
+            if (entry.pending >= threshold) {
+              entry.committed = rawLabel;
+              entry.pending = 0;
+            }
+          }
+          return { ...w, _stableActive: entry.committed === "active" };
+        });
+        for (const id of stableMap.keys()) {
+          if (!seen.has(id)) stableMap.delete(id);
+        }
+        const sig = stabilized
+          .map((w) => `${w.id}:${w.state}:${w._stableActive ? "A" : "i"}`)
+          .join("|");
         if (sig !== prevSig) {
           prevSig = sig;
           console.log(
             "[WorkerStatusPanel] state changed:",
-            body.workers.map((w) => ({ id: w.id, state: w.state })),
+            stabilized.map((w) => ({
+              id: w.id,
+              state: w.state,
+              active: w._stableActive,
+            })),
           );
         }
-        setWorkers(body.workers);
+        setWorkers(stabilized);
       } catch {
         /* swallow — next tick will retry */
       }
