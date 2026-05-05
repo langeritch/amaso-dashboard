@@ -21,6 +21,7 @@ import { trackAction } from "./UserTracker";
 import { useMediaPlayer } from "./useMediaPlayer";
 import { useChime } from "./useChime";
 import { useToneCue } from "./useToneCue";
+import { readSignoffWord } from "@/lib/tts-signoff";
 
 const TRANSCRIPT_KEY_PREFIX = "spar:transcript:v1:";
 const AUTOPILOT_KEY_PREFIX = "spar:autopilot:v1:";
@@ -59,6 +60,12 @@ interface SpeechRecognitionLike {
   onerror: (() => void) | null;
   start: () => void;
   stop: () => void;
+  // abort() drops any audio buffered since start() and does NOT emit a
+  // final result — different from stop(), which flushes the buffer and
+  // can deliver one last `onresult`. Used on TTS/filler echo-kill paths
+  // so the speaker bleed already in SR's pipeline doesn't surface as a
+  // bogus user turn.
+  abort: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,15 +183,6 @@ export default function SparProvider({
   // read by the recognition guards that run outside the React cycle.
   const [fillerAudible, setFillerAudible] = useState(false);
   const fillerAudibleRef = useRef(false);
-  // Mirror of ttsTailSettling for non-React callers (the post-acquire
-  // guard inside `acquireMicStream`). The state already drives the
-  // consolidated mic-gate effect; the ref lets the async getUserMedia
-  // resolution check the latest value without going stale on a closure
-  // captured before the edge.
-  const ttsTailSettlingRef = useRef(false);
-  useEffect(() => {
-    ttsTailSettlingRef.current = ttsTailSettling;
-  }, [ttsTailSettling]);
   // Post-TTS tail window. Stays true for ~450 ms after `ttsAudible`
   // falls to false. Filler gates AND-in `!ttsTailSettling` so they
   // can't snap back on between the audio element's `ended` event and
@@ -196,6 +194,15 @@ export default function SparProvider({
   // without holding music off long enough to feel laggy.
   const [ttsTailSettling, setTtsTailSettling] = useState(false);
   const ttsTailTimerRef = useRef<number | null>(null);
+  // Mirror of ttsTailSettling for non-React callers (the post-acquire
+  // guard inside `acquireMicStream`). The state already drives the
+  // consolidated mic-gate effect; the ref lets the async getUserMedia
+  // resolution check the latest value without going stale on a closure
+  // captured before the edge.
+  const ttsTailSettlingRef = useRef(false);
+  useEffect(() => {
+    ttsTailSettlingRef.current = ttsTailSettling;
+  }, [ttsTailSettling]);
   // Voice-activity flag, driven by the SpeechRecognition result
   // stream (not by whether the mic happens to be open). Flips true
   // on any recognised interim or final text, decays back to false
@@ -216,6 +223,12 @@ export default function SparProvider({
   const ttsQueueRef = useRef<string[]>([]);
   const ttsPlayingRef = useRef(false);
   const ttsMutedRef = useRef(false);
+  // Set by flushSpokenText(final=true) when a turn produced spoken
+  // audio. The TTS pipeline fires one extra clip (the configured
+  // sign-off word) once every real chunk has finished playing. Lives
+  // entirely in the audio layer — the AI never sees this word.
+  const signoffArmedRef = useRef(false);
+  const signoffInFlightRef = useRef(false);
   // Mirrors `inCall` for ref-based audio gates (speakChunk runs
   // outside the React render cycle and needs the latest value
   // without having to re-bind on every state change).
@@ -241,7 +254,7 @@ export default function SparProvider({
   const ttsGenRef = useRef(0);
   const spokenCharsRef = useRef(0);
   const ttsPendingRef = useRef(0);
-  const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  const recognitionRef = useRef<{ stop: () => void; abort: () => void } | null>(null);
   const wantListeningRef = useRef(false);
   const restartTimerRef = useRef<number | null>(null);
   const busyRef = useRef(false);
@@ -1463,6 +1476,20 @@ export default function SparProvider({
       ttsIdleRef.current = true;
       setTtsIdle(true);
     }
+    maybeFireSignoff();
+  }
+
+  function maybeFireSignoff() {
+    if (!signoffArmedRef.current) return;
+    if (signoffInFlightRef.current) return;
+    if (ttsPendingRef.current !== 0) return;
+    if (ttsQueueRef.current.length !== 0) return;
+    if (ttsPlayingRef.current) return;
+    const word = readSignoffWord().trim();
+    signoffArmedRef.current = false;
+    if (!word) return;
+    signoffInFlightRef.current = true;
+    speakChunk(word);
   }
 
   function ttsCancel() {
@@ -1493,6 +1520,8 @@ export default function SparProvider({
     }
     ttsPlayingRef.current = false;
     ttsPendingRef.current = 0;
+    signoffArmedRef.current = false;
+    signoffInFlightRef.current = false;
     ttsIdleRef.current = true;
     setTtsIdle(true);
   }
@@ -1553,8 +1582,19 @@ export default function SparProvider({
       // duck gate releases. onPause also covers this, but ended
       // doesn't always fire a separate pause event on every
       // browser, so we duplicate the signal to be sure.
+      //
+      // Set tail-settling synchronously in the SAME render as the
+      // ttsAudible flip. Without this, the consolidated mic-gate
+      // effect runs first with ttsAudible=false / tailSettling=false
+      // and re-acquires the mic for one render — long enough for
+      // macOS to flash the orange capture indicator. Pinning
+      // tailSettling=true here keeps shouldSilence true through the
+      // transition; the tail-settling effect will then schedule the
+      // 450 ms timer normally.
+      setTtsTailSettling(true);
       setTtsAudible(false);
       playNextTts();
+      maybeFireSignoff();
       // If nothing more is queued, fully release the audio element so
       // iOS Safari stops treating it as the active audio session.
       // Without this, the next SpeechRecognition.start() call never
@@ -1577,6 +1617,9 @@ export default function SparProvider({
     }
     function onError() {
       ttsPlayingRef.current = false;
+      // Same synchronous tail-pin as onEnded — close the
+      // ttsAudible→false race that briefly re-acquires the mic.
+      setTtsTailSettling(true);
       setTtsAudible(false);
       playNextTts();
       checkTtsIdle();
@@ -1598,6 +1641,9 @@ export default function SparProvider({
     }
     function onPause() {
       console.info("[YT-FILLER] tts onPause → release duck");
+      // Same synchronous tail-pin as onEnded — close the
+      // ttsAudible→false race that briefly re-acquires the mic.
+      setTtsTailSettling(true);
       setTtsAudible(false);
     }
     el.addEventListener("ended", onEnded);
@@ -1688,6 +1734,10 @@ export default function SparProvider({
       const chunk = tail.slice(0, chunkEnd);
       spokenCharsRef.current += chunkEnd;
       speakChunk(chunk);
+    }
+    if (final && spokenCharsRef.current > 0) {
+      signoffArmedRef.current = true;
+      maybeFireSignoff();
     }
   }
 
@@ -3019,12 +3069,23 @@ export default function SparProvider({
           setVadActive(false);
         }, 800);
       }
-      // Telegram takes priority: even after rec.stop() the browser may
-      // deliver one more buffered final result, and we must NOT route
-      // that into sendMessage — the phone owns the conversation.
+      // Telegram takes priority: even after rec.stop()/rec.abort() the
+      // browser may deliver one more buffered final result, and we must
+      // NOT route that into sendMessage — the phone owns the
+      // conversation.
+      //
+      // We also block on ttsAudible / ttsTailSettling / fillerAudible
+      // directly. busy and ttsIdle don't perfectly cover the audible
+      // window: between TTS chunks ttsIdle can briefly flip true while
+      // the speaker is still emitting (and SR's buffer still holds that
+      // bleed); the dedicated audio gates close that gap so a buffered
+      // echo final lands in the dropped path, not in sendMessage.
       const blocked =
         busyRef.current ||
         !ttsIdleRef.current ||
+        ttsAudibleRef.current ||
+        ttsTailSettlingRef.current ||
+        fillerAudibleRef.current ||
         micMutedRef.current ||
         telegramActiveRef.current;
       const label = blocked && interim.trim() ? `… ${interim.trim()}` : interim.trim();
@@ -3113,7 +3174,7 @@ export default function SparProvider({
     } as unknown as () => void;
     try {
       rec.start();
-      recognitionRef.current = rec as unknown as { stop: () => void };
+      recognitionRef.current = rec as unknown as { stop: () => void; abort: () => void };
       setListening(true);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -3474,6 +3535,11 @@ export default function SparProvider({
 
   // Kill recognition the instant TTS starts emitting audio so the mic
   // never picks up the speaker output and feeds it back as user input.
+  // We use abort() rather than stop() here: stop() flushes SR's audio
+  // buffer and emits one last final result, and that buffer already
+  // contains the leading edge of the TTS — that final is exactly the
+  // "AI's words transcribed as user input" feedback we're trying to
+  // prevent. abort() drops the buffer with no final fired.
   // Hardware track.enabled flips live in the consolidated mic-gate
   // effect below — keeping all the "should the OS see capture?" rules
   // in one place means a new audio source (filler, busy/thinking,
@@ -3483,7 +3549,7 @@ export default function SparProvider({
     if (!ttsAudible) return;
     if (!recognitionRef.current) return;
     try {
-      recognitionRef.current.stop();
+      recognitionRef.current.abort();
     } catch {
       /* already stopping */
     }
@@ -3493,13 +3559,14 @@ export default function SparProvider({
   // ambient pad). Without this the laptop mic samples filler output and
   // feeds it back as a transcript — feedback loop and wrong "user said"
   // events. Mirrors the ttsAudible effect above so the mic-arming path
-  // stays the single owner of "open the mic".
+  // stays the single owner of "open the mic". abort() (not stop()) for
+  // the same buffered-echo reason.
   useEffect(() => {
     fillerAudibleRef.current = fillerAudible;
     if (!fillerAudible) return;
     if (!recognitionRef.current) return;
     try {
-      recognitionRef.current.stop();
+      recognitionRef.current.abort();
     } catch {
       /* already stopping */
     }
@@ -3552,13 +3619,21 @@ export default function SparProvider({
     void acquireMicStream();
   }, [micMuted, ttsAudible, ttsTailSettling, fillerAudible, busy]);
 
-  // Falling-edge tail window for filler suppression. See the
-  // `ttsTailSettling` declaration above for the why. Cancel any
-  // pending clear if TTS becomes audible again mid-tail (next chunk,
-  // re-queue) so we don't drop the gate while audio is still playing.
+  // Falling-edge tail window for ANY audio source. See the
+  // `ttsTailSettling` declaration above for the why — the same logic
+  // applies whether the bleed-source is TTS, news clips, YouTube
+  // music, or fun-fact playback: cutting the mic the instant the
+  // <audio> element's `ended` fires lets the speakers' acoustic tail
+  // (the room reverb / driver decay) into the next mic capture and
+  // SR transcribes it as a phantom user turn. The tail name has
+  // stuck for historical reasons; conceptually it's an "any audio
+  // out → mic stays dark for 450 ms after silence" gate.
+  // Cancel any pending clear if either source goes audible again
+  // mid-tail so we don't drop the gate while audio is still playing.
   useEffect(() => {
-    const POST_TTS_TAIL_MS = 450;
-    if (ttsAudible) {
+    const POST_AUDIO_TAIL_MS = 450;
+    const audible = ttsAudible || fillerAudible;
+    if (audible) {
       if (ttsTailTimerRef.current !== null) {
         window.clearTimeout(ttsTailTimerRef.current);
         ttsTailTimerRef.current = null;
@@ -3573,18 +3648,19 @@ export default function SparProvider({
     ttsTailTimerRef.current = window.setTimeout(() => {
       ttsTailTimerRef.current = null;
       setTtsTailSettling(false);
-      // Re-enabling hardware tracks is owned by the consolidated
-      // mic-gate effect: when ttsTailSettling flips to false here, that
-      // effect re-evaluates and flips track.enabled back on (provided
-      // nothing else — busy, filler, mic-mute — still asks for silence).
-    }, POST_TTS_TAIL_MS);
+      // Re-acquiring the hardware mic stream is owned by the
+      // consolidated mic-gate effect: when ttsTailSettling flips
+      // to false here, that effect re-evaluates and re-acquires
+      // (provided nothing else — busy, filler, ttsAudible,
+      // mic-mute — still asks for silence).
+    }, POST_AUDIO_TAIL_MS);
     return () => {
       if (ttsTailTimerRef.current !== null) {
         window.clearTimeout(ttsTailTimerRef.current);
         ttsTailTimerRef.current = null;
       }
     };
-  }, [ttsAudible]);
+  }, [ttsAudible, fillerAudible]);
 
   const ttsActiveRef = useRef(false);
   useEffect(() => {
@@ -3623,6 +3699,77 @@ export default function SparProvider({
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inCall, busy, listening, ttsIdle, micMuted, voice.channel]);
+
+  // Silence-nudge timer. The user asked for an "annoying training
+  // partner who won't let you zone out": when a voice call is open
+  // and nobody has said anything for ~60 s, fire a proactive turn
+  // that pushes the user — what are you working on, what's stuck,
+  // do you need help. Resets every time the user talks (vadActive
+  // edge), every time the assistant talks (ttsAudible / busy edge),
+  // and bails on Telegram channel because the phone owns the audio
+  // there and a dashboard nudge would step on the call.
+  //
+  // Cooldown: 3 minutes between nudges so we don't pile them up if
+  // the user takes a long thinking break. The server-side proactive
+  // helper has its own 5 min global cooldown, so the effective
+  // floor is 5 min — that's fine; better to under-nudge than to
+  // pester through a focused stretch.
+  const lastNudgeAtRef = useRef(0);
+  useEffect(() => {
+    const NUDGE_SILENCE_MS = 60_000;
+    const NUDGE_COOLDOWN_MS = 180_000;
+    if (!inCall) return;
+    if (voice.channel === "telegram") return;
+    if (busy) return;
+    if (ttsAudible || ttsTailSettling || !ttsIdle) return;
+    if (vadActive) return;
+    if (micMuted) return;
+    if (!wantListeningRef.current) return;
+
+    // Honour the cooldown by stretching the timer when we'd otherwise
+    // fire too soon — that way the next vadActive edge still resets
+    // it cleanly without a separate "armed but waiting" branch.
+    const sinceLast = Date.now() - lastNudgeAtRef.current;
+    const wait = Math.max(NUDGE_SILENCE_MS, NUDGE_COOLDOWN_MS - sinceLast);
+
+    const t = window.setTimeout(() => {
+      // Re-check at fire time — any of these can flip during the wait
+      // and we'd rather drop a nudge than land it mid-utterance.
+      if (!inCallRef.current) return;
+      if (busyRef.current) return;
+      if (ttsAudibleRef.current) return;
+      if (ttsTailSettlingRef.current) return;
+      if (telegramActiveRef.current) return;
+      if (micMutedRef.current) return;
+      if (Date.now() - lastNudgeAtRef.current < NUDGE_COOLDOWN_MS) return;
+      lastNudgeAtRef.current = Date.now();
+      void fetch("/api/spar/proactive", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "custom",
+          directive:
+            "Voice call is open and the user has been silent for about a minute. " +
+            "Push them like an annoying training partner: ask what they're working on, " +
+            "what's blocking them, or whether they need help thinking through something. " +
+            "Energetic, warm, mildly impatient — don't let them zone out. " +
+            "One or two short sentences. Plain prose. End on a question.",
+        }),
+      }).catch(() => {
+        /* network blip — the next silence window will try again */
+      });
+    }, wait);
+    return () => window.clearTimeout(t);
+  }, [
+    inCall,
+    voice.channel,
+    busy,
+    ttsAudible,
+    ttsTailSettling,
+    ttsIdle,
+    vadActive,
+    micMuted,
+  ]);
 
   const saveHeartbeat = useCallback(async () => {
     setSavingHeartbeat(true);
