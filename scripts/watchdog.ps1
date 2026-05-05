@@ -334,6 +334,30 @@ function Stop-KokoroDuplicates {
   }
 }
 
+function Get-PortListenerPid {
+  # Returns the PID currently LISTENING on $Port (IPv4 or IPv6 wildcard
+  # bind), or $null if nothing is bound. Used by Run-Repair to detect
+  # a wedged node that schtasks /End couldn't kill.
+  param([int]$Port)
+  try {
+    $line = & netstat.exe -ano -p tcp 2>$null |
+      Select-String -Pattern "(?:0\.0\.0\.0|\[::\]):${Port}\s+(?:0\.0\.0\.0|\[::\]):0\s+LISTENING\s+(\d+)" |
+      Select-Object -First 1
+    if (-not $line) { return $null }
+    return [int]$line.Matches[0].Groups[1].Value
+  } catch {
+    return $null
+  }
+}
+
+# Map task -> port the task's process owns. When schtasks /End fails to
+# stop a wedged process, we look up the port and force-kill the PID
+# that's still bound. cloudflared doesn't listen on a fixed local port
+# so it's omitted (kill-by-name handles it cheaper anyway).
+$TaskPorts = @{}
+$TaskPorts[$DashboardTask] = 3737
+$TaskPorts[$KokoroTask]    = 3939
+
 function Run-Repair {
   param([string]$TaskName)
   # /End first so a stuck process (npm dev compiling forever, cloudflared
@@ -344,6 +368,29 @@ function Run-Repair {
     & schtasks.exe /End /TN $TaskName 2>$null | Out-Null
   } catch { }
   Start-Sleep -Milliseconds 500
+
+  # Force-kill fallback. schtasks /End on a wedged Node — event loop
+  # blocked, ignoring the equivalent of a graceful shutdown — exits 0
+  # but leaves the process alive. The 2026-04-28 evening outage went
+  # like this: pid 26324 wedged at ~20:10, watchdog logged 5 successive
+  # /End;/Run cycles, each "exit=0", pid 26324 kept on running, all
+  # probes timed out. Now: after /End, look up whoever is still
+  # LISTENING on the task's port and kill by PID.
+  if ($TaskPorts.ContainsKey($TaskName)) {
+    $port = $TaskPorts[$TaskName]
+    $still = Get-PortListenerPid -Port $port
+    if ($still) {
+      try {
+        $proc = Get-Process -Id $still -ErrorAction Stop
+        Write-Log 'ACT' "force-kill: pid=$still still on :$port after /End ($TaskName) — killing (name=$($proc.ProcessName) RSS=$([int]($proc.WorkingSet64/1MB))MB)"
+        Stop-Process -Id $still -Force -ErrorAction Stop
+        Start-Sleep -Milliseconds 800
+      } catch {
+        Write-Log 'ERROR' "force-kill failed for pid=$still : $($_.Exception.Message)"
+      }
+    }
+  }
+
   try {
     & schtasks.exe /Run /TN $TaskName | Out-Null
     Write-Log 'INFO' "schtasks /End;/Run $TaskName → exit=$LASTEXITCODE"
@@ -553,11 +600,115 @@ function Fix-DetectFatalLoop {
   }
 }
 
+function Fix-ZombiePortHolder {
+  # Detect the failure mode where a previous node process is bound to
+  # 3737 but the run-loop is crash-looping because assertPortFree() is
+  # rejecting every fresh start. Symptom in app.log:
+  #   "[server] fatal: Error: port 3737 is already in use ..."
+  # repeating every ~13 seconds. The dashboard probe still answers 200
+  # from the zombie, so the rule-based probe layer never trips — but
+  # the zombie's child processes (kokoro, telegram-voice, autopilot
+  # cron) are dead, so the spar feature is broken.
+  #
+  # Hit on 2026-04-28: a node from 13:58:50 was holding the port and
+  # the run-loop had logged ~25 fatal lines without recovery. A clean
+  # 200 hid the breakage from every other layer.
+  #
+  # Fix: if the tail shows ≥3 of these fatal lines in the last 100,
+  # find the actual port owner via netstat, kill it, and let the
+  # run-loop bind on its next iteration. Idempotent because once the
+  # zombie is gone the new server overwrites the log pattern within
+  # one cycle.
+  if (-not (Test-Path $AppLogFile)) { return }
+  try {
+    $tail = Get-Content -Path $AppLogFile -Tail 100 -ErrorAction Stop
+    $hits = ($tail | Select-String -Pattern 'port 3737 is already in use' -SimpleMatch).Count
+    if ($hits -lt 3) { return }
+    Write-Log 'ALERT' "zombie-port pattern: $hits 'port already in use' lines in last 100 — locating PID"
+    $owner = & netstat.exe -ano -p tcp 2>$null |
+      Select-String -Pattern '\s+0\.0\.0\.0:3737\s+0\.0\.0\.0:0\s+LISTENING\s+(\d+)|\s+\[::\]:3737\s+\[::\]:0\s+LISTENING\s+(\d+)' |
+      ForEach-Object {
+        $m = $_.Matches[0]
+        if ($m.Groups[1].Value) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+      } |
+      Select-Object -First 1
+    if (-not $owner) {
+      Write-Log 'WARN' "no LISTENING owner on 3737 — pattern may be stale, leaving alone"
+      return
+    }
+    try {
+      $proc = Get-Process -Id $owner -ErrorAction Stop
+      Write-Log 'ACT' "killing zombie holding 3737: pid=$owner name=$($proc.ProcessName) age=$([int](((Get-Date) - $proc.StartTime).TotalMinutes))m"
+      Stop-Process -Id $owner -Force -ErrorAction Stop
+      # Give the OS a moment to release the socket before the run-loop
+      # tries again. TIME_WAIT can hold the bind for a few seconds; we
+      # just need the LISTENING state cleared.
+      Start-Sleep -Milliseconds 800
+      # And kick the App task so a fresh run-loop is launched. The
+      # watchdog cooldown protects us from repair-storming this.
+      Run-Repair $DashboardTask
+    } catch {
+      Write-Log 'ERROR' "could not kill zombie pid=$owner : $($_.Exception.Message)"
+    }
+  } catch {
+    Write-Log 'ERROR' "Fix-ZombiePortHolder threw: $($_.Exception.Message)"
+  }
+}
+
+function Fix-StaleServerVsBundle {
+  # Detect the failure mode where someone (operator, another tool, the
+  # Cron-RebuildIfStale path that broke pre-restart) regenerated `.next`
+  # AFTER the running server started. Next.js holds an in-memory
+  # manifest of static assets that's only refreshed on process boot —
+  # so the server's HTML output references the NEW asset hashes
+  # (because Next reads the page manifest at request time), but its
+  # static handler 404s those same files (because they were added to
+  # disk after startup and aren't in the in-memory whitelist).
+  #
+  # Symptom: page loads, all CSS link tags 404, page renders unstyled.
+  # Hit on 2026-04-29 morning: operator ran `npm run build` manually
+  # while the server kept running. CSS file `0luqno3x-n6p2.css` was
+  # 93163 bytes on disk but the server returned 404 for it.
+  #
+  # Fix: if BUILD_ID mtime > server StartTime + slack, the bundle was
+  # regenerated under the running process. End + Run the App task so a
+  # fresh node picks up a coherent manifest. 60-second slack absorbs
+  # the legit case where the run-loop builds *during* boot.
+  if (-not (Test-Path $BuildIdFile)) { return }
+  if (Test-BuildInProgress) { return }
+  $owner = Get-PortListenerPid -Port 3737
+  if (-not $owner) { return }
+  try {
+    $proc = Get-Process -Id $owner -ErrorAction Stop
+    $bundle = (Get-Item $BuildIdFile).LastWriteTime
+    $serverStart = $proc.StartTime
+    # Skip if bundle is older than the server (normal — server boots
+    # against an existing build).
+    if ($bundle -le $serverStart.AddSeconds(60)) { return }
+    # Stamp file so we don't re-trigger every tick if the restart
+    # somehow doesn't take. The 30-min cron handles persistent failure.
+    if (Test-Path $LastRebuildStampFile) {
+      $stampAge = ((Get-Date) - (Get-Item $LastRebuildStampFile).LastWriteTime).TotalSeconds
+      if ($stampAge -lt 120) { return }
+    }
+    $skewSec = [int]($bundle - $serverStart).TotalSeconds
+    Write-Log 'ALERT' "stale-server-vs-bundle: server pid=$owner started=$($serverStart.ToString('s')) but BUILD_ID is $($bundle.ToString('s')) (${skewSec}s newer) — restarting App to pick up new bundle"
+    Get-UtcIso | Set-Content -Path $LastRebuildStampFile -Encoding ASCII
+    Run-Repair $DashboardTask
+    $cooldownUntil['dashboard'] = (Get-Date).AddSeconds(120)
+    $cooldownUntil['kokoro']    = (Get-Date).AddSeconds(60)
+  } catch {
+    Write-Log 'ERROR' "Fix-StaleServerVsBundle threw: $($_.Exception.Message)"
+  }
+}
+
 function Tick-AutoFix {
   # Run all preventive fixers. Each is best-effort and isolated so one
   # failure doesn't poison the rest.
   try { Fix-EnvLocalMissingKeys | Out-Null } catch { Write-Log 'ERROR' "env-fixer: $($_.Exception.Message)" }
   try { Fix-MissingBuildId      | Out-Null } catch { Write-Log 'ERROR' "build-fixer: $($_.Exception.Message)" }
+  try { Fix-ZombiePortHolder                } catch { Write-Log 'ERROR' "zombie-port-fixer: $($_.Exception.Message)" }
+  try { Fix-StaleServerVsBundle             } catch { Write-Log 'ERROR' "stale-bundle-fixer: $($_.Exception.Message)" }
   try { Fix-DetectFatalLoop                 } catch { Write-Log 'ERROR' "fatal-loop-detector: $($_.Exception.Message)" }
 }
 
@@ -662,7 +813,15 @@ function Cron-RebuildIfStale {
   $buildOk = $false
   try {
     Push-Location $RepoRoot
-    & npm.cmd run build *>> $AppLogFile
+    # Don't pipe build stdout into app.log. The wedged-node failure
+    # mode (2026-04-28 20:10) leaves the running server holding an
+    # exclusive write handle on app.log, and `npm run build *>> app.log`
+    # then throws "file is being used by another process" before the
+    # build even starts. Pipe to a dedicated build-log file instead —
+    # the operator can still tail it, and we never collide with the
+    # running server.
+    $buildLogFile = Join-Path $LogDir 'build.log'
+    & npm.cmd run build *>> $buildLogFile
     $buildOk = ($LASTEXITCODE -eq 0) -and (Test-Path $BuildIdFile) -and ((Get-Item $BuildIdFile).LastWriteTime -gt $buildMtime)
   } catch {
     Write-Log 'ERROR' "rebuild threw: $($_.Exception.Message)"

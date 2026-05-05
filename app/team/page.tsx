@@ -1,6 +1,6 @@
 import { requireUser } from "@/lib/guard";
 import Topbar from "@/components/Topbar";
-import ChatClient from "@/components/ChatClient";
+import TeamHub from "@/components/TeamHub";
 import { listChannelsForUser } from "@/lib/chat";
 import { visibleProjects } from "@/lib/access";
 
@@ -25,11 +25,11 @@ export default async function TeamPage() {
             Team
           </h1>
           <p className="mt-2 text-sm text-neutral-400">
-            Channels, project rooms, and direct messages.
+            Chat, activity monitor, and people — all in one place.
           </p>
         </header>
 
-        <ChatClient
+        <TeamHub
           currentUser={{ id: user.id, name: user.name, role: user.role }}
           channels={channels}
           projects={projects}

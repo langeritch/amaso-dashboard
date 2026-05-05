@@ -38,8 +38,10 @@ import next from "next";
 import { getWatcher } from "./lib/watcher";
 import { createWsServer } from "./lib/ws";
 import { createTerminalWs } from "./lib/terminal-ws";
+import { init as initTerminalBackend } from "./lib/terminal-backend";
 import { createBrowserWs } from "./lib/browser-ws";
 import { createCompanionWs } from "./lib/companion-ws";
+import { createSpar2Ws } from "./lib/spar2-ws";
 import { shutdownAll as shutdownLiveBrowsers } from "./lib/browser-stream";
 import { seedFromConfig } from "./lib/history";
 import { startKokoro } from "./lib/kokoro";
@@ -110,10 +112,29 @@ function boot(step: string) {
   };
   process.on("uncaughtException", (err) => {
     dump("uncaughtException", err);
-    // Give 250ms for the write to flush before we go down. Node will
-    // exit on its own after the listener; we just want the log line
-    // committed first.
-    setTimeout(() => process.exit(1), 250).unref();
+    // Classify fatal vs. survivable before deciding to exit.
+    //
+    // Survivable: transient WebSocket / stream errors that only kill one
+    // connection. The rest of the server is unaffected and exiting would
+    // cause a full 2-minute rebuild+restart cycle for no benefit.
+    //   - "X is not a function" — callback race in a WS data handler; the
+    //     individual session is dead but the dashboard keeps serving.
+    //   - "write EOF" / EPIPE / ECONNRESET — remote hung up mid-write;
+    //     again, one connection, not the whole server.
+    //
+    // Fatal: anything else (OOM, missing module, bad initialisation) where
+    // continued operation is undefined behaviour.
+    const msg = err instanceof Error ? (err.message ?? "") : String(err);
+    const survivable =
+      /is not a function/i.test(msg) ||
+      /write EOF/i.test(msg) ||
+      /EPIPE/i.test(msg) ||
+      /ECONNRESET/i.test(msg);
+    if (!survivable) {
+      // Give 250ms for the write to flush before we go down.
+      setTimeout(() => process.exit(1), 250).unref();
+    }
+    // Survivable: just log; the server keeps running.
   });
   process.on("unhandledRejection", (reason) => {
     // Unhandled rejections used to silently leak — every chokidar
@@ -287,10 +308,21 @@ async function main() {
   boot("startTelegramVoice() dispatched");
   startHeartbeatCron();
   boot("heartbeat cron started");
+  // PTY backend re-adoption — when ptyServiceUrl is set, ask the external
+  // service which sessions are still alive and pre-populate the local
+  // mirrors so getSession()/getStatus() return them on the very first
+  // browser connect after a dashboard restart. No-op when the toggle is
+  // off. Fired in the background — terminals come up either way; this
+  // just shaves the first-render latency when the service is reachable.
+  void initTerminalBackend().catch((err) => {
+    console.error("[server] pty-backend init failed:", err);
+  });
+  boot("pty-backend init dispatched");
   const ws = createWsServer();
   const termWs = createTerminalWs();
   const browserWs = createBrowserWs();
   const companionWs = createCompanionWs();
+  const spar2Ws = createSpar2Ws();
   boot("ws servers constructed");
 
   const server = createServer((req, res) => {
@@ -346,6 +378,10 @@ async function main() {
       browserWs.handleUpgrade(req, socket, head);
     } else if (url.startsWith("/api/companion")) {
       companionWs.handleUpgrade(req, socket, head);
+    } else if (url.startsWith("/api/spar2")) {
+      // /spar2 — singleton Hermes-in-WSL-tmux session for the operator.
+      // Admin-only; CSWSH guard with X-Forwarded-Host inside the module.
+      spar2Ws.handleUpgrade(req, socket, head);
     } else if (url.startsWith("/_next")) {
       // Next.js HMR and any other framework-internal upgrades. Hand
       // them off to Next's own handler — rejecting these used to

@@ -354,9 +354,17 @@ function OpenLoopsCard({ loops }: { loops: string[] | null }) {
       title="Open loops"
       icon={Brain}
       badge={
-        loops ? (
-          <span className="text-[10px] text-neutral-500">{loops.length}</span>
-        ) : null
+        <span className="flex items-center gap-2">
+          {loops && (
+            <span className="text-[10px] text-neutral-500">{loops.length}</span>
+          )}
+          <Link
+            href="/heartbeat"
+            className="amaso-fx text-[10px] text-neutral-500 underline-offset-2 hover:text-neutral-200 hover:underline"
+          >
+            Heartbeat →
+          </Link>
+        </span>
       }
     >
       {!loops ? (

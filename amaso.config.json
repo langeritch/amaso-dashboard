@@ -1,5 +1,6 @@
 {
-  "_comment": "previewUrl = public tunnel URL (universal access). devPort = local port the dev server binds to. subPath scopes an entry to a subfolder of a shared codebase.",
+  "_comment": "previewUrl = public tunnel URL (universal access). devPort = local port the dev server binds to. subPath scopes an entry to a subfolder of a shared codebase. ptyServiceUrl points at an external amaso-pty-service for terminal persistence across dashboard restarts (empty = use in-process PTYs); PTY_SERVICE_URL env var overrides.",
+  "ptyServiceUrl": "http://127.0.0.1:7850",
   "projects": [
     {
       "id": "neva17",
@@ -16,6 +17,7 @@
       "path": "C:/Users/santi/projects/amaso-portfolio",
       "visibility": "team",
       "previewUrl": "https://amaso-portfolio.amaso.nl",
+      "liveUrl": "https://amaso.nl",
       "devPort": 1718
     },
     {
@@ -44,20 +46,8 @@
       "devPort": 1722
     },
     {
-      "id": "project-dashboard",
-      "name": "Project Dashboard 1",
-      "path": "C:/Users/santi/projects/amaso-dashboard",
-      "visibility": "team"
-    },
-    {
       "id": "dashboard-sparring-partner",
       "name": "Project Dashboard 2",
-      "path": "C:/Users/santi/projects/amaso-dashboard",
-      "visibility": "team"
-    },
-    {
-      "id": "dashboard-companion",
-      "name": "Project Dashboard 3",
       "path": "C:/Users/santi/projects/amaso-dashboard",
       "visibility": "team"
     },
@@ -90,8 +80,20 @@
       "name": "SUPERSKUNK Coffeeshop",
       "path": "C:/Users/santi/projects/superskunk",
       "visibility": "public",
-      "previewUrl": "https://superskunk.amaso.nl",
+      "previewUrl": "https://superskunk-amsterdam.vercel.app",
       "devPort": 1723
+    },
+    {
+      "id": "tradingalgo",
+      "name": "Trading Algo",
+      "path": "C:/Users/santi/projects/tradingalgo",
+      "visibility": "team"
+    },
+    {
+      "id": "amaso-leads",
+      "name": "Amaso Leads",
+      "path": "C:/Users/santi/projects/amaso-leads",
+      "visibility": "team"
     }
   ],
   "ignore": [
@@ -117,5 +119,20 @@
     "neva17(4)",
     "neva17(5)",
     "neva17(6)"
-  ]
+  ],
+  "claudeAccounts": [
+    {
+      "id": "default",
+      "name": "Default (~/.claude)",
+      "credentialsDir": "C:/Users/santi/.claude",
+      "apiKey": null
+    },
+    {
+      "id": "77a1364e",
+      "name": "Account 2026-05-02 17:50",
+      "credentialsDir": "C:/Users/santi/.amaso/claude-accounts/77a1364e",
+      "apiKey": null
+    }
+  ],
+  "activeClaudeAccountId": "default"
 }

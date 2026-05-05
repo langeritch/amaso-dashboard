@@ -44,8 +44,6 @@ export interface YouTubeFillerSnapshot {
 export type FillerMode =
   | "news"
   | "youtube"
-  | "hum"
-  | "off"
   | "fun-facts"
   | "calendar"
   | "quiet";
@@ -88,22 +86,25 @@ const EMPTY: VoiceChannelSnapshot = {
   turnCount: 0,
   turns: [],
   youtube: EMPTY_YT,
-  fillerMode: "news",
+  fillerMode: "quiet",
 };
 
 function normaliseFillerMode(raw: unknown): FillerMode {
   if (
     raw === "news" ||
     raw === "youtube" ||
-    raw === "hum" ||
-    raw === "off" ||
     raw === "fun-facts" ||
     raw === "calendar" ||
     raw === "quiet"
   ) {
     return raw;
   }
-  return "news";
+  // Legacy "hum" persisted on disk → treat as quiet (its alias).
+  // Legacy "off" likewise collapses to quiet — silencing the
+  // assistant entirely now lives on the TTS speaker toggle, not
+  // the persisted filler mode.
+  if (raw === "hum" || raw === "off") return "quiet";
+  return "quiet";
 }
 
 export function useVoiceChannel(

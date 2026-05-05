@@ -203,9 +203,15 @@ export function noteActivity(projectId: string, sessionId?: string): void {
     );
   }
 
-  // Lazy import to dodge the cycle.
+  // Lazy import to dodge the cycle. Guard against the partial-init race:
+  // if terminal-backend is still being initialised when the first data
+  // chunk fires, require() returns an incomplete module and getSession is
+  // undefined — calling it would throw "TypeError: s is not a function"
+  // and crash the server. Returning early is safe: noteActivity() runs on
+  // every chunk, so we'll get another chance on the very next byte.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getSession } = require("./terminal-backend") as typeof import("./terminal-backend");
+  if (typeof getSession !== "function") return;
   const session = getSession(projectId, sid);
   if (!session) return;
   const detection = detectWorkerState(

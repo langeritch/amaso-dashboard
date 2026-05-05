@@ -1,32 +1,21 @@
 import { requireUser } from "@/lib/guard";
-import { listChannelsForUser } from "@/lib/chat";
-import { visibleProjects } from "@/lib/access";
 import Topbar from "@/components/Topbar";
-import ChatClient from "@/components/ChatClient";
 
 export const dynamic = "force-dynamic";
 
-export default async function ChatPage() {
-  // requireUser handles client → /client redirect.
+export default async function HomePage() {
   const user = await requireUser();
-  const channels = listChannelsForUser(user);
-  const projects = visibleProjects(user).map((p) => ({ id: p.id, name: p.name }));
-  const initialChannelId =
-    channels.find((c) => c.kind === "general")?.id ?? channels[0]?.id ?? null;
-
   return (
-    // h-[100dvh] (not min-h-screen) so the layout actually shrinks when the
-    // iOS keyboard opens — otherwise the page stays 100vh tall, the body
-    // starts scrolling, and the Topbar + channel header drift off the top
-    // while the input disappears behind the keyboard.
-    <div className="flex h-[100dvh] flex-col">
+    <div className="flex min-h-[100dvh] flex-col">
       <Topbar user={user} />
-      <ChatClient
-        currentUser={{ id: user.id, name: user.name, role: user.role }}
-        channels={channels}
-        projects={projects}
-        initialChannelId={initialChannelId}
-      />
+      <main className="flex flex-1 items-center justify-center px-4">
+        <div className="text-center">
+          <h1 className="text-4xl font-semibold tracking-tight text-neutral-100 sm:text-5xl">
+            Home
+          </h1>
+          <p className="mt-3 text-sm text-neutral-500">Coming soon</p>
+        </div>
+      </main>
     </div>
   );
 }

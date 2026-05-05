@@ -4,9 +4,20 @@
 // The internal API route and any future in-process callers share this.
 
 import fs from "node:fs/promises";
-import { getProject, resolveInProject } from "./config";
+import nodeFs from "node:fs";
+import path from "node:path";
+import {
+  addProject,
+  getProject,
+  removeProject,
+  resolveInProject,
+  type ProjectConfig,
+  type ProjectVisibility,
+} from "./config";
 import { visibleProjects, canAccessProject } from "./access";
 import { readHeartbeat, writeHeartbeat, isSuperUser } from "./heartbeat";
+import { readProfile, writeProfile } from "./user-profile";
+import { BRAIN_ROOT } from "./spar-brain";
 import { getHistory } from "./history";
 import {
   getSession,
@@ -14,11 +25,24 @@ import {
   start as startTerminal,
   stop as stopTerminalSession,
   getStatus as getTerminalStatus,
-} from "./terminal";
+} from "./terminal-backend";
 import { getDb, type User } from "./db";
 import { dispatchToProject } from "./spar-dispatch";
 import { readGraph, writeGraph, type SparGraph } from "./spar-graph";
-import { broadcastRemark, broadcastChatMessage } from "./ws";
+import {
+  broadcastRemark,
+  broadcastChatMessage,
+  broadcastSparRemoteControl,
+  type SparRemoteControlAction,
+  type SparRemoteControlPayload,
+} from "./ws";
+import {
+  enableAutopilot,
+  disableAutopilot,
+  isAutopilotEnabled,
+  readAutopilotDirective,
+  writeAutopilotDirective,
+} from "./autopilot";
 import { deleteAttachmentsOfRemark } from "./attachments";
 import {
   listChannelsForUser,
@@ -68,14 +92,46 @@ export const ANSI_REGEX =
 // Braille spinner dots + Unicode box-drawing + block elements used by
 // Claude Code's TUI chrome.
 export const TUI_CHROME_REGEX = /[─-▟⠀-⣿]/g;
+// Strips every CR-overwritten segment on a line, keeping only the last
+// (visible) write. The previous form `/^.*\r(?!\n)/gm` only stripped the
+// FIRST overwrite per line in JS — `^` in m-mode anchors only after `\n`,
+// not after a lone `\r`, so `Thinking (1s)\rThinking (2s)\rThinking (3s)`
+// only lost the leading "Thinking (1s)" segment. Non-anchored form
+// catches every overwrite. The `(?!\n)` lookahead leaves CRLF row
+// separators alone.
 // eslint-disable-next-line no-control-regex
-const CARRIAGE_OVERWRITE_REGEX = /^.*\r(?!\n)/gm;
+export const CARRIAGE_OVERWRITE_REGEX = /[^\r\n]*\r(?!\n)/g;
+
+// Per-line carriage-return collapse. Splits each \n-delimited row on \r
+// and returns the last non-empty segment — what the user actually sees
+// after Claude Code rewrites a status line in place. Used by both
+// cleanScrollback and detectTerminalState so the visible text and the
+// state heuristic always agree on "what's on screen right now".
+export function collapseCarriageReturns(text: string): string {
+  return text
+    .split("\n")
+    .map((row) => {
+      if (!row.includes("\r")) return row;
+      const segs = row.split("\r");
+      for (let i = segs.length - 1; i >= 0; i--) {
+        if (segs[i].length > 0) return segs[i];
+      }
+      return "";
+    })
+    .join("\n");
+}
 
 // Whole lines to drop: Claude Code's status and chrome decorations.
 // Each regex matches a single line after ANSI + box-drawing strip.
+// Completion lines ("Cogitated for 2s") must survive cleaning — see
+// COMPLETION_KEEP_RX below. The noise regexes intentionally use the
+// present-participle form ("cogitating", not "cogitat\w*") so they
+// never accidentally swallow a past-tense completion line when the
+// spinner character is a plain asterisk.
+const COMPLETION_KEEP_RX = /\w+(?:ed|t)\s+for\s+(?:\d+\s*m\s+)?\d+\s*s/i;
 const LINE_NOISE_REGEXES: RegExp[] = [
-  /^\s*(cogitat\w*|baking|thinking|churning|processing|pondering|musing|deliberating|crafting|scheming|simmering|brewing)\b.*for\s+\d.*$/i,
-  /^\s*\*\s+(cogitat\w*|baking|thinking|churning|processing|pondering).*$/i,
+  /^\s*(cogitating|baking|thinking|churning|processing|pondering|musing|deliberating|crafting|scheming|simmering|brewing)\b.*for\s+\d.*$/i,
+  /^\s*\*\s+(cogitating|baking|thinking|churning|processing|pondering).*$/i,
   /^.*\(esc to interrupt\).*$/i,
   /^.*\(shift\+tab.*\).*$/i,
   /^.*\(ctrl\+c.*\).*$/i,
@@ -91,14 +147,17 @@ const LINE_NOISE_REGEXES: RegExp[] = [
 
 export function cleanScrollback(raw: string): string {
   let s = raw.replace(ANSI_REGEX, "");
-  // Collapse carriage-return overwrites (status lines that rewrite the
-  // same row). Keep only the last version of each \r-overwritten line.
-  s = s.replace(CARRIAGE_OVERWRITE_REGEX, "");
+  // Collapse carriage-return overwrites per-line so only the final
+  // visible segment of a rewritten status row survives.
+  s = collapseCarriageReturns(s);
   s = s.replace(TUI_CHROME_REGEX, "");
   // Drop noise lines wholesale.
   s = s
     .split(/\r?\n/)
-    .filter((line) => !LINE_NOISE_REGEXES.some((rx) => rx.test(line)))
+    .filter((line) => {
+      if (COMPLETION_KEEP_RX.test(line)) return true;
+      return !LINE_NOISE_REGEXES.some((rx) => rx.test(line));
+    })
     .join("\n");
   // Compress runs of blank lines.
   s = s.replace(/\n{3,}/g, "\n\n");
@@ -107,13 +166,69 @@ export function cleanScrollback(raw: string): string {
   return s.trimEnd();
 }
 
+// Patterns shared across detection passes. Hoisted out of the function
+// so worker-status / autopilot can reuse them if needed and so the JIT
+// doesn't recompile them per call.
+//
+// Active "thinking" status row. Two shapes:
+//   • verb-only with ellipsis for the first ~1s before the timer kicks in
+//     ("✻ Tomfoolering…", "★ Sublimating...")
+//   • verb + parenthesised timer once Claude has elapsed seconds to show
+//     ("✢ Tomfoolering… (9s · ↓ 312 tokens)", "Cogitating (1m 4s · esc to interrupt)")
+// Anchoring on a leading word boundary or one of Claude Code's spinner
+// glyphs avoids false-positives like "during" or "going" appearing
+// mid-sentence in streamed response text.
+const THINKING_VERB_PREFIX = `(?:^|[\\s★⟡✻✢✦✶✽◆◉●○◦·*])`;
+const THINKING_TIMER_RX = new RegExp(
+  `${THINKING_VERB_PREFIX}\\s*[A-Za-z][a-zA-Z]+ing\\b[^\\n]{0,120}\\(\\s*(?:[^()]*?\\s)?\\d+\\s*s\\b`,
+  "i",
+);
+const THINKING_ELLIPSIS_RX = new RegExp(
+  `${THINKING_VERB_PREFIX}\\s*[A-Za-z][a-zA-Z]+ing(?:…|\\.\\.\\.)`,
+  "i",
+);
+// Past-tense completion summary printed when the turn ends. Match \w+ed
+// or \w+t for irregulars ("dealt", "built"). Excludes the in-flight form
+// (no "ing\b" before "for") so this never accidentally fires on a
+// "Cogitating … for 9s" status line.
+const COMPLETION_RX =
+  /\b(?!\w+ing\b)\w+(?:ed|t)\s+for\s+(?:\d+\s*m\s+)?\d+\s*s\b/i;
+// Bare input prompt (just the chevron, no typed text).
+const BARE_PROMPT_RX = /^\s*[>│▌❯›]\s*$/;
+// Input prompt with text already typed but not submitted.
+const TYPED_PROMPT_RX = /^\s*[>❯›]\s+\S/;
+// Tool-use callout printed by Claude Code while running a tool. The
+// glyph + tool-name pattern is stable across the supported tools.
+const TOOL_USE_RX =
+  /^\s*[●⏺⎯○◯◉]\s*(?:Read|Edit|Write|Bash|Grep|Glob|Update|MultiEdit|NotebookEdit|TodoWrite|WebFetch|WebSearch|Task|Agent)\s*\(/;
+// Lines that are TUI chrome / footer decorations rather than content;
+// skipped when we walk back from the buffer end looking for the actual
+// last visible row of output.
+const FOOTER_SKIP_RX: RegExp[] = [
+  /\bbypass\s+permissions\b/i,
+  /\(shift\+tab/i,
+  /shift\+tab\s+to\s+cycle/i,
+  /\besc\s+to\s+interrupt/i,
+  /\(ctrl\+c/i,
+  /accept edits/i,
+  /MCP\s+server\s+needs\s+auth/i,
+  /^\s*[◉◯●○]\s*\w+\s*·/,
+];
+
 export function detectTerminalState(
   clean: string,
 ): { state: string; hint: string } {
-  const tailLines = clean.split(/\r?\n/).slice(-40);
-  const tailText = tailLines.join("\n");
+  // (0) Per-line CR collapse. Claude Code rewrites status text in place
+  // via \r; if a row holds "Thinking (1s)\rThinking (2s)\rThinking (3s)"
+  // we want to detect on "Thinking (3s)" — the visible segment — not
+  // accidentally match a stale earlier write.
+  const collapsed = collapseCarriageReturns(clean);
+  const allRows = collapsed.split("\n");
+  const tailRows = allRows.slice(-60);
+  const tailText = tailRows.join("\n");
   const lower = tailText.toLowerCase();
 
+  // (1) Permission gate first — most urgent.
   const hasYesNoMenu =
     /\b1\.\s*yes\b/i.test(tailText) && /\b2\.\s*no\b/i.test(tailText);
   if (
@@ -130,39 +245,120 @@ export function detectTerminalState(
         "If they approve, send '1' via send_keys_to_project.",
     };
   }
-  // At-prompt check runs before "thinking" so a stale completion line
-  // ("✻ Cogitated for 1m 16s") above the live "❯" can't outrank the
-  // prompt sitting below it.
-  const nonEmpty = tailLines.map((l) => l.trim()).filter(Boolean);
-  const lastLine = nonEmpty[nonEmpty.length - 1] ?? "";
-  if (/^\s*[>│▌❯]\s*$/.test(lastLine)) {
+
+  // (2) Footer "esc to interrupt" is Claude Code's definitive busy
+  // signal — it's printed in the bottom hint row only while a turn is
+  // actively running (thinking, tool use, or response stream). But the
+  // tail will hold many stale footer copies from earlier frames in a
+  // long turn, so we have to look at the LATEST footer line, not just
+  // any footer in the buffer. Walk back from the end until we hit the
+  // bottom-most line that looks like a Claude Code footer; if THAT
+  // one mentions "esc to interrupt", the current turn is still alive.
+  const FOOTER_SHAPE_RX = /\bbypass\s+permissions\b|shift\+tab\s+to\s+cycle/i;
+  for (let i = tailRows.length - 1; i >= 0; i--) {
+    const t = tailRows[i].trim();
+    if (!t) continue;
+    if (FOOTER_SHAPE_RX.test(t)) {
+      if (/\besc\s+to\s+interrupt\b/i.test(t)) {
+        return {
+          state: "thinking",
+          hint:
+            "Claude Code is still processing — let it run, don't narrate the status line.",
+        };
+      }
+      break;
+    }
+  }
+
+  // (3) Scan tail for the latest signals. We want positions, not just
+  // booleans, so we can disambiguate "thinking line above input box"
+  // from "completion line above input box" (both have the bare ❯ below).
+  let lastThinkingIdx = -1;
+  let lastCompletionIdx = -1;
+  let lastBarePromptIdx = -1;
+  let lastTypedPromptIdx = -1;
+  let lastToolUseIdx = -1;
+  for (let i = 0; i < tailRows.length; i++) {
+    const t = tailRows[i].trim();
+    if (!t) continue;
+    if (THINKING_TIMER_RX.test(t) || THINKING_ELLIPSIS_RX.test(t)) {
+      lastThinkingIdx = i;
+    }
+    if (COMPLETION_RX.test(t)) lastCompletionIdx = i;
+    if (BARE_PROMPT_RX.test(t)) lastBarePromptIdx = i;
+    if (TYPED_PROMPT_RX.test(t)) lastTypedPromptIdx = i;
+    if (TOOL_USE_RX.test(t)) lastToolUseIdx = i;
+  }
+
+  // (4) Active thinking pattern, with no NEWER completion line — Claude
+  // is still mid-turn. Note we deliberately ignore lastBarePromptIdx
+  // here: Claude Code redraws the input box (a bare ❯) BELOW the status
+  // row on every status tick, so a bare prompt appearing after a
+  // thinking line doesn't mean idle. Only a completion line ("Cogitated
+  // for Xs") means the thinking block actually ended.
+  if (lastThinkingIdx >= 0 && lastThinkingIdx >= lastCompletionIdx) {
+    return {
+      state: "thinking",
+      hint:
+        "Claude Code is still processing — let it run, don't narrate the status line.",
+    };
+  }
+
+  // (5) Find the bottom-most visible non-footer row. This is what the
+  // user actually sees as the last meaningful line, after we strip
+  // chrome decorations like the bypass-permissions footer.
+  let bottomIdx = -1;
+  for (let i = tailRows.length - 1; i >= 0; i--) {
+    const t = tailRows[i].trim();
+    if (!t) continue;
+    if (FOOTER_SKIP_RX.some((rx) => rx.test(t))) continue;
+    bottomIdx = i;
+    break;
+  }
+  const bottom = bottomIdx >= 0 ? tailRows[bottomIdx].trim() : "";
+
+  // (6) A completion line ("Cogitated for Xs") is "ready" only when
+  // followed by the input box. If there's NO bare prompt below the
+  // completion, the input box hasn't redrawn yet — Claude is still
+  // running (about to call a tool, stream more text, etc.).
+  if (lastCompletionIdx >= 0 && lastBarePromptIdx <= lastCompletionIdx) {
+    return {
+      state: "thinking",
+      hint:
+        "Claude Code finished one thinking block but the input prompt isn't back yet — still working.",
+    };
+  }
+
+  // (7) Tool-use callout below any prompt or completion → mid-task.
+  if (
+    lastToolUseIdx >= 0 &&
+    lastToolUseIdx > lastBarePromptIdx &&
+    lastToolUseIdx > lastCompletionIdx
+  ) {
+    return {
+      state: "thinking",
+      hint: "Claude Code is mid-tool-call — let it finish.",
+    };
+  }
+
+  // (8) Bare prompt visible (input box drawn below idle/done content).
+  if (lastBarePromptIdx >= 0 || BARE_PROMPT_RX.test(bottom)) {
     return {
       state: "at_prompt",
       hint: "Claude Code is idle at its input prompt.",
     };
   }
-  // Active "-ing" forms only. Past tense ("Cogitated for 1m 16s",
-  // "Baked for…") is a completion line, not in-progress work — so the
-  // old `cogitat` stem produced false positives every time a task
-  // finished.
-  //
-  // Two-pronged match. The first regex catches Claude Code's full
-  // verb vocabulary structurally — any "-ing" word followed by a
-  // parenthesised seconds timer like "(28s · …)". That's the shape of
-  // every live status row regardless of which verb the TUI happened
-  // to roll for this turn (Elucidating, Deliberating, Building, …).
-  // The fallback word list keeps coverage for the rare line that has
-  // a verb but no timer yet (first ~1s of a new task) so we don't
-  // bounce to "unknown" mid-rotation.
-  if (
-    /\b[a-z]+ing\b[^\n]{0,80}\(\s*(?:\d+\s*m\s*)?\d+\s*s\b/i.test(tailText) ||
-    /\b(cogitating|baking|thinking|churning|processing)\b/i.test(lower)
-  ) {
+
+  // (9) Typed-but-not-submitted input. worker-status promotes this to
+  // "awaiting_input" via detectStuckPrompt; here we surface as at_prompt
+  // since the PTY itself isn't busy.
+  if (lastTypedPromptIdx >= 0 || TYPED_PROMPT_RX.test(bottom)) {
     return {
-      state: "thinking",
-      hint: "Claude Code is still processing — let it run, don't narrate the status line.",
+      state: "at_prompt",
+      hint: "Claude Code is at its prompt with typed text — input may be waiting.",
     };
   }
+
   return {
     state: "unknown",
     hint: "State unclear from scrollback — summarize what's visible in plain prose.",
@@ -235,7 +431,7 @@ export function readTerminalScrollback(
   const rawTail = sb.slice(Math.max(0, sb.length - tail));
   // State detection always runs on the raw-tail minus ANSI — the TUI
   // jargon is exactly what gives the state away.
-  const forState = rawTail.replace(ANSI_REGEX, "").replace(TUI_CHROME_REGEX, "");
+  const forState = rawTail.replace(ANSI_REGEX, "").replace(CARRIAGE_OVERWRITE_REGEX, "").replace(TUI_CHROME_REGEX, "");
   const { state, hint } = detectTerminalState(forState);
   const scrollback = raw ? rawTail : cleanScrollback(rawTail);
   return {
@@ -703,6 +899,234 @@ export function updateHeartbeatTool(
   return { ok: true, userId: ctx.user.id, bytes: body.length };
 }
 
+export function readUserProfileTool(ctx: SparContext) {
+  const body = readProfile(ctx.user.id);
+  return { userId: ctx.user.id, body: body || "" };
+}
+
+export function updateUserProfileTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const body = getStr(args, "body");
+  if (body.length > 16_000) throw new Error("profile body too long (>16000 chars)");
+  writeProfile(ctx.user.id, body);
+  return { ok: true, userId: ctx.user.id, bytes: body.length };
+}
+
+// ---- Brain file tools ---------------------------------------------------
+//
+// Direct read / write / list against the structured brain markdown tree
+// at BRAIN_ROOT. Closes the gap where the spar (phone/voice channel)
+// could only route durable facts through wrapper tools (update_user_
+// profile, update_heartbeat, write_graph) or by creating remarks
+// tagged 'brain' for the next CLI session to flush.
+//
+// Path safety: every relPath is normalised, joined to BRAIN_ROOT, then
+// confirmed to still resolve INSIDE BRAIN_ROOT. Anything that escapes
+// (`..`, an absolute path, a symlink target outside) is rejected with
+// a hard error. Only `.md` is writable; reads accept any extension so
+// the spar can still inspect any non-md scaffolding the user adds.
+
+const BRAIN_FILE_MAX_BYTES = 256 * 1024;
+
+function resolveInBrain(relPathRaw: string): string {
+  // Reject absolute inputs early so we never accidentally break out of
+  // the root via path.resolve absorbing an absolute second arg.
+  if (path.isAbsolute(relPathRaw)) {
+    throw new Error("brain path must be relative (got absolute)");
+  }
+  // Normalise separators — the brain root is on Windows but the spar
+  // CLI on macOS / Linux speaks forward slashes. Mixing both used to
+  // make path.resolve produce surprises on Windows; normalising up
+  // front keeps the safety check below honest.
+  const normalised = relPathRaw.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalised) throw new Error("brain path required");
+  const candidate = path.resolve(BRAIN_ROOT, normalised);
+  // path.resolve already collapses `..`, but a sibling directory whose
+  // name STARTS with the root prefix could still pass a `startsWith`
+  // check (`/braintest` vs `/brain`). Add the trailing separator to
+  // close that hole.
+  const rootWithSep = BRAIN_ROOT.endsWith(path.sep) ? BRAIN_ROOT : BRAIN_ROOT + path.sep;
+  if (candidate !== BRAIN_ROOT && !candidate.startsWith(rootWithSep)) {
+    throw new Error("brain path escapes the brain root");
+  }
+  return candidate;
+}
+
+export async function readBrainFileTool(
+  _ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const relPath = getStr(args, "rel_path");
+  const abs = resolveInBrain(relPath);
+  const stat = await fs.stat(abs).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    throw new Error("brain file not found");
+  }
+  const truncated = stat.size > BRAIN_FILE_MAX_BYTES;
+  const fh = await fs.open(abs, "r");
+  try {
+    const buf = Buffer.alloc(Math.min(stat.size, BRAIN_FILE_MAX_BYTES));
+    await fh.read(buf, 0, buf.length, 0);
+    return {
+      relPath,
+      size: stat.size,
+      truncated,
+      content: buf.toString("utf8"),
+    };
+  } finally {
+    await fh.close();
+  }
+}
+
+interface WriteBrainArgs {
+  /** Whole-file mode: replace the file body with this content. Mutually
+   *  exclusive with section/find. */
+  content?: string;
+  /** Section-patch mode: substring (or regex when isRegex=true) to find
+   *  inside the existing body. The match is replaced with `replacement`. */
+  find?: string;
+  isRegex?: boolean;
+  replacement?: string;
+}
+
+export async function writeBrainFileTool(
+  _ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const relPath = getStr(args, "rel_path");
+  if (!relPath.toLowerCase().endsWith(".md")) {
+    throw new Error("only .md files are writable in the brain");
+  }
+  const abs = resolveInBrain(relPath);
+  const argsTyped = args as WriteBrainArgs;
+
+  // Mode A: whole-file write. Used for fresh daily logs and for
+  // wholesale rewrites the user signed off on.
+  if (typeof argsTyped.content === "string") {
+    if (argsTyped.find !== undefined || argsTyped.replacement !== undefined) {
+      throw new Error("pass either content OR find+replacement, not both");
+    }
+    const body = argsTyped.content;
+    if (body.length > BRAIN_FILE_MAX_BYTES) {
+      throw new Error(
+        `brain file body too long (>${BRAIN_FILE_MAX_BYTES} chars)`,
+      );
+    }
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, body, "utf8");
+    return { ok: true, relPath, mode: "overwrite", bytes: Buffer.byteLength(body, "utf8") };
+  }
+
+  // Mode B: targeted section patch. Read-modify-write so concurrent
+  // writers don't clobber each other (best-effort; no real locking
+  // here — same posture as updateHeartbeatTool).
+  if (typeof argsTyped.find !== "string" || !argsTyped.find) {
+    throw new Error("missing 'content' or 'find'+'replacement' arguments");
+  }
+  if (typeof argsTyped.replacement !== "string") {
+    throw new Error("missing 'replacement' for section patch");
+  }
+  const stat = await fs.stat(abs).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    throw new Error(
+      "cannot section-patch a non-existent file (use whole-file 'content' to create)",
+    );
+  }
+  const existing = await fs.readFile(abs, "utf8");
+  let next: string;
+  if (argsTyped.isRegex) {
+    let re: RegExp;
+    try {
+      re = new RegExp(argsTyped.find, "m");
+    } catch (err) {
+      throw new Error(
+        `invalid regex: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!re.test(existing)) throw new Error("find regex did not match");
+    next = existing.replace(re, argsTyped.replacement);
+  } else {
+    const idx = existing.indexOf(argsTyped.find);
+    if (idx < 0) throw new Error("find substring not found");
+    if (existing.indexOf(argsTyped.find, idx + argsTyped.find.length) >= 0) {
+      throw new Error(
+        "find substring is ambiguous (matches more than once) — pass more context or use isRegex",
+      );
+    }
+    next = existing.slice(0, idx) + argsTyped.replacement + existing.slice(idx + argsTyped.find.length);
+  }
+  if (next.length > BRAIN_FILE_MAX_BYTES) {
+    throw new Error(
+      `patched brain file would exceed ${BRAIN_FILE_MAX_BYTES} chars`,
+    );
+  }
+  await fs.writeFile(abs, next, "utf8");
+  return {
+    ok: true,
+    relPath,
+    mode: "patch",
+    bytesBefore: Buffer.byteLength(existing, "utf8"),
+    bytesAfter: Buffer.byteLength(next, "utf8"),
+  };
+}
+
+interface BrainFileListEntry {
+  relPath: string;
+  size: number;
+  modified: number;
+  isDirectory: boolean;
+}
+
+export async function listBrainFilesTool(
+  _ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const subdir = (args.subdir as string | undefined) ?? "";
+  const recursive = args.recursive === true;
+  const root = subdir ? resolveInBrain(subdir) : BRAIN_ROOT;
+  const stat = await fs.stat(root).catch(() => null);
+  if (!stat || !stat.isDirectory()) {
+    throw new Error(subdir ? "subdir not found" : "brain root not found");
+  }
+  const out: BrainFileListEntry[] = [];
+
+  async function walk(dirAbs: string): Promise<void> {
+    const entries = await fs.readdir(dirAbs, { withFileTypes: true });
+    for (const entry of entries) {
+      // Hidden / system noise — skip the OS junk that creeps into
+      // synced folders rather than dumping it on the assistant.
+      if (entry.name.startsWith(".")) continue;
+      const abs = path.join(dirAbs, entry.name);
+      const rel = path
+        .relative(BRAIN_ROOT, abs)
+        .replace(/\\/g, "/");
+      if (entry.isDirectory()) {
+        out.push({ relPath: rel + "/", size: 0, modified: 0, isDirectory: true });
+        if (recursive) await walk(abs);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const s = await fs.stat(abs).catch(() => null);
+      if (!s) continue;
+      out.push({
+        relPath: rel,
+        size: s.size,
+        modified: s.mtimeMs,
+        isDirectory: false,
+      });
+    }
+  }
+  await walk(root);
+  // Stable ordering: directories first, then files, both alphabetical.
+  out.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+    return a.relPath.localeCompare(b.relPath);
+  });
+  return { root: subdir || ".", count: out.length, entries: out };
+}
+
 // ---- YouTube filler tools -------------------------------------------------
 
 function getOptStr(args: Record<string, unknown>, key: string): string | null {
@@ -793,17 +1217,16 @@ async function youtubePlayTool(
     thumbnailUrl: resolvedThumb,
     durationSec: finalDuration,
   });
-  // Flip filler mode to "youtube" so the selection actually plays.
-  // Users can switch back with filler_set_mode({mode:"news"}) or
-  // youtube_stop (which also resets mode).
-  const { setFillerMode } = await import("./filler-mode");
+  // Auto-switch filler mode to "youtube" via the snapshot helper so
+  // the user's prior mode is restored when youtube_stop fires.
+  const { enableYouTubeMode } = await import("./filler-mode");
   try {
-    await setFillerMode("youtube");
+    await enableYouTubeMode();
   } catch (err) {
     // Non-fatal: the video state is set regardless; this only
     // affects which mode the browser respects.
     // eslint-disable-next-line no-console
-    console.warn(`[youtube_play] setFillerMode failed: ${String(err).slice(0, 120)}`);
+    console.warn(`[youtube_play] enableYouTubeMode failed: ${String(err).slice(0, 120)}`);
   }
   return { ok: true, videoId, mode: "youtube", state };
 }
@@ -869,14 +1292,14 @@ async function youtubeEnqueueTool(
     durationSec: finalDuration,
   });
 
-  // If the enqueue promoted into now-playing, flip the filler mode
-  // to "youtube" so playback actually takes effect. Otherwise leave
-  // mode alone — user might be in news mode and just stacking up
-  // tracks for later.
+  // If the enqueue promoted into now-playing, auto-switch the filler
+  // mode to "youtube" via the snapshot helper. Otherwise leave mode
+  // alone — user might be in news mode and just stacking up tracks
+  // for later.
   if (promotedToCurrent) {
-    const { setFillerMode } = await import("./filler-mode");
+    const { enableYouTubeMode } = await import("./filler-mode");
     try {
-      await setFillerMode("youtube");
+      await enableYouTubeMode();
     } catch {
       /* non-fatal */
     }
@@ -893,28 +1316,35 @@ async function youtubeEnqueueTool(
 async function youtubeStopTool(ctx: SparContext) {
   const { stopYouTube } = await import("./youtube-state");
   const state = stopYouTube(ctx.user.id);
-  // Return the filler mode to the default so subsequent thinking
-  // windows hear news instead of silence (youtube mode with no
-  // video selected falls through to news automatically, but
-  // explicit is kinder to the next reader of the config file).
-  const { setFillerMode } = await import("./filler-mode");
+  // Restore the user's pre-YouTube filler mode (the snapshot taken
+  // by enableYouTubeMode at the matching play call). Falls back to
+  // the default mode if no snapshot was recorded.
+  const { disableYouTubeMode, getFillerConfig } = await import("./filler-mode");
+  let restoredMode: string = "news";
   try {
-    await setFillerMode("news");
+    await disableYouTubeMode();
+    const config = await getFillerConfig();
+    restoredMode = config.mode;
   } catch {
-    /* non-fatal */
+    /* non-fatal — restoredMode falls back to its initial guess */
   }
-  return { ok: true, mode: "news", state };
+  return { ok: true, mode: restoredMode, state };
 }
 
 async function fillerSetModeTool(
   _ctx: SparContext,
   args: Record<string, unknown>,
 ) {
-  const { setFillerMode, FILLER_MODES } = await import("./filler-mode");
+  const { setFillerMode, USER_SELECTABLE_MODES } = await import("./filler-mode");
   const mode = getStr(args, "mode").trim();
-  if (!(FILLER_MODES as readonly string[]).includes(mode)) {
+  // "youtube" mode is automatic — driven by youtube_play / youtube_stop
+  // through enableYouTubeMode / disableYouTubeMode so the previousMode
+  // snapshot is captured. Direct selection via filler_set_mode would
+  // skip the snapshot and leave the user unable to restore.
+  if (!(USER_SELECTABLE_MODES as readonly string[]).includes(mode)) {
     throw new Error(
-      `invalid mode: ${mode}. Valid: ${FILLER_MODES.join(", ")}`,
+      `invalid mode: ${mode}. Valid: ${USER_SELECTABLE_MODES.join(", ")} ` +
+        `(youtube is automatic — use youtube_play instead).`,
     );
   }
   // Optional URL/topic. Accept either snake_case (MCP convention) or
@@ -933,15 +1363,13 @@ async function fillerGetModeTool(ctx: SparContext) {
   const yt = getYouTubeState(ctx.user.id);
   // activeSource reports what the browser would *actually* play
   // given the current mode + state, applying the SparProvider
-  // fallback rules: youtube with no video → news; news/quiet/off
-  // are literal; fun-facts/calendar pull from the dashboard's TTS
-  // content system. Browser still has the final say (e.g. if news
-  // pool is empty it falls back to hum) but this is the best read
-  // we can give without polling the client.
+  // fallback rules: youtube with no video → news; news/quiet are
+  // literal; fun-facts/calendar pull from the dashboard's TTS
+  // content system. Browser still has the final say (e.g. if the
+  // news pool is empty it falls back to silence) but this is the
+  // best read we can give without polling the client.
   let activeSource: string;
-  if (mode === "off") activeSource = "off";
-  else if (mode === "quiet") activeSource = "quiet";
-  else if (mode === "hum") activeSource = "hum";
+  if (mode === "quiet") activeSource = "quiet";
   else if (mode === "youtube" && yt.videoId) activeSource = "youtube";
   else if (mode === "youtube") activeSource = "news"; // fallback
   else if (mode === "fun-facts") activeSource = "fun-facts";
@@ -1203,6 +1631,117 @@ function stopTerminalTool(ctx: SparContext, args: Record<string, unknown>) {
   const stopped = stopTerminalSession(projectId);
   const status = getTerminalStatus(projectId);
   return { projectId, stopped, running: status.running };
+}
+
+const PROJECT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/** Where freshly-created projects land when no path is supplied. Mirrors
+ *  the API route in app/api/projects/route.ts so spar-created projects
+ *  use the same on-disk layout as ones the admin makes via the UI. */
+function defaultProjectsRoot(): string {
+  const envRoot = process.env.AMASO_PROJECTS_ROOT?.trim();
+  if (envRoot) return path.resolve(envRoot).replace(/\\/g, "/");
+  return path.resolve(process.cwd(), "..").replace(/\\/g, "/");
+}
+
+function createProjectTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  // Mirrors POST /api/projects: writing amaso.config.json + mkdir on
+  // disk is privileged enough that we gate it the same way deploy is
+  // gated — super-user only.
+  requireSuperUserCtx(ctx);
+
+  const id = getStr(args, "id").trim();
+  const name = getStr(args, "name").trim();
+  if (!PROJECT_ID_PATTERN.test(id)) {
+    throw new Error("invalid_id: lowercase letters, digits, dashes only");
+  }
+  if (!name) throw new Error("name must not be empty");
+
+  const visibilityRaw = getOptStr(args, "visibility") ?? "team";
+  if (!["team", "client", "public"].includes(visibilityRaw)) {
+    throw new Error("invalid_visibility (team | client | public)");
+  }
+  const visibility = visibilityRaw as ProjectVisibility;
+
+  // Path: either the caller supplied one (must exist + be a directory)
+  // or we mint a fresh empty folder under the projects root using the
+  // project id as the folder name.
+  const rawPath = getOptStr(args, "path");
+  let diskPath: string;
+  if (rawPath) {
+    let stat: ReturnType<typeof nodeFs.statSync>;
+    try {
+      stat = nodeFs.statSync(rawPath);
+    } catch {
+      throw new Error(`path_not_found: ${rawPath}`);
+    }
+    if (!stat.isDirectory()) {
+      throw new Error(`path_not_directory: ${rawPath}`);
+    }
+    diskPath = rawPath;
+  } else {
+    const root = defaultProjectsRoot();
+    const candidate = `${root}/${id}`;
+    if (nodeFs.existsSync(candidate)) {
+      throw new Error(`auto_path_exists: ${candidate}`);
+    }
+    try {
+      nodeFs.mkdirSync(candidate, { recursive: true });
+    } catch (err) {
+      console.error("[spar create_project] mkdir failed:", candidate, err);
+      throw new Error("mkdir_failed");
+    }
+    diskPath = candidate;
+  }
+
+  const project: ProjectConfig = { id, name, path: diskPath, visibility };
+  const subPath = getOptStr(args, "sub_path");
+  if (subPath) project.subPath = subPath;
+  const previewUrl = getOptStr(args, "preview_url");
+  if (previewUrl) project.previewUrl = previewUrl;
+  const liveUrl = getOptStr(args, "live_url");
+  if (liveUrl) project.liveUrl = liveUrl;
+  const devPort = getOptNum(args, "dev_port");
+  if (typeof devPort === "number" && Number.isInteger(devPort)) {
+    project.devPort = devPort;
+  }
+  const devCommand = getOptStr(args, "dev_command");
+  if (devCommand) project.devCommand = devCommand;
+  const deployBranch = getOptStr(args, "deploy_branch");
+  if (deployBranch) project.deployBranch = deployBranch;
+
+  try {
+    addProject(project);
+  } catch (err) {
+    if (err instanceof Error && err.message === "duplicate_id") {
+      throw new Error(`duplicate_id: ${id}`);
+    }
+    throw err;
+  }
+  return { ok: true, project };
+}
+
+function deleteProjectTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  // Same gate as create — only the super-user can mutate the project
+  // registry. Files on disk are deliberately left alone; un-registering
+  // is reversible (just call create_project again with the same path).
+  requireSuperUserCtx(ctx);
+  const id = getStr(args, "id").trim();
+  try {
+    removeProject(id);
+  } catch (err) {
+    if (err instanceof Error && err.message === "project_not_found") {
+      throw new Error(`project_not_found: ${id}`);
+    }
+    throw err;
+  }
+  return { ok: true, removed: id };
 }
 
 // ---- Admin ----------------------------------------------------------------
@@ -1489,6 +2028,75 @@ async function speakTtsTool(
   return { ok: true, bytes, voice: voice ?? null };
 }
 
+/**
+ * Drive the dashboard UI remotely on behalf of the calling user.
+ * Mirrors the route handler at /api/spar/remote-control: validates
+ * the action, mutates durable state for actions that need it
+ * (autopilot toggle / directive), and broadcasts a
+ * `spar:remote_control` WS event to every socket the user has open
+ * so any visible spar tab applies the change instantly.
+ *
+ * Why this lives in the MCP layer too: the spar agent already has
+ * the user's bearer token via the loopback dispatcher, and going
+ * through HTTP would mean the agent fetches its own host. Keeping
+ * the impl here avoids that round-trip and stays consistent with
+ * every other write tool (resolve_remark, dispatch_to_project, etc).
+ */
+async function dashboardControlTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const action = getStr(args, "action").trim();
+  const value = args.value;
+  const side = args.side;
+
+  let payload: SparRemoteControlAction;
+  switch (action) {
+    case "toggle_autopilot": {
+      if (typeof value !== "boolean") {
+        throw new Error("toggle_autopilot requires boolean `value`");
+      }
+      if (value) enableAutopilot(ctx.user.id);
+      else disableAutopilot(ctx.user.id);
+      payload = { action, value };
+      break;
+    }
+    case "open_sidebar":
+    case "close_sidebar": {
+      if (side !== "left" && side !== "right") {
+        throw new Error(`${action} requires \`side\` of "left" | "right"`);
+      }
+      payload = { action, side };
+      break;
+    }
+    case "new_conversation": {
+      payload = { action };
+      break;
+    }
+    case "set_directive": {
+      if (typeof value !== "string") {
+        throw new Error("set_directive requires string `value`");
+      }
+      if (value.length > 2_000) {
+        throw new Error("directive too long (>2000 chars)");
+      }
+      writeAutopilotDirective(ctx.user.id, value);
+      payload = { action, value };
+      break;
+    }
+    default:
+      throw new Error(`unknown action: ${action}`);
+  }
+
+  const wsPayload: SparRemoteControlPayload = {
+    id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    issuedAt: Date.now(),
+    payload,
+  };
+  broadcastSparRemoteControl(ctx.user.id, wsPayload);
+  return { ok: true, action, id: wsPayload.id };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -1509,6 +2117,11 @@ export const TOOL_HANDLERS: Record<
   dispatch_to_project: (ctx, a) => dispatchToProjectTool(ctx, a),
   send_keys_to_project: (ctx, a) => sendKeysToProjectTool(ctx, a),
   update_heartbeat: (ctx, a) => updateHeartbeatTool(ctx, a),
+  read_user_profile: (ctx) => readUserProfileTool(ctx),
+  update_user_profile: (ctx, a) => updateUserProfileTool(ctx, a),
+  read_brain_file: (ctx, a) => readBrainFileTool(ctx, a),
+  write_brain_file: (ctx, a) => writeBrainFileTool(ctx, a),
+  list_brain_files: (ctx, a) => listBrainFilesTool(ctx, a),
   read_graph: (ctx) => readGraphTool(ctx),
   write_graph: (ctx, a) => writeGraphTool(ctx, a),
   youtube_search: (ctx, a) => youtubeSearchTool(ctx, a),
@@ -1518,6 +2131,10 @@ export const TOOL_HANDLERS: Record<
   youtube_status: (ctx) => youtubeStatusTool(ctx),
   filler_set_mode: (ctx, a) => fillerSetModeTool(ctx, a),
   filler_get_mode: (ctx) => fillerGetModeTool(ctx),
+  autopilot_status: (ctx) => ({
+    enabled: isAutopilotEnabled(ctx.user.id),
+    directive: readAutopilotDirective(ctx.user.id),
+  }),
   // Chat
   list_channels: (ctx) => listChannelsTool(ctx),
   read_messages: (ctx, a) => readMessagesTool(ctx, a),
@@ -1527,6 +2144,8 @@ export const TOOL_HANDLERS: Record<
   deploy_project: (ctx, a) => deployProjectTool(ctx, a),
   start_terminal: (ctx, a) => startTerminalTool(ctx, a),
   stop_terminal: (ctx, a) => stopTerminalTool(ctx, a),
+  create_project: (ctx, a) => createProjectTool(ctx, a),
+  delete_project: (ctx, a) => deleteProjectTool(ctx, a),
   // Admin
   list_users: (ctx) => listUsersTool(ctx),
   get_presence: (ctx) => getPresenceTool(ctx),
@@ -1548,4 +2167,6 @@ export const TOOL_HANDLERS: Record<
   companion_status: (ctx) => companionStatusTool(ctx),
   send_push: (ctx, a) => sendPushTool(ctx, a),
   speak_tts: (ctx, a) => speakTtsTool(ctx, a),
+  // Remote dashboard control — drive UI state from the spar agent.
+  dashboard_control: (ctx, a) => dashboardControlTool(ctx, a),
 };

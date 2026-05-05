@@ -57,6 +57,7 @@ const PASTE_END = "\x1b[201~";
 // that a stuck dispatch gets unblocked before the user notices. Tunable
 // via env. Set to 0 to disable the watchdog entirely.
 const WATCHDOG_DELAY_MS = Number(process.env.AMASO_DISPATCH_WATCHDOG_MS ?? "7000");
+const WATCHDOG_MAX_RETRIES = Number(process.env.AMASO_DISPATCH_WATCHDOG_RETRIES ?? "5");
 
 // Inline ANSI/TUI strip + carriage-return collapse for the watchdog's
 // stuck-prompt heuristic. We can't import these from spar-tools-context
@@ -191,14 +192,16 @@ function appendLog(entry: DispatchLogEntry): void {
  * the chosen sessionId on the entry — the auto-report path then keys
  * its idle-arming state on the same id.
  */
-function resolveSessionForDispatch(projectId: string): string | null {
+function resolveSessionForDispatch(projectId: string): string {
   const sessions = listSessionsForProject(projectId);
   if (sessions.length === 0) return projectId;
   const sorted = [...sessions].sort((a, b) => a.startedAt - b.startedAt);
   for (const s of sorted) {
     if (!isSessionBusy(s.sessionId)) return s.sessionId;
   }
-  return null;
+  // All sessions busy — reuse the oldest instead of spawning a new one.
+  // One terminal per project, always.
+  return sorted[0].sessionId;
 }
 
 /** Allocate a sessionId for a brand-new parallel session under a
@@ -227,7 +230,7 @@ export function dispatchToProject(
   // and the `if (!getSession ...) startTerminal(...)` block below spawns
   // it. The new session's id is stable for the lifetime of this dispatch
   // (used by the watchdog, the dispatch log, and idle-arming below).
-  const sessionId = resolveSessionForDispatch(projectId) ?? freshSessionId(projectId);
+  const sessionId = resolveSessionForDispatch(projectId);
   const entry: DispatchLogEntry = {
     id,
     userId,
@@ -260,31 +263,43 @@ export function dispatchToProject(
         /* session may have died in the interim — nothing to do */
       }
     }, SUBMIT_DELAY_MS);
-    // Watchdog: a few seconds after the submit-Enter, peek at the
-    // terminal scrollback. If the prompt body is still sitting in the
-    // input row with no activity row ("…ing (Ns)") above it, the Enter
-    // got eaten — fire one more \r to nudge it. Only fires once per
-    // dispatch and only when stuck; a real "thinking" state is left
-    // alone. Set AMASO_DISPATCH_WATCHDOG_MS=0 to disable.
+    // Watchdog: repeatedly check whether the prompt actually started
+    // executing. If the prompt body is still sitting in the input row
+    // with no activity row ("…ing (Ns)") above it, the Enter got
+    // eaten — fire another \r. Retries up to WATCHDOG_MAX_RETRIES
+    // times with WATCHDOG_DELAY_MS between each check. A real
+    // "thinking" state is left alone. Set AMASO_DISPATCH_WATCHDOG_MS=0
+    // to disable.
     if (WATCHDOG_DELAY_MS > 0) {
-      setTimeout(() => {
+      let retries = 0;
+      const watchdogCheck = () => {
         try {
           const session = getSession(projectId, sessionId);
           if (!session) return;
           const tail = session.scrollback.slice(-8_192);
           if (!looksStuckOnPrompt(tail)) return;
+          retries++;
           console.warn(
-            `[dispatch] watchdog: prompt still unsubmitted after ${WATCHDOG_DELAY_MS}ms ` +
+            `[dispatch] watchdog: prompt still unsubmitted (attempt ${retries}/${WATCHDOG_MAX_RETRIES}) ` +
               `for project=${projectId} session=${sessionId} dispatch=${id} — sending Enter`,
           );
           writeTerminal(projectId, "\r", userId, sessionId);
+          if (retries < WATCHDOG_MAX_RETRIES) {
+            setTimeout(watchdogCheck, WATCHDOG_DELAY_MS);
+          } else {
+            console.warn(
+              `[dispatch] watchdog: gave up after ${WATCHDOG_MAX_RETRIES} retries ` +
+                `for project=${projectId} session=${sessionId} dispatch=${id}`,
+            );
+          }
         } catch (err) {
           console.warn(
             `[dispatch] watchdog error for project=${projectId} session=${sessionId} dispatch=${id}:`,
             err,
           );
         }
-      }, WATCHDOG_DELAY_MS);
+      };
+      setTimeout(watchdogCheck, WATCHDOG_DELAY_MS);
     }
   } catch (err) {
     entry.status = "failed";

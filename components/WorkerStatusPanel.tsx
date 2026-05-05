@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ChevronDown, Info, Plus, X } from "lucide-react";
+import { ChevronDown, Info, X } from "lucide-react";
 
 /**
  * Mission-control style live panel for the sparring page. Polls
@@ -214,17 +214,20 @@ function useWorkerStatusPoll() {
   return { workers, refresh };
 }
 
-/** POST a spawn for `projectId`. Errors are swallowed (the next poll
- *  surfaces the new row anyway, or the user retries) — we just kick
- *  off the request and refresh on completion. */
 async function spawnSession(projectId: string): Promise<void> {
-  await fetch("/api/spar/sessions", {
+  // POST /api/spar/sessions reuses the existing terminal when one is
+  // already running for the project (sessionId === projectId in the
+  // current stage), so this is safe to call from rapid double-clicks
+  // or two open dashboards — the server returns { reused: true } and
+  // never double-spawns.
+  await fetch(`/api/spar/sessions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ projectId }),
     cache: "no-store",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId }),
   }).catch(() => {
-    /* surfaced via the next poll; nothing to do here */
+    /* swallow — onRefresh will reflect the real terminal state on the
+     * next worker-status poll regardless of this fetch's outcome. */
   });
 }
 
@@ -576,20 +579,6 @@ function WorkerRow({
             <X className="h-3.5 w-3.5" />
           </button>
         )}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            void handleSpawn();
-          }}
-          disabled={spawning}
-          aria-label={`Spawn another session for ${w.name}`}
-          title="Spawn another session for this project"
-          className="amaso-fx amaso-press flex h-auto w-11 flex-shrink-0 items-center justify-center text-neutral-600 hover:bg-orange-900/30 hover:text-orange-300 active:bg-orange-900/50 disabled:opacity-40 sm:w-8"
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </button>
         <button
           type="button"
           onClick={(e) => {

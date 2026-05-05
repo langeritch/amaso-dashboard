@@ -1,5 +1,10 @@
 // WebSocket bridge voor per-project Claude terminals.
-// URL: ws://host/api/terminal?projectId=<id>
+// URL: ws://host/api/terminal?projectId=<id>[&sessionId=<sid>]
+//   sessionId is optional — when omitted (every existing client),
+//   it defaults to projectId so the legacy one-session-per-project
+//   wiring keeps working unchanged. Stage 2 of remark #285 wires
+//   the dashboard UI to pass an explicit sessionId for projects
+//   with multiple concurrent terminals.
 // Inkomende messages (JSON):
 //   { type: "input", data: "string" }     — stdin bytes
 //   { type: "resize", cols, rows }        — PTY resize
@@ -22,7 +27,7 @@ import {
   stop as stopSession,
   subscribe,
   write as writeToSession,
-} from "./terminal";
+} from "./terminal-backend";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -44,13 +49,18 @@ function build() {
       ws.close();
       return;
     }
+    // sessionId is optional — defaults to projectId so legacy clients
+    // (every browser tab today) keep landing on the project-default
+    // session. Stage 2 of remark #285 lets the UI pass an explicit
+    // sessionId to pick a specific terminal among many.
+    const sessionId = url.searchParams.get("sessionId") ?? projectId;
     // The authenticated user is stashed on the req by handleUpgrade. Used to
     // attribute keystrokes — the idle-push after Claude finishes only pings
     // whoever submitted the prompt.
     const user = (req as IncomingMessage & { amasoUser?: User }).amasoUser;
 
     // Replay scrollback on connect (new session or reconnect)
-    const status = getStatus(projectId);
+    const status = getStatus(projectId, sessionId);
     send(ws, { type: "status", ...status });
     if (status.running && status.scrollback) {
       send(ws, { type: "data", data: status.scrollback });
@@ -62,6 +72,7 @@ function build() {
       (payload) => {
         send(ws, { type: "exit", ...payload });
       },
+      sessionId,
     );
 
     ws.on("message", (raw) => {
@@ -77,18 +88,18 @@ function build() {
         return;
       }
       if (msg.type === "input" && typeof msg.data === "string") {
-        writeToSession(projectId, msg.data, user?.id ?? null);
+        writeToSession(projectId, msg.data, user?.id ?? null, sessionId);
       } else if (
         msg.type === "resize" &&
         typeof msg.cols === "number" &&
         typeof msg.rows === "number"
       ) {
-        resizeSession(projectId, msg.cols, msg.rows);
+        resizeSession(projectId, msg.cols, msg.rows, sessionId);
       } else if (msg.type === "start") {
         // If already running, just replay state — don't spawn twice, don't
         // write the "(starting…)" banner again.
-        if (getStatus(projectId).running) {
-          send(ws, { type: "status", ...getStatus(projectId) });
+        if (getStatus(projectId, sessionId).running) {
+          send(ws, { type: "status", ...getStatus(projectId, sessionId) });
           return;
         }
         try {
@@ -96,6 +107,7 @@ function build() {
             projectId,
             typeof msg.cols === "number" ? msg.cols : 100,
             typeof msg.rows === "number" ? msg.rows : 30,
+            sessionId,
           );
           // Re-subscribe now that there's a live emitter. The previous
           // unsubscribe() no-op'd because the session didn't exist yet.
@@ -104,10 +116,11 @@ function build() {
             projectId,
             (data) => send(ws, { type: "data", data }),
             (payload) => send(ws, { type: "exit", ...payload }),
+            sessionId,
           );
           // Replace the cleanup function the "close" handler uses
           unsubscribe = u2;
-          send(ws, { type: "status", ...getStatus(projectId) });
+          send(ws, { type: "status", ...getStatus(projectId, sessionId) });
           send(ws, {
             type: "data",
             data: "\r\n\x1b[36m(starting Claude session…)\x1b[0m\r\n",
@@ -119,7 +132,7 @@ function build() {
           });
         }
       } else if (msg.type === "stop") {
-        stopSession(projectId);
+        stopSession(projectId, sessionId);
       }
     });
 
@@ -139,7 +152,18 @@ function build() {
       // admin could open this socket and drive the PTY (full RCE).
       const origin = req.headers.origin;
       const host = req.headers.host;
-      if (!originMatchesHost(origin, host)) {
+      // Cloudflare Tunnel rewrites the Host header to the loopback
+      // origin (`localhost:3737` / `127.0.0.1:3737`) when forwarding to
+      // us, so a strict Host==Origin check 403s every legit production
+      // connection. ws.ts, browser-ws.ts, and companion-ws.ts all
+      // already accept X-Forwarded-Host as a Host candidate; terminal
+      // was the only WS module still on the old two-arg form, which is
+      // why PTYs silently broke as soon as someone used the dashboard
+      // through the tunnel. (Diagnosed 2026-04-28 — operator reported
+      // "all pty don't start up". WS handshake was returning 403 with
+      // origin=https://dashboard.amaso.nl host=localhost:3737.)
+      const xfHost = req.headers["x-forwarded-host"];
+      if (!originMatchesHost(origin, host, xfHost)) {
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
         socket.destroy();
         return;
@@ -163,13 +187,31 @@ function build() {
 function originMatchesHost(
   origin: string | undefined,
   host: string | undefined,
+  xForwardedHost: string | string[] | undefined,
 ): boolean {
-  if (!origin || !host) return false;
+  if (!origin) return false;
+  let originHost: string;
   try {
-    return new URL(origin).host === host;
+    originHost = new URL(origin).host;
   } catch {
     return false;
   }
+  const candidates = new Set<string>();
+  if (host) candidates.add(host);
+  if (xForwardedHost) {
+    const xf = Array.isArray(xForwardedHost) ? xForwardedHost[0] : xForwardedHost;
+    if (xf) candidates.add(xf);
+  }
+  // Cloudflare Tunnel sometimes drops the port from X-Forwarded-Host
+  // ("dashboard.amaso.nl") even though req.headers.host carries the
+  // upstream port ("localhost:3737"). Origin from the browser also has
+  // no port for HTTPS hostnames. Compare port-stripped forms too.
+  const stripPort = (h: string): string => h.replace(/:\d+$/, "");
+  for (const c of candidates) {
+    if (c === originHost) return true;
+    if (stripPort(c) === stripPort(originHost)) return true;
+  }
+  return false;
 }
 
 export function createTerminalWs() {

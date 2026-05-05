@@ -635,6 +635,22 @@ export default function SparFullView() {
     setHasNewBelow(false);
   }, [mode, messagesEndRef]);
 
+  // Live transcript follow. As the user speaks, `interimText` grows
+  // word by word and the bubble it's rendered in expands — without
+  // this, that growing line slides down behind the footer and the
+  // user can't see what's being captured. Fire on every interim
+  // update but only when the user is already pinned to the bottom
+  // (same rule as the message-arrival effect): if they've scrolled
+  // up to read history, we still don't yank them. `behavior: auto`
+  // because interim updates fire many times a second and queued
+  // smooth-scrolls would visibly lag the typing.
+  useEffect(() => {
+    if (!interimText) return;
+    if (!stuckToBottom) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interimText, mode]);
+
   // Keep `stuckToBottom` in sync with actual scroll position. Threshold
   // is a forgiving 80px so a half-line of overscroll (or a momentum
   // wobble on iOS) still counts as "at the bottom".
@@ -1506,15 +1522,14 @@ export default function SparFullView() {
             — without them, `flex-1` on the form would just stretch
             it across whatever space was left and the input would
             drift toward whichever side had less content. */}
-        <div className="flex flex-col gap-2 px-3 py-2 sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(0,768px)_minmax(0,1fr)] sm:items-center sm:gap-3">
-          {/* LEFT — media controls. SparMediaRow is its own
-              `relative flex` wrapper, so it slots straight in as a
-              single flex child; the MediaDrawer floats above via
-              position:absolute instead of taking flow space and
-              visually splitting the row. The `sm:max-w-[14rem]`
-              cap stops the now-playing label from outgrowing the
-              composer on desktop. */}
-          <div className="flex min-w-0 items-center sm:max-w-[14rem] sm:justify-self-start">
+        <div className="flex flex-col gap-2 px-3 py-2 sm:flex-row sm:items-center sm:gap-3">
+          {/* LEFT — media controls. `flex-shrink-0` is critical: media
+              must never be squeezed below its natural width or the
+              now-playing thumb / play / skip / volume / PiP buttons
+              start clipping. The inner `min-w-0` only lets the title
+              label truncate within the cap; the controls themselves
+              stay full size. */}
+          <div className="flex flex-shrink-0 items-center min-w-0 max-w-[14rem] sm:max-w-[18rem] sm:justify-self-start">
             <SparMediaRow compact />
           </div>
 
@@ -1522,8 +1537,8 @@ export default function SparFullView() {
               composer and the action cluster on a shared flex line
               (the second stacked row). From `sm:` up the wrapper
               becomes `display: contents` so its children (form +
-              buttons) become direct grid items of the parent — form
-              into the centered column 2, buttons into column 3. */}
+              buttons) become direct flex items of the parent flex
+              row, sitting next to the media block above. */}
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:contents">
             {/* CENTER — text composer (text mode only). `mx-auto
                 max-w-3xl` caps the input on huge desktops so it
@@ -1536,7 +1551,7 @@ export default function SparFullView() {
                   e.preventDefault();
                   submitDraft();
                 }}
-                className="relative mx-auto flex min-w-0 max-w-3xl flex-1 items-end gap-1.5 rounded-2xl border border-neutral-800 bg-neutral-900/70 px-2.5 py-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-[border-color,box-shadow,background-color] duration-200 ease-out focus-within:border-orange-500/50 focus-within:bg-neutral-900/85 focus-within:shadow-[0_0_0_3px_rgba(255, 107, 61,0.12),0_1px_2px_rgba(0,0,0,0.25)] sm:w-full sm:flex-none sm:col-start-2"
+                className="relative mx-auto flex min-w-0 max-w-3xl flex-1 items-end gap-1.5 rounded-2xl border border-neutral-800 bg-neutral-900/70 px-2.5 py-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-[border-color,box-shadow,background-color] duration-200 ease-out focus-within:border-orange-500/50 focus-within:bg-neutral-900/85 focus-within:shadow-[0_0_0_3px_rgba(255, 107, 61,0.12),0_1px_2px_rgba(0,0,0,0.25)]"
               >
                 {slashOpen && (
                   <SlashCommandDropdown
@@ -1648,7 +1663,7 @@ export default function SparFullView() {
                 `display: contents` so this div lands in column 3 of
                 the grid — `justify-self-end` glues it to the right
                 edge of that column. */}
-            <div className="flex flex-shrink-0 items-center gap-1 sm:gap-1.5 sm:col-start-3 sm:justify-self-end">
+            <div className="flex flex-shrink-0 items-center gap-1 sm:ml-auto sm:gap-1.5">
               <button
                 type="button"
                 onClick={toggleAutopilot}

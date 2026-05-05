@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { registerYoutubePlayerHandle } from "@/lib/youtube-player-handle";
 
 /**
  * Hidden YouTube player that acts as an alternative to the
@@ -209,6 +210,10 @@ interface SavedPlaybackRecord {
    *  windows. "playing" is the normal case. Not saved as "idle" —
    *  idle is represented by the absence of a record. */
   status: "playing" | "paused";
+  /** Sidecar slot owned by useMediaPlayer — the upcoming-track queue
+   *  re-hydrated on mount. Preserved through this hook's writes so
+   *  the periodic position-tick save doesn't clobber it. */
+  queue?: unknown;
   savedAt: number;
 }
 
@@ -249,6 +254,10 @@ export function useYoutubeFiller({
   const seekAppliedRef = useRef(false);
   const positionTimerRef = useRef<number | null>(null);
   const localSaveTimerRef = useRef<number | null>(null);
+  // Cleanup function returned by registerYoutubePlayerHandle. Stashed
+  // so the unmount effect can clear the global handle even though the
+  // registration happens inside the async onReady callback.
+  const ytHandleCleanupRef = useRef<(() => void) | null>(null);
 
   // Render-time diagnostic so DevTools shows exactly what the hook
   // was given per render + what internal state thinks of it. Prefer
@@ -350,8 +359,16 @@ export function useYoutubeFiller({
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const mount = document.createElement("div");
-    mount.id = `amaso-yt-player-${Math.random().toString(36).slice(2, 8)}`;
+    // Two-element structure: WRAPPER → INNER → (replaced by YT iframe).
+    // The YT.Player constructor replaces the element passed to it
+    // with an iframe, so the inner div is sacrificial. The wrapper
+    // stays in the DOM for the lifetime of the hook and holds the
+    // off-screen positioning — that's what the PiP toggle moves
+    // between off-screen, an on-page overlay, and a Document-PiP
+    // popped-out window. Keeping positioning on the wrapper means
+    // we don't lose hide-off-screen behaviour to YT's element swap.
+    const wrapper = document.createElement("div");
+    wrapper.dataset.amasoYtWrapper = "true";
     // YouTube refuses to initialise / throttles playback in tiny
     // iframes (the 1×1 "audio-only" trick silently fails: state
     // never reaches PLAYING and the position stays at 0). Give the
@@ -359,7 +376,7 @@ export function useYoutubeFiller({
     // position + offset. `display:none` is NOT safe — some browsers
     // suspend media in fully-hidden iframes — so we leave the
     // element rendered but scrolled out of view.
-    Object.assign(mount.style, {
+    Object.assign(wrapper.style, {
       position: "fixed",
       left: "-10000px",
       top: "0",
@@ -369,8 +386,14 @@ export function useYoutubeFiller({
       opacity: "0",
       zIndex: "-1",
     });
-    document.body.appendChild(mount);
-    mountRef.current = mount;
+    document.body.appendChild(wrapper);
+
+    const inner = document.createElement("div");
+    inner.id = `amaso-yt-player-${Math.random().toString(36).slice(2, 8)}`;
+    inner.style.width = "100%";
+    inner.style.height = "100%";
+    wrapper.appendChild(inner);
+    mountRef.current = wrapper;
 
     let cancelled = false;
 
@@ -398,10 +421,14 @@ export function useYoutubeFiller({
       // the player is alive and our subsequent unmute request lands
       // because the page itself has user activation from the voice
       // session start.
-      const player = new YT.Player(mount, {
+      const player = new YT.Player(inner, {
         host: "https://www.youtube-nocookie.com",
         playerVars: {
-          controls: 0,
+          // controls:1 makes the YouTube native UI visible — needed
+          // when the user pops the player into a PiP window or the
+          // mobile-fallback corner overlay. Hidden by the off-screen
+          // positioning while audio-only (320×180 at left:-10000px).
+          controls: 1,
           disablekb: 1,
           modestbranding: 1,
           playsinline: 1,
@@ -424,6 +451,32 @@ export function useYoutubeFiller({
             }
             playerRef.current = target;
             readyRef.current = true;
+            // Publish a thin handle so the media drawer's scrubber
+            // can call seekTo / getCurrentTime without prop-drilling
+            // through SparProvider. Cleanup runs in the unmount path.
+            ytHandleCleanupRef.current = registerYoutubePlayerHandle({
+              getCurrentTime: () => {
+                try {
+                  return target.getCurrentTime();
+                } catch {
+                  return null;
+                }
+              },
+              seekTo: (sec: number) => {
+                try {
+                  target.seekTo(sec, true);
+                } catch {
+                  /* state transition race — caller can retry */
+                }
+              },
+              // Expose the wrapper so the Picture-in-Picture toggle
+              // can move it between off-screen, an on-page overlay,
+              // and a Document-PiP window. mountRef holds the original
+              // div even after YT replaces it with the iframe (YT
+              // appends the iframe inside the same node we passed in,
+              // not over it — the ref keeps pointing at the wrapper).
+              getMount: () => mountRef.current,
+            });
             console.info(
               "[FILLER-DEBUG] hook: player ready",
               { videoId: videoIdRef.current, active: activeRef.current },
@@ -535,6 +588,15 @@ export function useYoutubeFiller({
         window.clearInterval(localSaveTimerRef.current);
         localSaveTimerRef.current = null;
       }
+      // Drop the global seek handle before destroying the player —
+      // a stale handle pointing at a destroyed instance would throw
+      // in the drawer's scrubber drag.
+      try {
+        ytHandleCleanupRef.current?.();
+      } catch {
+        /* ignore */
+      }
+      ytHandleCleanupRef.current = null;
       try {
         playerRef.current?.destroy();
       } catch {
@@ -740,6 +802,11 @@ export function useYoutubeFiller({
               ? clampVolume(prev.volume)
               : 100,
         status,
+        // Carry the queue sidecar through untouched — useMediaPlayer
+        // owns that field and updates it via its own effect. Without
+        // this copy the every-5-s position save would wipe the queue
+        // back to undefined.
+        queue: prev?.queue,
         savedAt: Date.now(),
       };
       window.localStorage.setItem(LOCALSTORAGE_KEY, JSON.stringify(record));

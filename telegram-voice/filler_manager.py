@@ -714,6 +714,25 @@ class FillerManager:
         except Exception:
             log.exception("filler: cache write failed at %s", path)
             return None
+        # Sidecar metadata so the dashboard can display the headline
+        # as the track title when this clip plays back. Best-effort —
+        # an unwritable sidecar leaves the WAV intact and the dashboard
+        # falls back to a generic "News headline" label.
+        try:
+            sidecar = path.with_suffix(".json")
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "title": source_title,
+                        "label": source_label,
+                        "text": text,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            log.warning("filler: sidecar write failed for %s", path.name)
         return FillerClip(
             id=cid, text=text, path=path,
             duration_s=duration_s, kind=kind,

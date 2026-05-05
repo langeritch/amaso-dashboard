@@ -6,7 +6,7 @@ const HEARTBEAT_DIR = path.resolve(process.cwd(), "data", "heartbeat");
 
 // Santi is the super-super user. Every admin has their own heartbeat; only
 // this email can touch someone else's file.
-const SUPER_USER_EMAIL = "sander@vanderkraayswanjones.com";
+const SUPER_USER_EMAIL = "santi@amaso.nl";
 
 function ensureDir(): void {
   fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });

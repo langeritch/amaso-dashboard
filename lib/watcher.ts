@@ -109,6 +109,28 @@ class ProjectWatcher extends EventEmitter {
     this.watchers.set(realPath, watcher);
   }
 
+  refresh() {
+    const config = loadConfig();
+    this.ig = ignore().add(config.ignore);
+    const byPath = new Map<string, ProjectConfig[]>();
+    for (const project of config.projects) {
+      const arr = byPath.get(project.path) ?? [];
+      arr.push(project);
+      byPath.set(project.path, arr);
+    }
+    for (const [realPath, projects] of byPath) {
+      if (!this.watchers.has(realPath)) {
+        this.watchPath(realPath, projects);
+      }
+    }
+    for (const [realPath, watcher] of this.watchers) {
+      if (!byPath.has(realPath)) {
+        void watcher.close();
+        this.watchers.delete(realPath);
+      }
+    }
+  }
+
   async stop() {
     await Promise.all([...this.watchers.values()].map((w) => w.close()));
     this.watchers.clear();

@@ -10,6 +10,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import process from "node:process";
+import { spawnEnvOverrides } from "./claude-accounts";
 
 export type ClaudeRunState = "running" | "completed" | "failed" | "cancelled";
 
@@ -138,6 +139,8 @@ export function startRun(
       delete cleanEnv[key];
     }
   }
+  // Active-account routing — see lib/claude-accounts.ts.
+  Object.assign(cleanEnv, spawnEnvOverrides());
 
   const proc = spawn(spawnCmd, spawnArgs, {
     cwd: projectRoot,

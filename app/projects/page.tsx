@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { FolderKanban } from "lucide-react";
+import { FolderKanban, StickyNote } from "lucide-react";
 import { requireUser } from "@/lib/guard";
 import { visibleProjects } from "@/lib/access";
 import { getHistory } from "@/lib/history";
@@ -89,7 +89,17 @@ export default async function ProjectsPage() {
               Live view of projects running on this machine.
             </p>
           </div>
-          {user.role === "admin" && <NewProjectButton />}
+          <div className="flex items-center gap-2">
+            <Link
+              href="/remarks"
+              className="amaso-fx inline-flex items-center gap-1.5 rounded-md border border-neutral-800/80 bg-neutral-900/50 px-3 py-1.5 text-xs text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900/80 hover:text-neutral-100"
+              title="Remarks"
+            >
+              <StickyNote className="h-3.5 w-3.5" />
+              <span>Remarks</span>
+            </Link>
+            {user.role === "admin" && <NewProjectButton />}
+          </div>
         </header>
 
         {showPeopleActivity && (

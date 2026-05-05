@@ -5,7 +5,7 @@ import ShareIngress from "../components/ShareIngress";
 import SparProvider from "../components/SparProvider";
 import { SparFooterProvider } from "../components/SparFooterContext";
 import SparMiniOverlay from "../components/SparMiniOverlay";
-import SparMiniPlayer from "../components/SparMiniPlayer";
+import GlobalFooter from "../components/GlobalFooter";
 import SplashScreen from "../components/SplashScreen";
 import UserTracker from "../components/UserTracker";
 import { getCurrentUser } from "../lib/auth";
@@ -167,7 +167,7 @@ export default async function RootLayout({
               <UserTracker />
               {children}
               <SparMiniOverlay />
-              <SparMiniPlayer />
+              <GlobalFooter />
             </SparFooterProvider>
           </SparProvider>
         ) : (

@@ -17,8 +17,10 @@ data/user-knowledge-graph/
 data/chat/
 data/remarks/
 data/heartbeat/
+data/user-profile/
 data/graph/
 data/graph.json
+data/spar-dispatches.json
 data/browser-profiles/
 data/recording-chrome-profile/
 data/terminal-uploads/

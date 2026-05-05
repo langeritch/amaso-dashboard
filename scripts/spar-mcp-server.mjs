@@ -296,6 +296,104 @@ const TOOLS = [
     },
   },
   {
+    name: "read_user_profile",
+    description:
+      "Read the calling user's persona profile (markdown) — language, tone, verbosity, communication style, and behavioural rules tailored to this specific user. The profile is already injected into your system prompt; reach for this tool only when you need to see the exact text before updating it via update_user_profile.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "update_user_profile",
+    description:
+      "Overwrite the calling user's persona profile markdown. Use to record durable preferences the user expresses across conversations — language they want replies in, tone, verbosity, things to avoid, recurring context. Read the current profile first and merge — this REPLACES the file. Keep the existing structure (Language / Tone / Verbosity / Role headers, then Communication style / Context / Instructions sections). Don't narrate the update aloud.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: {
+          type: "string",
+          description: "Full new markdown body of the profile. Replaces existing content. Max 16000 chars.",
+        },
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_brain_files",
+    description:
+      "Discover what's actually in the brain markdown tree at the structured-memory root. Returns one entry per file or directory with relPath, size, modified mtime, and isDirectory. Pass an optional subdir (e.g. 'users/santi') to scope the listing, and recursive:true to walk the whole subtree. Use before write_brain_file when you're not sure where a fact belongs, and to confirm whether today's daily log already exists.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        subdir: {
+          type: "string",
+          description:
+            "Optional subdirectory under the brain root (forward slashes ok). Empty / omitted = list the root.",
+        },
+        recursive: {
+          type: "boolean",
+          description: "When true, walk the subtree. Default false (one level only).",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_brain_file",
+    description:
+      "Read a brain markdown file by relative path (e.g. 'brain.md', 'users/santi/profile.md', 'daily/2026-05-01.md'). Returns relPath + size + truncated flag + content. The first 256 KB are returned verbatim; longer files are truncated with truncated:true. Use before write_brain_file so you preserve existing content (read-modify-write).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rel_path: {
+          type: "string",
+          description: "Path relative to the brain root, forward slashes ok.",
+        },
+      },
+      required: ["rel_path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_brain_file",
+    description:
+      "Write a brain markdown file directly. Two modes:\n" +
+      "  1. Whole-file write — pass `content` to replace the file body. Creates parent directories and the file itself if missing (use this for new daily logs).\n" +
+      "  2. Targeted patch — pass `find` (substring or regex when isRegex=true) plus `replacement` to swap a specific section in place. The find substring must be unique in the file; ambiguity errors out so you don't accidentally edit the wrong block.\n\n" +
+      "Always read_brain_file first so you don't blow away existing content. Only .md files are writable. Path must stay inside the brain root (no '..', no absolute paths).\n\n" +
+      "Use this in place of creating a remark tagged 'brain' — you can land facts in the right markdown file (decisions.md, lessons.md, projects.md, the user's daily log, etc.) directly during a phone-driven session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rel_path: {
+          type: "string",
+          description: "Path relative to the brain root, must end in .md.",
+        },
+        content: {
+          type: "string",
+          description: "Whole-file mode: full new file body. Mutually exclusive with find/replacement.",
+        },
+        find: {
+          type: "string",
+          description: "Patch mode: substring (or regex if isRegex=true) to find. Must be unique in the file.",
+        },
+        isRegex: {
+          type: "boolean",
+          description: "Treat `find` as a regex (multiline mode). Default false.",
+        },
+        replacement: {
+          type: "string",
+          description: "Patch mode: text that replaces the matched section.",
+        },
+      },
+      required: ["rel_path"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "youtube_search",
     description:
       "Search YouTube for videos matching a free-text query. Returns up to 5 results with id, title, channel, duration (seconds), and thumbnail URL. Use this to find a video the user can play as thinking-time filler — e.g. 'lo-fi beats 1 hour', 'Al Jazeera live Gaza', 'Rick Beato new song review'. This does NOT start playback; pass the chosen `id` to `youtube_play` to do that.",
@@ -378,7 +476,7 @@ const TOOLS = [
   {
     name: "filler_set_mode",
     description:
-      "Change what plays during the assistant's thinking gaps and persist it (telegram-voice/filler-config.json — survives reloads, the dashboard and Telegram Python worker both pick it up).\n\nModes:\n- 'news' — Middle East & world headlines (pre-rendered clips). url_or_topic narrows the pool ('AI safety', 'tech').\n- 'fun-facts' — curated trivia spoken via dashboard TTS. url_or_topic is an optional topic hint ('space', 'history').\n- 'calendar' — upcoming items from the heartbeat / agenda spoken via TTS. url_or_topic is an optional range hint ('today', 'this week').\n- 'youtube' — the currently-selected video plays on the dashboard. url_or_topic can be a YouTube URL the user named — but you still have to call youtube_play to actually load it; this just records the preference.\n- 'quiet' — no spoken content, ambient windchime only. (Preferred user-facing label.)\n- 'hum' — legacy alias of 'quiet'.\n- 'off' — fully silent, not even the windchime.\n\nCall when the user asks to switch ('play fun facts', 'just the calendar', 'turn it off', 'silence please', 'news about AI', etc.). Use filler_get_mode first if you need to know what's currently set before changing.",
+      "Change what plays during the assistant's thinking gaps and persist it (telegram-voice/filler-config.json — survives reloads, the dashboard and Telegram Python worker both pick it up).\n\nModes:\n- 'news' — Middle East & world headlines (pre-rendered clips). url_or_topic narrows the pool ('AI safety', 'tech').\n- 'fun-facts' — curated trivia spoken via dashboard TTS. url_or_topic is an optional topic hint ('space', 'history').\n- 'calendar' — upcoming items from the heartbeat / agenda spoken via TTS. url_or_topic is an optional range hint ('today', 'this week').\n- 'youtube' — the currently-selected video plays on the dashboard. url_or_topic can be a YouTube URL the user named — but you still have to call youtube_play to actually load it; this just records the preference.\n- 'quiet' — no spoken content, ambient windchime only. (Preferred user-facing label.)\n- 'hum' — legacy alias of 'quiet'.\n\nTo silence the assistant entirely (no replies spoken at all), the user toggles the speaker button in the media drawer — that is a separate per-client TTS mute, not a filler mode. Don't try to do that via this tool; the dashboard collapses any legacy 'off' value to 'quiet'.\n\nCall when the user asks to switch ('play fun facts', 'just the calendar', 'silence please', 'news about AI', etc.). Use filler_get_mode first if you need to know what's currently set before changing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -391,7 +489,6 @@ const TOOLS = [
             "youtube",
             "quiet",
             "hum",
-            "off",
           ],
           description:
             "The filler mode to switch to. See tool description for what each one plays.",
@@ -399,7 +496,7 @@ const TOOLS = [
         url_or_topic: {
           type: "string",
           description:
-            "Optional mode-specific hint. For 'news' / 'fun-facts' / 'calendar' a topic or range hint; for 'youtube' a video URL the user mentioned. Ignored for 'quiet' / 'hum' / 'off'. Omit if the user didn't specify one.",
+            "Optional mode-specific hint. For 'news' / 'fun-facts' / 'calendar' a topic or range hint; for 'youtube' a video URL the user mentioned. Ignored for 'quiet' / 'hum'. Omit if the user didn't specify one.",
         },
       },
       required: ["mode"],
@@ -430,6 +527,16 @@ const TOOLS = [
     name: "youtube_status",
     description:
       "Report what YouTube filler is currently doing: selected video (if any), server's intent (playing|paused|idle), last-known playback position in seconds, and whether the position report is stale (no browser update in the last 5 s). Use when the user asks 'what's playing?' or when you want to confirm that a recent youtube_play call actually landed on the dashboard.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "autopilot_status",
+    description:
+      "Check whether autopilot is currently enabled and read the current strategic directive (the user's north star that shapes every autonomous decision). Read-only — does not toggle anything. Returns { enabled: boolean, directive: string } where `directive` is empty string when none has been set. Use when the user asks 'is autopilot on?' / 'what's the directive?' before deciding whether to flip it via control_dashboard's toggle_autopilot or set_directive.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -541,6 +648,58 @@ const TOOLS = [
         project_id: { type: "string", description: "Project id." },
       },
       required: ["project_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_project",
+    description:
+      "Register a new project in the dashboard. Creates the directory on disk if no path is specified. Admin only. Use when the user wants to start a new project — saves manual config editing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Unique project id (lowercase, digits, dashes). e.g. 'superskunk'",
+        },
+        name: {
+          type: "string",
+          description: "Display name for the project. e.g. 'SUPERSKUNK Coffeeshop'",
+        },
+        path: {
+          type: "string",
+          description:
+            "Absolute filesystem path. If omitted, auto-creates under the projects root.",
+        },
+        visibility: {
+          type: "string",
+          enum: ["team", "client", "public"],
+          description: "Access level. Default: team",
+        },
+        sub_path: {
+          type: "string",
+          description: "Optional subfolder scope within path",
+        },
+        preview_url: { type: "string", description: "Public preview URL" },
+        live_url: { type: "string", description: "Production URL" },
+        dev_port: { type: "integer", description: "Local dev server port" },
+        dev_command: { type: "string", description: "Custom dev startup command" },
+        deploy_branch: { type: "string", description: "Git branch to deploy from" },
+      },
+      required: ["id", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "delete_project",
+    description:
+      "Remove a project from the dashboard config. Does NOT delete files from disk — only unregisters it. Admin only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Project id to remove" },
+      },
+      required: ["id"],
       additionalProperties: false,
     },
   },
@@ -782,6 +941,44 @@ const TOOLS = [
     },
   },
   {
+    name: "dashboard_control",
+    description:
+      "Drive the dashboard UI for the current user. Lets you flip autopilot, open or close the left/right sidebars, start a fresh conversation, or set the autopilot directive remotely — anything the user could click, you can trigger here. The change appears instantly on whatever tab the user has open and persists server-side for autopilot/directive actions. Use sparingly: the user should rarely need to flip these themselves once you've established a directive.\n\n" +
+      "Actions:\n" +
+      "  • toggle_autopilot — pass `value: true|false`. Enables/disables the autonomous loop. Persisted in autopilot_users.\n" +
+      "  • open_sidebar / close_sidebar — pass `side: \"left\"|\"right\"`. Left = conversations / threads. Right = autopilot panel.\n" +
+      "  • new_conversation — start a brand-new spar thread. Clears the local transcript on the user's tab.\n" +
+      "  • set_directive — pass `value: string` (the strategic north star, max 2000 chars). Persisted in autopilot_users.directive and picked up on the next dispatch completion.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "toggle_autopilot",
+            "open_sidebar",
+            "close_sidebar",
+            "new_conversation",
+            "set_directive",
+          ],
+          description: "Which UI action to perform.",
+        },
+        value: {
+          description:
+            "Action-dependent payload. boolean for toggle_autopilot, string for set_directive, omit for sidebar / new_conversation actions.",
+        },
+        side: {
+          type: "string",
+          enum: ["left", "right"],
+          description:
+            "For open_sidebar / close_sidebar — which sidebar to target.",
+        },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "speak_tts",
     description:
       "Synthesize text via the local Kokoro sidecar (the dashboard's TTS engine). Returns synthesised byte count. Note: the audio bytes don't currently auto-play in the browser via this tool — synthesis runs server-side and primes Kokoro's caches. For audible playback, prefer letting your conversational reply ride the normal TTS reply path; reach for this tool when the user explicitly wants you to pre-warm or test the voice pipeline.",
@@ -802,21 +999,43 @@ const TOOLS = [
   },
 ];
 
-async function callTool(name, args) {
-  const res = await fetch(`${DASHBOARD_URL}/api/internal/spar-tools`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
-    },
-    body: JSON.stringify({ tool: name, args: args || {} }),
-  });
+async function callTool(name, args, _attempt = 1) {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAYS = [500, 1500, 3000];
+  let res;
+  try {
+    res = await fetch(`${DASHBOARD_URL}/api/internal/spar-tools`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify({ tool: name, args: args || {} }),
+    });
+  } catch (err) {
+    if (_attempt < MAX_RETRIES) {
+      process.stderr.write(`[spar-mcp] fetch failed (attempt ${_attempt}/${MAX_RETRIES}), retrying: ${String(err).slice(0, 120)}\n`);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS[_attempt - 1]));
+      return callTool(name, args, _attempt + 1);
+    }
+    throw new Error(`network error after ${MAX_RETRIES} attempts: ${String(err).slice(0, 120)}`);
+  }
   const text = await res.text();
   let json;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(`dashboard returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+    if (_attempt < MAX_RETRIES) {
+      process.stderr.write(`[spar-mcp] non-JSON response (${res.status}, attempt ${_attempt}/${MAX_RETRIES}), retrying\n`);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS[_attempt - 1]));
+      return callTool(name, args, _attempt + 1);
+    }
+    throw new Error(`dashboard returned non-JSON after ${MAX_RETRIES} attempts (${res.status}): ${text.slice(0, 200)}`);
+  }
+  if (res.status >= 500 && _attempt < MAX_RETRIES) {
+    process.stderr.write(`[spar-mcp] server error ${res.status} (attempt ${_attempt}/${MAX_RETRIES}), retrying\n`);
+    await new Promise((r) => setTimeout(r, RETRY_DELAYS[_attempt - 1]));
+    return callTool(name, args, _attempt + 1);
   }
   if (!res.ok || !json.ok) {
     throw new Error(json && json.error ? json.error : `dashboard returned ${res.status}`);

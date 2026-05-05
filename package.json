@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@playwright/mcp": "^0.0.73",
     "@types/bcryptjs": "^2.4.6",
     "@types/diff": "^7.0.2",
     "@xterm/addon-fit": "^0.11.0",

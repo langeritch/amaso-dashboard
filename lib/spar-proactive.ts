@@ -35,8 +35,6 @@ import { readHeartbeat } from "./heartbeat";
 import { readProfile } from "./user-profile";
 import { loadBrainContext } from "./spar-brain";
 import { getStatus as getTerminalStatus } from "./terminal-backend";
-import { isAutopilotEnabled, readAutopilotDirective } from "./autopilot";
-import { buildAutopilotPromptBlock } from "./autopilot-prompt";
 import {
   appendMessage,
   createConversation,
@@ -224,13 +222,12 @@ function buildUserPrompt(input: ProactiveInput, userName: string): string {
     parts.push(
       "Summarise what got done, whether it succeeded, and any open questions. Keep it brief and conversational.",
     );
-    if (isAutopilotEnabled(input.userId)) {
-      parts.push(
-        buildAutopilotPromptBlock({
-          directive: readAutopilotDirective(input.userId),
-        }),
-      );
-    }
+    parts.push(
+      "[AUTO-REPORT — READ ONLY] This is a passive status report. " +
+        "DO NOT call dispatch_to_project, DO NOT send keys or prompts " +
+        "into any terminal, DO NOT create remarks or queue follow-up " +
+        "tasks. Read the scrollback above, summarise, stop.",
+    );
   } else if (input.kind === "heartbeat") {
     parts.push("Trigger: heartbeat-cron flagged this for the user just now.");
     parts.push(`Cron summary: ${input.summary}`);
@@ -360,8 +357,14 @@ export async function runProactiveTurn(
     return { ok: false, reason: "unknown_user" };
   }
 
-  const autopilotOn =
-    input.kind === "dispatch_complete" && isAutopilotEnabled(input.userId);
+  // Auto-report is a passive, read-only summary path. We used to upgrade
+  // dispatch_complete to opus + 8 turns + autopilot directive, which let
+  // Claude call dispatch_to_project on its own — that produced a runaway
+  // loop where each completion fired a fresh dispatch and the loop never
+  // ended. Auto-report now stays at the default haiku/single-turn budget
+  // for every kind, no exceptions. Manual autopilot stays available as a
+  // separate user-driven feature; it just doesn't auto-fire here.
+  const autopilotOn = false;
 
   let reply: string;
   try {

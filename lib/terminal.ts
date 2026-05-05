@@ -1,25 +1,27 @@
 // Per-project Claude CLI terminal sessions.
 //
-// One pseudo-TTY per project id. Sessions persist across browser reloads
-// and tab switches — they only die when:
-//   - The admin clicks "Stop" / "Restart"
-//   - The dashboard process itself restarts (state is intentionally ephemeral,
-//     we don't want to silently revive half-broken sessions)
-//   - The child process exits on its own
+// Stage 1 of multi-terminal support (remark #285): the registry is now
+// keyed by sessionId, and sessions carry a projectId attribute, so a
+// single project can in principle host multiple concurrent sessions.
+// In practice every existing caller still passes only projectId, in
+// which case sessionId === projectId — bit-for-bit identical
+// behaviour to the pre-refactor code. Stages 2+ will introduce real
+// session-aware spawn paths and UI.
 //
-// Output is broadcast to every WebSocket client subscribed to that session,
-// so multiple browser tabs / devices see the same live stream. Input is
-// accepted from any connected client — the server doesn't arbitrate.
+// Output is broadcast to every WebSocket client subscribed to that
+// session's id, so multiple browser tabs / devices see the same live
+// stream. Input is accepted from any connected client — the server
+// doesn't arbitrate.
 
 import { spawn as ptySpawn, type IPty } from "node-pty";
 import { EventEmitter } from "node:events";
 import process from "node:process";
+import { spawnEnvOverrides } from "./claude-accounts";
 import { getProject } from "./config";
-import { pushToUsers } from "./push";
-import { markDispatchCompleted } from "./spar-dispatch";
 
 export interface TerminalStatus {
   projectId: string;
+  sessionId: string;
   running: boolean;
   pid: number | null;
   cwd: string | null;
@@ -31,6 +33,7 @@ export interface TerminalStatus {
 }
 
 interface Session {
+  sessionId: string;
   projectId: string;
   proc: IPty;
   startedAt: number;
@@ -39,25 +42,12 @@ interface Session {
   /** Bounded ring of recent output bytes for replay on reconnect. */
   scrollback: string;
   emitter: EventEmitter;
-  /** True after the user pressed Enter but before the follow-up idle push
-   *  has fired. Prevents duplicate notifications for the same turn and
-   *  keeps us from pushing when Claude simply happens to be silent. */
-  awaitingResponse: boolean;
-  /** User who submitted the current turn — they're the one who gets pinged
-   *  when Claude finishes. null if the input came via an unauthenticated
-   *  path (shouldn't happen in practice, but we no-op the push if so). */
-  notifyUserId: number | null;
-  idleTimer: NodeJS.Timeout | null;
 }
 
 // Per-session ring buffer. 1 MB holds ~10k lines of dense Claude Code
 // output, enough that spar can look back across a long working session
 // without losing early context. Override via AMASO_SCROLLBACK_BYTES.
 const MAX_SCROLLBACK_BYTES = Number(process.env.AMASO_SCROLLBACK_BYTES ?? 1_000_000);
-/** How long Claude must be silent after a submitted prompt before we consider
- *  it "done" and push a notification. Tuned to survive the periodic status
- *  line ("* Baked for …") but fire quickly after a real return-to-prompt. */
-const IDLE_PUSH_MS = 5_000;
 
 declare global {
   // eslint-disable-next-line no-var
@@ -67,6 +57,13 @@ declare global {
 function registry(): Map<string, Session> {
   if (!globalThis.__amasoTerminals) globalThis.__amasoTerminals = new Map();
   return globalThis.__amasoTerminals;
+}
+
+/** Resolve the lookup key. When the caller didn't supply a sessionId
+ *  (every caller in Stage 1), fall back to projectId so the existing
+ *  one-session-per-project behaviour is preserved. */
+function resolveSessionId(projectId: string, sessionId?: string): string {
+  return sessionId ?? projectId;
 }
 
 interface ClaudeBinary {
@@ -123,19 +120,26 @@ function cleanEnv(): NodeJS.ProcessEnv {
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";
   env.FORCE_COLOR = "3";
+  // Per-account routing — when the operator has picked an account in
+  // /settings, point the CLI at that account's credentials dir so a
+  // freshly spawned `claude` reads the right .credentials.json. No-op
+  // when the feature has never been used.
+  Object.assign(env, spawnEnvOverrides());
   return env;
 }
 
-export function getSession(projectId: string): Session | null {
-  return registry().get(projectId) ?? null;
+export function getSession(projectId: string, sessionId?: string): Session | null {
+  return registry().get(resolveSessionId(projectId, sessionId)) ?? null;
 }
 
-export function getStatus(projectId: string): TerminalStatus {
-  const s = registry().get(projectId);
+export function getStatus(projectId: string, sessionId?: string): TerminalStatus {
+  const sid = resolveSessionId(projectId, sessionId);
+  const s = registry().get(sid);
   const project = getProject(projectId);
   if (!s) {
     return {
       projectId,
+      sessionId: sid,
       running: false,
       pid: null,
       cwd: project?.path ?? null,
@@ -146,7 +150,8 @@ export function getStatus(projectId: string): TerminalStatus {
     };
   }
   return {
-    projectId,
+    projectId: s.projectId,
+    sessionId: s.sessionId,
     running: true,
     pid: s.proc.pid ?? null,
     cwd: project?.path ?? null,
@@ -157,9 +162,15 @@ export function getStatus(projectId: string): TerminalStatus {
   };
 }
 
-export function start(projectId: string, cols = 100, rows = 30): Session {
+export function start(
+  projectId: string,
+  cols = 100,
+  rows = 30,
+  sessionId?: string,
+): Session {
+  const sid = resolveSessionId(projectId, sessionId);
   const reg = registry();
-  const existing = reg.get(projectId);
+  const existing = reg.get(sid);
   if (existing) return existing;
 
   const project = getProject(projectId);
@@ -175,36 +186,59 @@ export function start(projectId: string, cols = 100, rows = 30): Session {
   // via AMASO_TERMINAL_PERMISSION_MODE (e.g. "default", "acceptEdits").
   const permissionMode = process.env.AMASO_TERMINAL_PERMISSION_MODE || "bypassPermissions";
   const sessionArgs = [...args, "--permission-mode", permissionMode];
+
+  // Claim the registry slot before spawning the PTY. Today the path
+  // from `reg.get` above to `ptySpawn` below is fully synchronous, so
+  // two concurrent callers can't truly interleave — but the sentinel
+  // is what makes that property robust to future changes (e.g. an
+  // await sneaking into env prep). A concurrent start() for the same
+  // sid will see this placeholder on its `reg.get` check and return
+  // it, never double-spawning. proc is filled in synchronously below
+  // before this function returns.
+  const session: Session = {
+    sessionId: sid,
+    projectId,
+    proc: null as unknown as IPty,
+    startedAt: Date.now(),
+    cols,
+    rows,
+    scrollback: "",
+    emitter: new EventEmitter(),
+  };
+  // Same rationale as pty-client.ts: the dashboard fans out per-tab
+  // subscriptions plus crons (autopilot, heartbeat, worker-status,
+  // wrapper-level idle observer), easily cresting EventEmitter's
+  // 10-listener default warning. Disable the cap.
+  session.emitter.setMaxListeners(0);
+  reg.set(sid, session);
+
   // Interactive Claude (no --print). Forward slashes in paths, and on
   // Windows we force `useConpty: false` → winpty backend. This matters
   // because Claude itself uses node-pty internally (for its own tool
   // invocations), and ConPTY can't be nested — the inner agent tries to
   // AttachConsole and the whole process dies with exit=1 before we see
   // any output. winpty has no such limitation.
-  const proc = ptySpawn(exe, sessionArgs, {
-    name: "xterm-256color",
-    cols,
-    rows,
-    cwd: project.path.split("\\").join("/"),
-    env: cleanEnv() as { [key: string]: string },
-    useConpty: process.platform !== "win32",
-  });
-
-  const session: Session = {
-    projectId,
-    proc,
-    startedAt: Date.now(),
-    cols,
-    rows,
-    scrollback: "",
-    emitter: new EventEmitter(),
-    awaitingResponse: false,
-    notifyUserId: null,
-    idleTimer: null,
-  };
+  let proc: IPty;
+  try {
+    proc = ptySpawn(exe, sessionArgs, {
+      name: "xterm-256color",
+      cols,
+      rows,
+      cwd: project.path.split("\\").join("/"),
+      env: cleanEnv() as { [key: string]: string },
+      useConpty: process.platform !== "win32",
+    });
+  } catch (err) {
+    // Spawn failed — release the slot so a retry can succeed.
+    reg.delete(sid);
+    throw err;
+  }
+  session.proc = proc;
 
   proc.onData((data) => {
-    // Append to scrollback, trim if over budget
+    // Append to scrollback, trim if over budget. Idle detection lives
+    // in lib/terminal-backend.ts now (subscribed via the wrapper) so
+    // both backends produce the same dispatch-completed signal.
     session.scrollback += data;
     if (session.scrollback.length > MAX_SCROLLBACK_BYTES) {
       session.scrollback = session.scrollback.slice(
@@ -212,82 +246,37 @@ export function start(projectId: string, cols = 100, rows = 30): Session {
       );
     }
     session.emitter.emit("data", data);
-    // Activity seen → (re)arm the idle timer. Claude streams periodic
-    // "Baked for …" pulses so plain "no output" isn't reliable on its own;
-    // we want the timer to reset on every chunk so only a real return-to-
-    // prompt lull tips us over the IDLE_PUSH_MS threshold.
-    if (session.awaitingResponse) armIdleTimer(session);
   });
 
   proc.onExit(({ exitCode, signal }) => {
     session.emitter.emit("exit", { exitCode, signal });
-    if (session.idleTimer) {
-      clearTimeout(session.idleTimer);
-      session.idleTimer = null;
-    }
-    reg.delete(projectId);
+    reg.delete(sid);
   });
 
-  reg.set(projectId, session);
   return session;
 }
 
 export function write(
   projectId: string,
   data: string,
-  notifyUserId: number | null = null,
+  // notifyUserId is accepted for parity with the wrapper signature but
+  // ignored here — idle detection is now driven from terminal-backend.
+  _notifyUserId: number | null = null,
+  sessionId?: string,
 ): boolean {
-  const s = registry().get(projectId);
+  const s = registry().get(resolveSessionId(projectId, sessionId));
   if (!s) return false;
   s.proc.write(data);
-  // Only start watching-for-idle once the user actually submits a prompt
-  // (Enter). Plain character-by-character typing doesn't count — otherwise
-  // a mid-sentence pause would mis-fire a "Claude done" push.
-  if (data.includes("\r") || data.includes("\n")) {
-    s.awaitingResponse = true;
-    if (notifyUserId != null) s.notifyUserId = notifyUserId;
-    armIdleTimer(s);
-  }
   return true;
-}
-
-function armIdleTimer(session: Session) {
-  if (session.idleTimer) clearTimeout(session.idleTimer);
-  session.idleTimer = setTimeout(() => {
-    session.idleTimer = null;
-    if (!session.awaitingResponse) return;
-    session.awaitingResponse = false;
-    const userId = session.notifyUserId;
-    if (userId == null) return;
-    const project = getProject(session.projectId);
-    const name = project?.name ?? session.projectId;
-
-    // If this idle followed a spar-dispatched prompt, mark it complete
-    // so the spar UI can auto-report back without the user asking. No-
-    // op when the user typed the prompt themselves — in that case there
-    // is no pending dispatch log entry to update.
-    try {
-      markDispatchCompleted(userId, session.projectId);
-    } catch {
-      /* non-fatal — the push still fires regardless */
-    }
-
-    void pushToUsers([userId], {
-      title: "Claude is klaar",
-      body: `${name} wacht op je.`,
-      url: `/projects/${encodeURIComponent(session.projectId)}`,
-      tag: `claude-idle-${session.projectId}`,
-      data: { projectId: session.projectId },
-    });
-  }, IDLE_PUSH_MS);
 }
 
 export function resize(
   projectId: string,
   cols: number,
   rows: number,
+  sessionId?: string,
 ): boolean {
-  const s = registry().get(projectId);
+  const s = registry().get(resolveSessionId(projectId, sessionId));
   if (!s) return false;
   s.cols = cols;
   s.rows = rows;
@@ -299,15 +288,16 @@ export function resize(
   return true;
 }
 
-export function stop(projectId: string): boolean {
-  const s = registry().get(projectId);
+export function stop(projectId: string, sessionId?: string): boolean {
+  const sid = resolveSessionId(projectId, sessionId);
+  const s = registry().get(sid);
   if (!s) return false;
   try {
     s.proc.kill();
   } catch {
     /* already dead */
   }
-  registry().delete(projectId);
+  registry().delete(sid);
   return true;
 }
 
@@ -315,8 +305,9 @@ export function subscribe(
   projectId: string,
   onData: (chunk: string) => void,
   onExit: (payload: { exitCode: number; signal: number | undefined }) => void,
+  sessionId?: string,
 ): () => void {
-  const s = registry().get(projectId);
+  const s = registry().get(resolveSessionId(projectId, sessionId));
   if (!s) return () => {};
   s.emitter.on("data", onData);
   s.emitter.on("exit", onExit);
@@ -326,11 +317,29 @@ export function subscribe(
   };
 }
 
-// Best-effort cleanup on dashboard shutdown
+/** Every live session for the given project. Returns a fresh array;
+ *  callers can mutate it freely. Stage 1 always returns 0 or 1
+ *  entries because we still default sessionId to projectId on every
+ *  spawn. Stage 2 flips on real multi-session spawns. */
+export function listSessionsForProject(projectId: string): Session[] {
+  const out: Session[] = [];
+  for (const s of registry().values()) {
+    if (s.projectId === projectId) out.push(s);
+  }
+  return out;
+}
+
+// Best-effort cleanup on dashboard shutdown. Iterates by sessionId
+// (the registry's key) so multi-session projects clean up cleanly
+// once Stage 2 enables them.
 if (!globalThis.__amasoTerminalsCleanupRegistered) {
   globalThis.__amasoTerminalsCleanupRegistered = true as never;
   const killAll = () => {
-    for (const id of Array.from(registry().keys())) stop(id);
+    for (const sid of Array.from(registry().keys())) {
+      const s = registry().get(sid);
+      if (!s) continue;
+      stop(s.projectId, sid);
+    }
   };
   process.on("exit", killAll);
   process.on("SIGINT", () => {

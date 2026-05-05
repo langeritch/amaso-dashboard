@@ -141,6 +141,39 @@ command"* for every line, exits 255, and the task is dead. **Always
 keep `scripts/run-loop-prod.cmd` in CRLF.** Editors with `eol: lf`
 project rules will silently break this file.
 
+### 8. Zombie node holding port 3737 (silent-feature-loss)
+
+A previous `node server.ts` process stays bound to `0.0.0.0:3737` —
+either an orphan from a crashed run-loop or a node spawned outside
+the App task — but its in-process state (kokoro spawn, telegram-voice
+spawn, autopilot cron, WS handlers) is dead or never finished
+booting. The run-loop's `assertPortFree(3737)` then rejects every
+fresh start with `[server] fatal: Error: port 3737 is already in
+use`, logging that line every ~13 s.
+
+**The trap:** the dashboard probe keeps returning 200 from the
+zombie, so the rule-based watchdog never triggers a repair. The
+operator only notices when a feature that depends on a child process
+breaks — e.g. `/spar` loads but the chat/voice WS dies, or kokoro
+TTS silently 503s. This is exactly how 2026-04-28 went bad: pid
+25164 had been bound for 2.5 hours, the run-loop had logged 25 fatal
+lines, every probe was 200, the spar feature didn't work.
+
+**Fix in `Fix-ZombiePortHolder` (watchdog auto-fixer):** scan
+`logs/app.log` tail for the fatal pattern. If we see ≥3 of those
+lines in the last 100, find the LISTENING owner of 3737 via
+`netstat -ano`, kill it by PID, then `Run-Repair` the App task so a
+fresh run-loop binds on its next iteration.
+
+**Manual recovery (when seen by hand):**
+
+```powershell
+schtasks /End /TN AmasoDashboard-App
+$pid_ = (netstat -ano -p tcp | Select-String ':3737\s+0.0.0.0:0\s+LISTENING' | ForEach-Object { ($_ -split '\s+')[-1] })[0]
+Stop-Process -Id $pid_ -Force
+schtasks /Run /TN AmasoDashboard-App
+```
+
 ### 7. `!VAR!` not expanding in `run-loop-prod.cmd`
 
 The script depends on `setlocal EnableDelayedExpansion`. Without it,

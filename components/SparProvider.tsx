@@ -701,13 +701,7 @@ export default function SparProvider({
   //   - no spoken filler is currently playing
   const newsSpeaking = wantsNews && fillerHasContent;
   const ttsContentSpeaking = wantsTtsContent;
-  useAmbientPad(
-    inCall &&
-      fillerShouldPlay &&
-      !vadActive &&
-      !newsSpeaking &&
-      !ttsContentSpeaking,
-  );
+  useAmbientPad(false);
 
   // Unified "what's audible right now" status — drives the always-
   // visible mini-player. Priority order:

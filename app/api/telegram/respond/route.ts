@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { collectFromClaudeCli, type SparMessage } from "@/lib/spar-claude";
 import { readHeartbeat } from "@/lib/heartbeat";
+import { readProfile } from "@/lib/user-profile";
+import { loadBrainContext } from "@/lib/spar-brain";
 import { mintToken, revokeToken } from "@/lib/spar-token";
 import {
   SPAR_AUTOPILOT_SUFFIX,
   SPAR_MODEL,
-  SPAR_SYSTEM_PROMPT,
+  PLAYWRIGHT_TOOLS,
   SPAR_TOOLS,
+  buildSparSystemPrompt,
 } from "@/lib/spar-prompt";
 import { getDb } from "@/lib/db";
 import {
@@ -136,6 +139,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReplyPayload>
   // be the audio channel — prompt, tool access, and memory have to
   // match exactly or the user will notice the hand-off.
   const heartbeat = readHeartbeat(userId);
+  const userProfile = readProfile(userId);
+  const brain = loadBrainContext();
+  const userRow = getDb()
+    .prepare(`SELECT name FROM users WHERE id = ?`)
+    .get(userId) as { name: string } | undefined;
+  const userName = userRow?.name ?? body.caller_name ?? "the user";
+  const baseSystemPrompt = buildSparSystemPrompt(userName);
   const token = mintToken(userId);
   const dashboardUrl = dashboardBaseUrl(req);
 
@@ -149,15 +159,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<ReplyPayload>
   try {
     const raw = await collectFromClaudeCli({
       systemPrompt: autopilot
-        ? SPAR_SYSTEM_PROMPT + SPAR_AUTOPILOT_SUFFIX
-        : SPAR_SYSTEM_PROMPT,
+        ? baseSystemPrompt + SPAR_AUTOPILOT_SUFFIX
+        : baseSystemPrompt,
       heartbeat,
+      userProfile,
+      brain: brain.block,
       history,
       model: SPAR_MODEL,
       tools: {
         token,
         dashboardUrl,
         allowedTools: SPAR_TOOLS,
+        allowedPlaywrightTools: PLAYWRIGHT_TOOLS,
       },
     });
     reply = raw.trim();

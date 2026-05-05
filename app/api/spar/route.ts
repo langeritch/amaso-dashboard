@@ -11,6 +11,7 @@ import { mintToken, revokeToken } from "@/lib/spar-token";
 import {
   SPAR_AUTOPILOT_SUFFIX,
   SPAR_MODEL,
+  PLAYWRIGHT_TOOLS,
   SPAR_TOOLS,
   buildSparSystemPrompt,
 } from "@/lib/spar-prompt";
@@ -511,6 +512,7 @@ export async function POST(req: NextRequest) {
                   token,
                   dashboardUrl,
                   allowedTools: SPAR_TOOLS,
+                  allowedPlaywrightTools: PLAYWRIGHT_TOOLS,
                 },
               },
               {

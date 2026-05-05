@@ -311,6 +311,60 @@ function migrate(d: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges (source);
     CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges (target);
   `);
+
+  // Origin tag added when bridging the per-user spar graph (data/graph/{uid}.json,
+  // see lib/spar-graph.ts) into SQLite. NULL = created/edited via the brain UI;
+  // "spar:<uid>" = synced from that user's spar graph. Sync uses this to scope
+  // its own deletes so brain-UI-authored rows are never touched.
+  const nodeCols = d.prepare("PRAGMA table_info(graph_nodes)").all() as {
+    name: string;
+  }[];
+  if (!nodeCols.some((c) => c.name === "origin")) {
+    d.exec("ALTER TABLE graph_nodes ADD COLUMN origin TEXT");
+    d.exec("CREATE INDEX IF NOT EXISTS idx_graph_nodes_origin ON graph_nodes (origin)");
+  }
+  const edgeCols = d.prepare("PRAGMA table_info(graph_edges)").all() as {
+    name: string;
+  }[];
+  if (!edgeCols.some((c) => c.name === "origin")) {
+    d.exec("ALTER TABLE graph_edges ADD COLUMN origin TEXT");
+    d.exec("CREATE INDEX IF NOT EXISTS idx_graph_edges_origin ON graph_edges (origin)");
+  }
+
+  // Widen the type CHECK constraint to accept 'milestone'. SQLite doesn't
+  // support modifying CHECK in place, so we recreate the table when the
+  // existing definition is missing the new value. Standard 12-step pattern
+  // from sqlite.org/lang_altertable.html — done inside one transaction
+  // with FK enforcement disabled so graph_edges' references survive the
+  // swap.
+  const nodeSchema = d
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='graph_nodes'")
+    .get() as { sql: string } | undefined;
+  if (nodeSchema && !nodeSchema.sql.includes("'milestone'")) {
+    d.pragma("foreign_keys = OFF");
+    d.transaction(() => {
+      d.exec(`
+        CREATE TABLE graph_nodes_new (
+          id         TEXT PRIMARY KEY,
+          type       TEXT NOT NULL CHECK (type IN ('project','person','tech','blocker','decision','milestone')),
+          label      TEXT NOT NULL,
+          status     TEXT,
+          notes      TEXT,
+          claude_md  TEXT,
+          updated_at INTEGER NOT NULL,
+          origin     TEXT
+        );
+        INSERT INTO graph_nodes_new (id, type, label, status, notes, claude_md, updated_at, origin)
+          SELECT id, type, label, status, notes, claude_md, updated_at, origin FROM graph_nodes;
+        DROP TABLE graph_nodes;
+        ALTER TABLE graph_nodes_new RENAME TO graph_nodes;
+        CREATE INDEX IF NOT EXISTS idx_graph_nodes_origin ON graph_nodes (origin);
+      `);
+    })();
+    d.pragma("foreign_key_check");
+    d.pragma("foreign_keys = ON");
+  }
+
   seedGraph(d);
 
   // First-run backfill for the unread-badge feature: assume every existing
@@ -419,6 +473,122 @@ function migrate(d: Database.Database) {
       ON companion_command_queue (user_id, enqueued_at);
     CREATE INDEX IF NOT EXISTS idx_companion_queue_expiry
       ON companion_command_queue (expires_at);
+
+    -- Autopilot per-user state. The toggle is now a mode switch on the
+    -- auto-report path (not a cron dispatcher); this row anchors both
+    -- the on/off bit (the "enabled" column) and the optional
+    -- "directive" string -- the strategic mission/north star the
+    -- autonomous loop reads when picking and creating tasks. Saving a
+    -- directive while autopilot is off is allowed (the directive is
+    -- preserved); only "enabled" gates the runtime behaviour. Keyed
+    -- by user_id so toggling is idempotent; CASCADE on user delete so
+    -- the row goes when the account does.
+    CREATE TABLE IF NOT EXISTS autopilot_users (
+      user_id    INTEGER PRIMARY KEY,
+      enabled_at INTEGER NOT NULL,
+      enabled    INTEGER NOT NULL DEFAULT 1,
+      directive  TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    -- Persisted spar conversations: each user keeps a server-side
+    -- transcript per thread so reloads, device switches, and the new
+    -- left-sidebar thread list all read from the same source. Messages
+    -- arrive via /api/spar/conversations/[id]/messages — the streaming
+    -- /api/spar route persists at the end of each turn. tool_calls is
+    -- a JSON snapshot of any tool steps the assistant emitted that
+    -- turn so the rendered transcript can show the same step cards on
+    -- a different device. Title is auto-derived from the first user
+    -- message (or "New conversation" until one arrives) so the
+    -- sidebar list reads naturally without a separate rename UI.
+    CREATE TABLE IF NOT EXISTS spar_conversations (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER NOT NULL,
+      title      TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_spar_conversations_user
+      ON spar_conversations (user_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS spar_messages (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL,
+      role            TEXT    NOT NULL CHECK (role IN ('user','assistant','system')),
+      content         TEXT    NOT NULL,
+      tool_calls      TEXT,
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY (conversation_id) REFERENCES spar_conversations(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_spar_messages_conv
+      ON spar_messages (conversation_id, created_at);
+  `);
+
+  // Additive columns layered on top of spar_conversations as the
+  // auto-naming + drift detection landed: drift_notice surfaces a
+  // soft "consider starting a new chat" banner when Haiku decides the
+  // thread has wandered; auto_named flips true on the first
+  // server-generated title so user-renamed threads stay sticky;
+  // last_named_at_count records how many assistant turns were behind
+  // the last (re-)naming so the same trigger doesn't fire twice when
+  // a tab races. All optional — pre-existing rows simply read NULL.
+  const sparConvCols = d
+    .prepare("PRAGMA table_info(spar_conversations)")
+    .all() as { name: string }[];
+  if (!sparConvCols.some((c) => c.name === "drift_notice")) {
+    d.exec("ALTER TABLE spar_conversations ADD COLUMN drift_notice TEXT");
+  }
+  if (!sparConvCols.some((c) => c.name === "auto_named")) {
+    d.exec(
+      "ALTER TABLE spar_conversations ADD COLUMN auto_named INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  if (!sparConvCols.some((c) => c.name === "last_named_at_count")) {
+    d.exec(
+      "ALTER TABLE spar_conversations ADD COLUMN last_named_at_count INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+
+  // Additive: directive + enabled columns on autopilot_users. The old
+  // schema treated row-presence as the on bit; the directive feature
+  // wants to persist a directive while autopilot is off, so we split
+  // those into an explicit `enabled` column. Existing rows are
+  // back-filled enabled=1 (they were on before the migration). New
+  // installs get the column from the CREATE TABLE above.
+  const autopilotCols = d
+    .prepare("PRAGMA table_info(autopilot_users)")
+    .all() as { name: string }[];
+  if (!autopilotCols.some((c) => c.name === "directive")) {
+    d.exec("ALTER TABLE autopilot_users ADD COLUMN directive TEXT");
+  }
+  if (!autopilotCols.some((c) => c.name === "enabled")) {
+    d.exec(
+      "ALTER TABLE autopilot_users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+    );
+  }
+
+  d.exec(`
+
+    -- Heartbeat tick history. One row per cron tick per user, regardless
+    -- of whether tier 1 fired. Powers the /heartbeat monitoring page
+    -- timeline. tier1_results is JSON describing which deterministic
+    -- checks fired (open remarks, time keyword, stale, idle terminals);
+    -- tier2_summary is the model's verdict text when tier 2 ran (NULL
+    -- when tier 1 was clean and we short-circuited). notified is true if
+    -- the user got a push notification this tick.
+    CREATE TABLE IF NOT EXISTS heartbeat_ticks (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id        INTEGER NOT NULL,
+      at             INTEGER NOT NULL,
+      status         TEXT    NOT NULL CHECK (status IN ('ok','alert')),
+      tier1_results  TEXT,
+      tier2_summary  TEXT,
+      notified       INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_heartbeat_ticks_user_at
+      ON heartbeat_ticks (user_id, at DESC);
   `);
 }
 

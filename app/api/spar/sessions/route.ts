@@ -46,24 +46,37 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
-  // First session for a project keeps the legacy id (= projectId) so
-  // single-session usage stays bit-for-bit compatible. Mirrors the
-  // resolver's "no live sessions yet → return projectId" branch.
   const existing = listSessionsForProject(projectId);
-  const sessionId =
-    existing.length === 0
-      ? projectId
-      : `${projectId}__s${Date.now().toString(36)}${Math.random()
-          .toString(36)
-          .slice(2, 6)}`;
+  if (existing.length > 0) {
+    return NextResponse.json({
+      projectId,
+      sessionId: existing[0].sessionId ?? projectId,
+      reused: true,
+    });
+  }
+  const sessionId = projectId;
 
+  let view;
   try {
-    startTerminal(projectId, undefined, undefined, sessionId);
+    view = startTerminal(projectId, undefined, undefined, sessionId);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 500 },
     );
   }
-  return NextResponse.json({ projectId, sessionId });
+  // Belt-and-suspenders: even after fix #1 makes start() idempotent at
+  // the registry level, two concurrent POSTs that both pass the
+  // listSessionsForProject check above will both call startTerminal —
+  // the first spawns, the second is handed the existing session by
+  // the registry. Detect that second case via startedAt: a fresh spawn
+  // has startedAt ≈ now, a reused session is older than ~1s. Surface
+  // it so the client can avoid double-counting.
+  const reused = typeof view?.startedAt === "number" &&
+    view.startedAt < Date.now() - 1000;
+  return NextResponse.json({
+    projectId,
+    sessionId,
+    ...(reused ? { reused: true } : {}),
+  });
 }

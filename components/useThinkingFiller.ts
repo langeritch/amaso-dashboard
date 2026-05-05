@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   registerFillerStopHandler,
   setFillerAudible,
@@ -43,11 +43,36 @@ import {
 interface ClipMeta {
   id: string;
   kind: "news";
+  title: string | null;
+  source: string | null;
 }
 
 interface IndexResponse {
   clips: ClipMeta[];
   silenceBridgeId: string | null;
+}
+
+export interface NewsFillerState {
+  /** True while a clip is actively decoding/playing (not while
+   *  paused or between clips). The mini-player uses this to flip
+   *  the play/pause icon. */
+  hasContent: boolean;
+  /** Currently-loaded clip (the one whose audio is decoded into the
+   *  active source, or just paused mid-buffer). null when no clip is
+   *  staged. */
+  currentClip: ClipMeta | null;
+  /** Up to ~10 unplayed clips in the order they'll play. Drives the
+   *  "up next" list in the unified mini-player. */
+  upcoming: ClipMeta[];
+  /** User-initiated pause flag. Distinct from the prop-driven
+   *  active=false fade — user pauses persist across active toggles
+   *  (a thinking window that lands while paused stays silent). */
+  paused: boolean;
+  pause: () => void;
+  resume: () => void;
+  /** Advance to the next clip immediately. Drops the current clip's
+   *  resume offset so a re-activation starts fresh. */
+  skip: () => void;
 }
 
 interface ActiveSource {
@@ -80,6 +105,15 @@ const RESUME_MIN_TAIL_S = 0.25;
 const INDEX_URL = "/api/filler/clips";
 const CLIP_URL = (id: string) => `/api/filler/clip/${id}`;
 
+// localStorage key + lifetime cap. Survives reloads so the same news
+// headline can't be heard 10 times across a day's worth of sessions —
+// playedIdsRef alone resets on reload, which is what the user keeps
+// bumping into. Three plays is the soft retire bar: enough that a
+// missed clip can come back around once or twice, low enough that
+// stale headlines actually drop out.
+const PLAY_COUNT_STORAGE_KEY = "news-clip-play-counts";
+const MAX_PLAYS_PER_CLIP = 3;
+
 const TARGET_GAIN = 1.0;
 const FADE_IN_S = 0.25;
 // Matches the Telegram side's silence_bridge duration so the UX
@@ -91,11 +125,15 @@ const FADE_OUT_S = 0.5;
 // anything shorter felt like clips were stacking.
 const GAP_BETWEEN_CLIPS_S = 1.0;
 
-export function useThinkingFiller(active: boolean): { hasContent: boolean } {
+export function useThinkingFiller(active: boolean): NewsFillerState {
   const ctxRef = useRef<AudioContext | null>(null);
   const clipsRef = useRef<ClipMeta[]>([]);
   const bufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const playedIdsRef = useRef<Set<string>>(new Set());
+  // Lifetime play counts, hydrated from localStorage on mount. Distinct
+  // from playedIdsRef (which is session-scoped within-mount dedup):
+  // this one survives reloads and triggers the MAX_PLAYS_PER_CLIP cap.
+  const playCountsRef = useRef<Map<string, number>>(new Map());
   const currentSourceRef = useRef<ActiveSource | null>(null);
   // When `active` flips false mid-clip we stash the clip id + the
   // offset we'd reached, so the next `active=true` resumes the same
@@ -103,7 +141,50 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
   // end so we advance normally when a clip plays through.
   const resumeRef = useRef<ResumeState | null>(null);
   const activeRef = useRef(false);
+  // User-initiated pause. The mini-player drives this directly via
+  // pause()/resume(); it composes with `active` by AND — both have
+  // to be true for audio to flow.
+  const pausedRef = useRef(false);
+  const [paused, setPausedState] = useState(false);
   const [hasContent, setHasContent] = useState(false);
+  const [currentClip, setCurrentClip] = useState<ClipMeta | null>(null);
+  const [upcoming, setUpcoming] = useState<ClipMeta[]>([]);
+
+  // Recompute the "up next" list whenever the played-set or the
+  // clip pool changes. Cap at 10 — long enough to feel like a queue,
+  // short enough that the expanded mini-player card doesn't scroll
+  // forever. Also drops clips that have hit the lifetime play cap so
+  // the queue UI never advertises a clip pickNextClipId would skip.
+  const refreshUpcoming = useCallback(() => {
+    const pool = clipsRef.current.filter(
+      (c) =>
+        !playedIdsRef.current.has(c.id) &&
+        (playCountsRef.current.get(c.id) ?? 0) < MAX_PLAYS_PER_CLIP,
+    );
+    setUpcoming(pool.slice(0, 10));
+  }, []);
+
+  // Bump the lifetime count for a clip and persist immediately.
+  // Synchronous write because the next pickNextClipId call needs to
+  // see the new total, and we can't wait for a microtask if a fade
+  // and reload race. Storage failures (quota / disabled) silently
+  // degrade to in-memory only — losing persistence is much better
+  // than losing playback.
+  const recordPlay = useCallback((clipId: string) => {
+    const next = (playCountsRef.current.get(clipId) ?? 0) + 1;
+    playCountsRef.current.set(clipId, next);
+    if (typeof window === "undefined") return;
+    try {
+      const obj: Record<string, number> = {};
+      for (const [k, v] of playCountsRef.current.entries()) obj[k] = v;
+      window.localStorage.setItem(
+        PLAY_COUNT_STORAGE_KEY,
+        JSON.stringify(obj),
+      );
+    } catch {
+      /* quota / disabled — keep going from memory */
+    }
+  }, []);
 
   // Mount-only: create the AudioContext, fetch the index, pre-decode
   // the first clip. Keep the ctx alive across every active toggle
@@ -111,6 +192,28 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
   useEffect(() => {
     if (typeof window === "undefined") return;
     let cancelled = false;
+
+    // Hydrate lifetime play counts before anything else can call
+    // pickNextClipId. A corrupt blob (hand-edited, partial write)
+    // resets to empty rather than crashing — the user just hears
+    // some already-played clips again, which is the worst case.
+    try {
+      const raw = window.localStorage.getItem(PLAY_COUNT_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object") {
+          const map = new Map<string, number>();
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+              map.set(k, v);
+            }
+          }
+          playCountsRef.current = map;
+        }
+      }
+    } catch {
+      /* corrupt or unavailable — start from empty */
+    }
 
     const Ctor =
       window.AudioContext ??
@@ -134,11 +237,12 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
         if (cancelled) return;
         clipsRef.current = data.clips;
         setHasContent(data.clips.length > 0);
+        refreshUpcoming();
         // Warm up the first couple so the first activation starts fast.
         const warm = data.clips.slice(0, 2);
         void Promise.all(warm.map((c) => fetchAndDecode(c.id)));
         // If `active` flipped true while we were fetching, kick off.
-        if (activeRef.current && data.clips.length > 0) {
+        if (activeRef.current && !pausedRef.current && data.clips.length > 0) {
           void playNext();
         }
       } catch {
@@ -174,7 +278,7 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
 
   useEffect(() => {
     activeRef.current = active;
-    if (active) {
+    if (active && !pausedRef.current) {
       void playNext();
     } else {
       fadeOutCurrent();
@@ -206,16 +310,26 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
     // we return null so the caller goes silent. Better than looping
     // yesterday's headlines mid-call; a replay is an explicit
     // user-initiated flow (via MCP / "play that one again"), not
-    // an automatic fallback.
-    const pool = clips.filter((c) => !playedIdsRef.current.has(c.id));
+    // an automatic fallback. The play-count filter is the lifetime
+    // cap layered on top: a clip that's been heard 3 times across
+    // any combination of sessions retires until the cache rolls.
+    const pool = clips.filter(
+      (c) =>
+        !playedIdsRef.current.has(c.id) &&
+        (playCountsRef.current.get(c.id) ?? 0) < MAX_PLAYS_PER_CLIP,
+    );
     if (pool.length === 0) return null;
     const clip = pool[0];
     playedIdsRef.current.add(clip.id);
+    // Defer the upcoming-list refresh so React doesn't tear into the
+    // ongoing render — pickNextClipId is called from inside playNext,
+    // not a render path.
+    refreshUpcoming();
     return clip.id;
   }
 
   async function playNext(): Promise<void> {
-    if (!activeRef.current) return;
+    if (!activeRef.current || pausedRef.current) return;
     const ctx = ctxRef.current;
     if (!ctx) return;
 
@@ -281,6 +395,11 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
       // position for the next activation.
       if (currentSourceRef.current !== entry) return;
       currentSourceRef.current = null;
+      // Natural end — only here do we count the clip toward its
+      // lifetime cap. Fade-out (assistant interrupting) is not a
+      // full play; the user heard half a sentence and we'll resume
+      // it. Skip is counted separately in the skip() handler.
+      recordPlay(id);
       // Clip finished naturally — any resume snapshot that still
       // points at it is stale. Clear it so the next activation
       // advances to a new clip instead of replaying the tail of
@@ -291,9 +410,13 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
       // Natural end — release audible immediately. Inter-clip gap
       // is silent so the handoff waiter shouldn't block during it.
       setFillerAudible("news-clip", false);
-      if (!activeRef.current) return;
+      // Clear the now-playing metadata once the clip finishes. The
+      // next playNext() resets it; until then the mini-player shows
+      // an empty title (an inter-clip gap, ~1 s).
+      setCurrentClip(null);
+      if (!activeRef.current || pausedRef.current) return;
       window.setTimeout(() => {
-        if (!activeRef.current) return;
+        if (!activeRef.current || pausedRef.current) return;
         void playNext();
       }, GAP_BETWEEN_CLIPS_S * 1000);
     };
@@ -303,12 +426,22 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
     // build a secondary trimmed buffer.
     source.start(0, startOffset);
     setFillerAudible("news-clip", true);
+    // Surface the now-playing clip metadata for the unified mini-
+    // player. Look up by id so the rendered title/source survives
+    // even on resume — pickNextClipId already added it to the played
+    // set and pulled it out of the upcoming pool.
+    const meta = clipsRef.current.find((c) => c.id === id) ?? null;
+    setCurrentClip(meta);
 
     // Prefetch the *next* clip in parallel with playback so onended
     // can chain without a decode roundtrip. Harmless if we never
-    // actually play it — it just sits in the buffer cache.
+    // actually play it — it just sits in the buffer cache. Mirror
+    // the pickNextClipId filter so we don't warm a clip that's
+    // already at the lifetime cap.
     const upcoming = clipsRef.current.find(
-      (c) => !playedIdsRef.current.has(c.id),
+      (c) =>
+        !playedIdsRef.current.has(c.id) &&
+        (playCountsRef.current.get(c.id) ?? 0) < MAX_PLAYS_PER_CLIP,
     );
     if (upcoming) void fetchAndDecode(upcoming.id);
   }
@@ -391,5 +524,70 @@ export function useThinkingFiller(active: boolean): { hasContent: boolean } {
     }
   }
 
-  return { hasContent };
+  // User-pause: fade out + don't chain. Setting pausedRef before
+  // fadeOutCurrent makes the resume snapshot capture the right
+  // offset (fadeOutCurrent already does that bookkeeping).
+  const pause = useCallback(() => {
+    if (pausedRef.current) return;
+    pausedRef.current = true;
+    setPausedState(true);
+    fadeOutCurrent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Resume from where pause left off. Only kicks playback if the
+  // upstream `active` gate is also true — when the assistant isn't
+  // thinking, "resume" just clears the paused flag and the next
+  // thinking window will start playing again.
+  const resume = useCallback(() => {
+    if (!pausedRef.current) return;
+    pausedRef.current = false;
+    setPausedState(false);
+    if (activeRef.current) {
+      void playNext();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Skip: drop the current clip's resume offset and advance. Treats
+  // the current clip as fully consumed (its id stays in playedIds so
+  // we won't loop back to it). Also clears userPaused so a "skip
+  // through silence" doesn't strand on a paused next clip.
+  const skip = useCallback(() => {
+    // Skip counts toward the lifetime cap — the user explicitly said
+    // "I'm done with this one." Capture the id BEFORE fadeOutCurrent
+    // tears the source ref down. Distinct from the prop-driven fade
+    // (active=false), which is an interruption, not a dismissal.
+    const skipped = currentSourceRef.current?.clipId;
+    if (skipped) recordPlay(skipped);
+    resumeRef.current = null;
+    fadeOutCurrent();
+    // Re-clear resumeRef because fadeOutCurrent's bookkeeping may
+    // have re-stored the just-faded clip — skip semantics mean
+    // "don't come back to it".
+    resumeRef.current = null;
+    if (pausedRef.current) {
+      pausedRef.current = false;
+      setPausedState(false);
+    }
+    if (activeRef.current) {
+      // Small delay so the fade tail finishes before the next clip
+      // starts overlapping it.
+      window.setTimeout(() => {
+        if (!activeRef.current || pausedRef.current) return;
+        void playNext();
+      }, FADE_OUT_S * 1000 + 100);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return {
+    hasContent,
+    currentClip,
+    upcoming,
+    paused,
+    pause,
+    resume,
+    skip,
+  };
 }

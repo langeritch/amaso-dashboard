@@ -497,7 +497,7 @@ export default function ChatClient({
         } absolute inset-y-0 left-0 z-30 w-64 flex-shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 text-sm shadow-xl sm:static sm:flex sm:w-56 sm:bg-neutral-950/60 sm:shadow-none`}
       >
         <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2 text-xs uppercase tracking-wide text-neutral-500">
-          <span>Channels</span>
+          <span>Conversations</span>
           <button
             type="button"
             onClick={() => setSidebarOpen(false)}
@@ -507,8 +507,44 @@ export default function ChatClient({
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="thin-scroll flex-1 overflow-auto py-1">
-          <Section label="General">
+        <div className="thin-scroll flex-1 min-h-0 overflow-auto py-1">
+          <Section
+            label="Direct Messages"
+            emphasis
+            action={
+              <button
+                type="button"
+                onClick={() => setShowNewDm(true)}
+                className="rounded p-0.5 text-orange-300/80 hover:bg-orange-900/30 hover:text-orange-200"
+                title="Start a DM"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            }
+          >
+            {grouped.dm.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowNewDm(true)}
+                className="mx-2 my-1 flex w-[calc(100%-1rem)] items-center gap-2 rounded-md border border-dashed border-neutral-800 px-3 py-2 text-left text-[11px] text-neutral-500 hover:border-orange-700/60 hover:bg-orange-900/10 hover:text-orange-200"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Start a direct message
+              </button>
+            ) : (
+              grouped.dm.map((c) => (
+                <ChannelRow
+                  key={c.id}
+                  channel={c}
+                  active={c.id === activeChannelId}
+                  unread={unread[c.id] ?? 0}
+                  onClick={() => pickChannel(c.id)}
+                />
+              ))
+            )}
+          </Section>
+          <div className="mx-3 my-2 h-px bg-neutral-800/80" />
+          <Section label="Channels">
             {grouped.general.map((c) => (
               <ChannelRow
                 key={c.id}
@@ -532,35 +568,6 @@ export default function ChatClient({
               ))}
             </Section>
           )}
-          <Section
-            label="Direct messages"
-            action={
-              <button
-                type="button"
-                onClick={() => setShowNewDm(true)}
-                className="rounded p-0.5 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
-                title="Start a DM"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            }
-          >
-            {grouped.dm.length === 0 ? (
-              <p className="px-3 py-1.5 text-[11px] text-neutral-500">
-                No DMs yet.
-              </p>
-            ) : (
-              grouped.dm.map((c) => (
-                <ChannelRow
-                  key={c.id}
-                  channel={c}
-                  active={c.id === activeChannelId}
-                  unread={unread[c.id] ?? 0}
-                  onClick={() => pickChannel(c.id)}
-                />
-              ))
-            )}
-          </Section>
         </div>
       </aside>
 
@@ -647,7 +654,7 @@ export default function ChatClient({
           <>
             <div
               ref={feedScrollRef}
-              className="thin-scroll flex-1 space-y-2 overflow-auto px-4 py-3"
+              className="thin-scroll flex-1 min-h-0 space-y-2 overflow-auto px-4 py-3"
             >
               {!activeChannel ? (
                 <EmptyHint>Pick a channel on the left.</EmptyHint>
@@ -834,15 +841,23 @@ function groupChannels(channels: ChannelView[]) {
 function Section({
   label,
   action,
+  emphasis,
   children,
 }: {
   label: string;
   action?: React.ReactNode;
+  emphasis?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div className="mt-2 first:mt-0">
-      <div className="flex items-center justify-between px-3 py-1 text-[10px] uppercase tracking-wide text-neutral-500">
+      <div
+        className={`flex items-center justify-between px-3 py-1 text-[10px] uppercase tracking-wide ${
+          emphasis
+            ? "font-semibold text-orange-300/80"
+            : "text-neutral-500"
+        }`}
+      >
         <span>{label}</span>
         {action}
       </div>

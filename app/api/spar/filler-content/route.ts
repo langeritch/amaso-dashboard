@@ -7,8 +7,8 @@
 //
 // Returns 204 when:
 //   - the current mode isn't a TTS-content mode (e.g. "news" still
-//     plays via the WAV pool, "youtube" / "hum" / "off" / "quiet"
-//     have no TTS-spoken content)
+//     plays via the WAV pool, "youtube" / "quiet" have no TTS-spoken
+//     content)
 //   - all sources for the mode produced empty pools (network-failed
 //     RSS, empty heartbeat for calendar mode, etc.)
 // 204 means "nothing to play right now"; the dashboard falls back
