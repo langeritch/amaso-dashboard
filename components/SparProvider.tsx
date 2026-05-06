@@ -1114,6 +1114,22 @@ export default function SparProvider({
         nextIdRef.current = nextLocalId;
         setMessages(next.slice(-MAX_TRANSCRIPT));
         setActiveConversationId(id);
+
+        // Catch unanswered auto-report nudges left behind by a
+        // crash, network blip, or tab that was closed before the
+        // response landed. We walk the loaded history backwards: if
+        // the trailing user message is tagged auto_report and there's
+        // no assistant turn after it in the persisted thread, queue
+        // it up for response. Stops at the first assistant message
+        // (older auto-reports already got their reply).
+        for (let i = incoming.length - 1; i >= 0; i--) {
+          const m = incoming[i];
+          if (m.role === "assistant" && (m.content ?? "").trim().length > 0) break;
+          if (m.role === "user" && isAutoReportTag(m.toolCalls)) {
+            enqueueAutoReport({ messageId: m.id, conversationId: id });
+            break;
+          }
+        }
       } finally {
         setLoadingConversation(false);
       }
@@ -2578,6 +2594,516 @@ export default function SparProvider({
     );
   }
 
+  // ────────────────────────────────────────────────────────────────────
+  // Auto-report responder.
+  //
+  // Server-side terminal-idle.fireIdle drops a synthetic user message
+  // ("check output of terminal for X") into the latest spar conversation
+  // and tags it with `toolCalls: { kind: "auto_report" }`. THIS code
+  // path turns that tag into an assistant response — same shape as if
+  // the user had typed the message and hit send.
+  //
+  // Hard guards (the previous client-driven auto-report was disabled
+  // because the model could call dispatch_to_project, the completion
+  // would re-fire auto-report, and the loop never terminated):
+  //
+  //   1. Server-side: /api/spar receives `readOnlyMode: true`, which
+  //      strips dispatch_to_project / send_keys_to_project / start_/
+  //      stop_terminal / create_/delete_project / deploy_project from
+  //      the model's allowed tools. Even if the system directive is
+  //      ignored, the tools simply aren't there.
+  //   2. Per-message single-fire: processedAutoReportsRef holds every
+  //      message id we've already responded to, persisted to
+  //      localStorage so the guard survives reload.
+  //   3. Cross-tab claim via localStorage TTL — first tab to write
+  //      `amaso.spar.autoReport.claim.<id>` owns the response for 60s.
+  //   4. Already-answered check: if the conversation has any assistant
+  //      message AFTER the auto-report user msg (server restart mid-
+  //      response, sibling tab beat us, etc.), skip and mark processed.
+  //
+  // Queue: in-memory ref of pending {messageId, conversationId} pairs,
+  // mirrored to localStorage on every mutation. Items survive page
+  // reload, network blip, or being received while the assistant was
+  // busy on something else — the queue drains on idle.
+  const AUTO_REPORT_QUEUE_KEY = "amaso.spar.autoReport.queue";
+  const AUTO_REPORT_PROCESSED_KEY = "amaso.spar.autoReport.processed";
+  const AUTO_REPORT_CLAIM_PREFIX = "amaso.spar.autoReport.claim.";
+  const AUTO_REPORT_CLAIM_TTL_MS = 60_000;
+  const AUTO_REPORT_MAX_PROCESSED = 500;
+
+  type AutoReportEntry = { messageId: number; conversationId: number };
+  const autoReportQueueRef = useRef<AutoReportEntry[]>([]);
+  const processedAutoReportsRef = useRef<Set<number>>(new Set());
+  const autoReportFlushTimerRef = useRef<number | null>(null);
+
+  function isAutoReportTag(tc: unknown): boolean {
+    return (
+      !!tc &&
+      typeof tc === "object" &&
+      !Array.isArray(tc) &&
+      (tc as Record<string, unknown>).kind === "auto_report"
+    );
+  }
+
+  function persistAutoReportQueue() {
+    try {
+      window.localStorage.setItem(
+        AUTO_REPORT_QUEUE_KEY,
+        JSON.stringify(autoReportQueueRef.current),
+      );
+    } catch {
+      /* localStorage may be full / disabled — non-fatal */
+    }
+  }
+
+  function persistProcessedAutoReports() {
+    try {
+      let arr = Array.from(processedAutoReportsRef.current);
+      if (arr.length > AUTO_REPORT_MAX_PROCESSED) {
+        arr = arr.slice(-AUTO_REPORT_MAX_PROCESSED);
+        processedAutoReportsRef.current = new Set(arr);
+      }
+      window.localStorage.setItem(
+        AUTO_REPORT_PROCESSED_KEY,
+        JSON.stringify(arr),
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function tryClaimAutoReport(messageId: number): boolean {
+    const key = AUTO_REPORT_CLAIM_PREFIX + messageId;
+    const now = Date.now();
+    try {
+      const existing = window.localStorage.getItem(key);
+      if (existing) {
+        const expiresAt = Number(existing);
+        if (Number.isFinite(expiresAt) && expiresAt > now) return false;
+      }
+      window.localStorage.setItem(key, String(now + AUTO_REPORT_CLAIM_TTL_MS));
+      return true;
+    } catch {
+      // localStorage unavailable — fail open so the response still
+      // fires. Worst case is two tabs respond when both have storage
+      // disabled, which never happens in practice.
+      return true;
+    }
+  }
+
+  function releaseAutoReportClaim(messageId: number) {
+    try {
+      window.localStorage.removeItem(AUTO_REPORT_CLAIM_PREFIX + messageId);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function enqueueAutoReport(entry: AutoReportEntry) {
+    if (processedAutoReportsRef.current.has(entry.messageId)) return;
+    const q = autoReportQueueRef.current;
+    if (q.some((x) => x.messageId === entry.messageId)) return;
+    q.push(entry);
+    persistAutoReportQueue();
+    scheduleAutoReportFlush();
+  }
+
+  function dequeueAutoReport(messageId: number) {
+    const q = autoReportQueueRef.current;
+    const next = q.filter((x) => x.messageId !== messageId);
+    if (next.length !== q.length) {
+      autoReportQueueRef.current = next;
+      persistAutoReportQueue();
+    }
+  }
+
+  function scheduleAutoReportFlush() {
+    if (autoReportFlushTimerRef.current !== null) return;
+    // 50 ms gives React a tick to flush the setMessages from the WS
+    // broadcast or the hydrate path so messagesRef.current contains
+    // the auto-report user message before respondToAutoReport scans it.
+    autoReportFlushTimerRef.current = window.setTimeout(() => {
+      autoReportFlushTimerRef.current = null;
+      flushAutoReportQueue();
+    }, 50);
+  }
+
+  function flushAutoReportQueue() {
+    if (busyRef.current) {
+      // Try again shortly — the queue is persisted, so even a hard
+      // reload couldn't lose it. We just wait for the user's current
+      // turn to finish.
+      autoReportFlushTimerRef.current = window.setTimeout(() => {
+        autoReportFlushTimerRef.current = null;
+        flushAutoReportQueue();
+      }, 1500);
+      return;
+    }
+    const q = autoReportQueueRef.current;
+    if (q.length === 0) return;
+    const next = q[0];
+    void respondToAutoReport(next.messageId, next.conversationId);
+  }
+
+  const respondToAutoReport = useCallback(
+    async (messageId: number, conversationId: number) => {
+      if (processedAutoReportsRef.current.has(messageId)) {
+        dequeueAutoReport(messageId);
+        return;
+      }
+      if (busyRef.current) {
+        // Already mid-turn. Leave in queue; flushAutoReportQueue retries.
+        return;
+      }
+      // Only the tab that has this conversation active answers — keeps
+      // priorHistory honest and lets the other tabs sit out without
+      // needing to reach into the DB.
+      if (activeConversationIdRef.current !== conversationId) return;
+
+      const target = messagesRef.current.find(
+        (m) => m.persistedId === messageId,
+      );
+      if (!target) {
+        // Broadcast hasn't been applied to local state yet. Re-arm.
+        autoReportFlushTimerRef.current = window.setTimeout(() => {
+          autoReportFlushTimerRef.current = null;
+          flushAutoReportQueue();
+        }, 200);
+        return;
+      }
+
+      // Already answered? Skip.
+      const idx = messagesRef.current.indexOf(target);
+      const hasFollowup = messagesRef.current
+        .slice(idx + 1)
+        .some((m) => m.role === "assistant" && m.content.trim().length > 0);
+      if (hasFollowup) {
+        processedAutoReportsRef.current.add(messageId);
+        persistProcessedAutoReports();
+        dequeueAutoReport(messageId);
+        return;
+      }
+
+      // Cross-tab race protection. If another tab claimed first, bail
+      // — they'll write the assistant reply, the WS broadcast will
+      // surface it here, and our hasFollowup check stops the next
+      // attempt. Fall through means we own this nudge.
+      if (!tryClaimAutoReport(messageId)) return;
+
+      const directive =
+        "[AUTO-REPORT — READ ONLY]\n" +
+        "A dispatched terminal task just finished. The user message above " +
+        "(\"check output of terminal for …\") is a synthetic nudge — " +
+        "respond as if they typed it themselves. Read the terminal " +
+        "scrollback with read_terminal_scrollback if you need detail, " +
+        "then summarise what happened in 1-2 sentences.\n\n" +
+        "Hard constraints:\n" +
+        "- DO NOT call dispatch_to_project. No new terminal work.\n" +
+        "- DO NOT send keys, prompts, or any text into any terminal.\n" +
+        "- DO NOT create remarks, projects, or queue follow-up tasks.\n" +
+        "- This is a passive status report. Read, summarise, stop.";
+
+      ttsCancel();
+      spokenCharsRef.current = 0;
+      setBusy(true);
+      const assistantMsg = newMsg("assistant", "");
+      setMessages((prev) => [...prev, assistantMsg]);
+
+      const priorHistory = messagesRef.current
+        .slice(-MAX_TRANSCRIPT)
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      let accumulatedText = "";
+      let accumulatedSteps: ToolStep[] = [];
+      let accumulatedSources: string[] = [];
+      let serverError: string | null = null;
+      let httpFailureText: string | null = null;
+      let allAttemptsFailed = false;
+      let realChunksEmitted = false;
+
+      const RETRY_DELAYS_MS = [0, 500, 1500];
+
+      try {
+        for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+          if (RETRY_DELAYS_MS[attempt] > 0) {
+            await new Promise<void>((r) =>
+              setTimeout(r, RETRY_DELAYS_MS[attempt]),
+            );
+            accumulatedText = "";
+            accumulatedSteps = [];
+            accumulatedSources = [];
+            serverError = null;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsg.id
+                  ? { ...m, content: "", steps: [], sources: [] }
+                  : m,
+              ),
+            );
+          }
+
+          let r: Response;
+          try {
+            r = await fetch("/api/spar", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                autopilot: false,
+                conversationId,
+                messages: priorHistory,
+                systemInjection: directive,
+                skipPersistLastUser: true,
+                readOnlyMode: true,
+              }),
+            });
+          } catch (err) {
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[auto-report] fetch failed (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+              continue;
+            }
+            allAttemptsFailed = true;
+            break;
+          }
+
+          if (!r.ok || !r.body) {
+            httpFailureText = await r.text().catch(() => "spar failed");
+            break;
+          }
+
+          const reader = r.body.getReader();
+          const decoder = new TextDecoder();
+          let lineBuf = "";
+          let streamFailed = false;
+
+          const applyEvent = (evt: Record<string, unknown>) => {
+            const t = evt.t;
+            if (t === "ping") return;
+            if (t === "text" && typeof evt.v === "string") {
+              accumulatedText += evt.v;
+              return;
+            }
+            if (t === "sources" && Array.isArray(evt.v)) {
+              const seen = new Set(accumulatedSources);
+              for (const s of evt.v as unknown[]) {
+                if (typeof s === "string" && s && !seen.has(s)) {
+                  accumulatedSources = [...accumulatedSources, s];
+                  seen.add(s);
+                }
+              }
+              return;
+            }
+            if (
+              t === "tool_use" &&
+              typeof evt.id === "string" &&
+              typeof evt.label === "string"
+            ) {
+              const detail =
+                typeof evt.detail === "string" ? evt.detail : "";
+              accumulatedSteps = [
+                ...accumulatedSteps,
+                {
+                  id: evt.id,
+                  label: evt.label,
+                  detail,
+                  status: "running",
+                  startedAt: Date.now(),
+                },
+              ];
+              if (typeof evt.source === "string" && evt.source) {
+                if (!accumulatedSources.includes(evt.source)) {
+                  accumulatedSources = [...accumulatedSources, evt.source];
+                }
+              }
+              return;
+            }
+            if (t === "tool_result" && typeof evt.id === "string") {
+              const ok = evt.ok !== false;
+              const summary =
+                typeof evt.summary === "string" ? evt.summary : "";
+              accumulatedSteps = accumulatedSteps.map((step) =>
+                step.id === evt.id
+                  ? {
+                      ...step,
+                      status: ok ? "ok" : "error",
+                      summary,
+                      completedAt: Date.now(),
+                    }
+                  : step,
+              );
+              return;
+            }
+            if (t === "error" && typeof evt.v === "string") {
+              serverError = evt.v;
+              return;
+            }
+          };
+
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              lineBuf += decoder.decode(value, { stream: true });
+              let nl: number;
+              let touched = false;
+              while ((nl = lineBuf.indexOf("\n")) !== -1) {
+                const line = lineBuf.slice(0, nl).trim();
+                lineBuf = lineBuf.slice(nl + 1);
+                if (!line) continue;
+                let evt: unknown;
+                try {
+                  evt = JSON.parse(line);
+                } catch {
+                  continue;
+                }
+                if (!evt || typeof evt !== "object") continue;
+                const before = realChunksEmitted;
+                applyEvent(evt as Record<string, unknown>);
+                touched = true;
+                if (
+                  !before &&
+                  (evt as { t?: string }).t &&
+                  (evt as { t?: string }).t !== "ping"
+                ) {
+                  realChunksEmitted = true;
+                }
+              }
+              if (!touched) continue;
+              const soFarText = accumulatedText;
+              const soFarSteps = accumulatedSteps;
+              const soFarSources = accumulatedSources;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsg.id
+                    ? {
+                        ...m,
+                        content: soFarText,
+                        steps: soFarSteps,
+                        sources: soFarSources,
+                      }
+                    : m,
+                ),
+              );
+              flushSpokenText(soFarText, false);
+            }
+          } catch (err) {
+            streamFailed = true;
+            if (realChunksEmitted) break;
+            if (attempt < RETRY_DELAYS_MS.length - 1) {
+              console.warn(
+                `[auto-report] stream dropped (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
+                err instanceof Error ? err.message : String(err),
+              );
+              continue;
+            }
+            allAttemptsFailed = true;
+            break;
+          }
+
+          if (!streamFailed) break;
+        }
+
+        const finalContent = httpFailureText
+          ? `[error: ${httpFailureText.slice(0, 200)}]`
+          : allAttemptsFailed
+            ? "Connection lost after 3 attempts — please try again."
+            : serverError
+              ? accumulatedText
+                ? accumulatedText + `\n[error: ${serverError}]`
+                : `[error: ${serverError}]`
+              : accumulatedText;
+
+        const completedAt = Date.now();
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsg.id
+              ? {
+                  ...m,
+                  content: finalContent,
+                  completedAt,
+                  steps: accumulatedSteps,
+                  sources: accumulatedSources,
+                }
+              : m,
+          ),
+        );
+        flushSpokenText(finalContent, true);
+      } finally {
+        // Single-fire guard: ALWAYS mark this nudge processed, even on
+        // failure. A failed turn shouldn't retry forever — the user
+        // can always type "what happened on X?" to re-ask manually.
+        processedAutoReportsRef.current.add(messageId);
+        persistProcessedAutoReports();
+        dequeueAutoReport(messageId);
+        releaseAutoReportClaim(messageId);
+        setBusy(false);
+        // Drain any other pending nudges that piled up while we were busy.
+        if (autoReportQueueRef.current.length > 0) {
+          scheduleAutoReportFlush();
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  // Hydrate persistent auto-report state on mount: rehydrate the
+  // processed-id set, the pending queue, and run an initial flush.
+  // Without this, a user who reloads the dashboard while a nudge was
+  // queued mid-turn never gets the response — the queue would be
+  // empty and the message would just sit unanswered in the chat.
+  useEffect(() => {
+    try {
+      const rawProcessed = window.localStorage.getItem(
+        AUTO_REPORT_PROCESSED_KEY,
+      );
+      if (rawProcessed) {
+        const parsed = JSON.parse(rawProcessed);
+        if (Array.isArray(parsed)) {
+          processedAutoReportsRef.current = new Set(
+            parsed.filter((x): x is number => typeof x === "number"),
+          );
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const rawQueue = window.localStorage.getItem(AUTO_REPORT_QUEUE_KEY);
+      if (rawQueue) {
+        const parsed = JSON.parse(rawQueue);
+        if (Array.isArray(parsed)) {
+          autoReportQueueRef.current = parsed.filter(
+            (x): x is AutoReportEntry =>
+              !!x &&
+              typeof x === "object" &&
+              typeof (x as AutoReportEntry).messageId === "number" &&
+              typeof (x as AutoReportEntry).conversationId === "number",
+          );
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    if (autoReportQueueRef.current.length > 0) {
+      // Wait a beat for hydrateMessages to fill messagesRef before we
+      // try to scan it for the queued messages.
+      autoReportFlushTimerRef.current = window.setTimeout(() => {
+        autoReportFlushTimerRef.current = null;
+        flushAutoReportQueue();
+      }, 1000);
+    }
+    return () => {
+      if (autoReportFlushTimerRef.current !== null) {
+        window.clearTimeout(autoReportFlushTimerRef.current);
+        autoReportFlushTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /**
    * Apply a cross-device spar:message broadcast. Three cases:
    *
@@ -2619,6 +3145,17 @@ export default function SparProvider({
 
     void refreshConversations();
     if (activeConversationIdRef.current !== convId) return;
+
+    // Detect terminal-completion auto-report nudges (server tags them
+    // via toolCalls.kind = "auto_report"). When one lands, we still
+    // render the user bubble exactly as if Santi had typed the same
+    // message, but we ALSO enqueue an automatic assistant response so
+    // the AI processes it without a manual prod. The respondToAutoReport
+    // path layers in the read-only guard so this can never re-loop into
+    // dispatch_to_project.
+    if (role === "user" && isAutoReportTag(toolCallsRaw)) {
+      enqueueAutoReport({ messageId, conversationId: convId });
+    }
 
     setMessages((prev) => {
       // Case 2: already attached → no-op.

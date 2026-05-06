@@ -422,6 +422,16 @@ function fireIdle(sessionId: string): void {
       userId,
       role: "user",
       content: nudge,
+      // Tag so the client-side auto-responder can recognise this is a
+      // synthetic nudge to react to (single-fire, read-only) rather than
+      // a real user turn. SparProvider hydrates it on WS broadcast and
+      // conversation reload.
+      toolCalls: {
+        kind: "auto_report",
+        projectId,
+        sessionId,
+        completedDispatchId,
+      },
     });
     if (row) {
       broadcastSparMessage(userId, {

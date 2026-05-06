@@ -95,6 +95,21 @@ export async function POST(req: NextRequest) {
      *  bubble for it and we don't write it to the shared voice
      *  session — it isn't a real user utterance. */
     systemInjection?: string;
+    /** Set by the auto-report responder when the latest user message
+     *  in `messages` is already persisted (the synthetic "check output
+     *  of terminal for X" nudge appended by terminal-idle.fireIdle).
+     *  Skips the user-turn appendMessage block so we don't end up
+     *  with two identical user rows in the conversation. */
+    skipPersistLastUser?: boolean;
+    /** Auto-report responder hard-guard. When true, the route strips
+     *  every tool that could mutate a project's terminal or queue more
+     *  work (`dispatch_to_project`, `send_keys_to_project`,
+     *  `start_terminal`, `stop_terminal`, `deploy_project`,
+     *  `create_project`, `delete_project`) from the model's allowed
+     *  tools list. Belt-and-braces on top of the system directive
+     *  telling it not to dispatch — needed because the *previous*
+     *  auto-report design produced infinite dispatch loops. */
+    readOnlyMode?: boolean;
   } | null = null;
   try {
     body = await req.json();
@@ -106,6 +121,25 @@ export async function POST(req: NextRequest) {
   const rawAttachments = Array.isArray(body?.attachments) ? body!.attachments : [];
   const systemInjection =
     typeof body?.systemInjection === "string" ? body.systemInjection.trim() : "";
+  const skipPersistLastUser = body?.skipPersistLastUser === true;
+  const readOnlyMode = body?.readOnlyMode === true;
+  // Tools that could mutate a terminal or queue more work. Stripped
+  // from the model's allowed-tools list when readOnlyMode is set, so
+  // the auto-report responder physically cannot kick off another
+  // dispatch (the previous Haiku-driven auto-report did exactly that
+  // and produced infinite loops).
+  const READ_ONLY_BANNED = new Set<string>([
+    "dispatch_to_project",
+    "send_keys_to_project",
+    "start_terminal",
+    "stop_terminal",
+    "deploy_project",
+    "create_project",
+    "delete_project",
+  ]);
+  const allowedTools = readOnlyMode
+    ? SPAR_TOOLS.filter((t) => !READ_ONLY_BANNED.has(t))
+    : SPAR_TOOLS;
 
   // Resolve / create the active conversation. The body's id is trusted
   // only after a per-user ownership check — otherwise a malicious
@@ -265,6 +299,7 @@ export async function POST(req: NextRequest) {
   // sidebar with placeholder rows.
   const latestForPersist = msgs[msgs.length - 1];
   const persistableUser =
+    !skipPersistLastUser &&
     latestForPersist &&
     latestForPersist.role === "user" &&
     !latestForPersist.content.startsWith("[kickoff]") &&
@@ -511,7 +546,7 @@ export async function POST(req: NextRequest) {
                 tools: {
                   token,
                   dashboardUrl,
-                  allowedTools: SPAR_TOOLS,
+                  allowedTools,
                   allowedPlaywrightTools: PLAYWRIGHT_TOOLS,
                 },
               },
