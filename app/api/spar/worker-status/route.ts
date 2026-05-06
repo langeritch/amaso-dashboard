@@ -23,6 +23,14 @@ import {
 export const dynamic = "force-dynamic";
 
 interface WorkerStatus {
+  /** Ground-truth activity flag: true if the session's terminal
+   *  output changed at any point in the last ACTIVITY_WINDOW_MS.
+   *  Replaces the brittle "is the last line a thinking spinner?"
+   *  regex — if any bytes are flowing (timer ticking, spinner
+   *  redrawing, characters streaming) it's working; otherwise it's
+   *  done. Computed in the route itself by diffing the scrollback
+   *  tail across calls. */
+  outputChanging: boolean;
   /** Stable React key. `<projectId>:<sessionId>` so multiple sessions
    *  for the same project don't collide. For single-session projects
    *  this collapses to `<projectId>:<projectId>` — different from the
@@ -81,6 +89,34 @@ interface WorkerStatus {
 // more context so it can walk past recent spinner rows to find an
 // actual sentence.
 const SUMMARY_TAIL_BYTES = 32_000;
+
+// Ground-truth activity detection: keep a snapshot of the last ~4 KB of
+// every live session's scrollback and the wall-clock timestamp it last
+// changed. On each poll we re-snapshot and compare; any byte difference
+// stamps `lastChangedAt = now`. A session counts as actively working as
+// long as its last change is within ACTIVITY_WINDOW_MS of now — covers
+// timer ticks, spinner redraws, streamed text, anything that emits
+// bytes. When the terminal sits at a static prompt the bytes stop
+// flowing and the row flips to idle 5 s later. Replaces the regex-
+// based "is the last line a thinking spinner?" check, which produced
+// false-positives when Claude Code briefly painted a completion line
+// that still carried an old "(8s)" suffix.
+const ACTIVITY_WINDOW_MS = 5_000;
+const ACTIVITY_TAIL_BYTES = 4_000;
+interface ActivitySnapshot {
+  tail: string;
+  lastChangedAt: number;
+}
+declare global {
+  // eslint-disable-next-line no-var
+  var __amasoWorkerActivity: Map<string, ActivitySnapshot> | undefined;
+}
+function activityMap(): Map<string, ActivitySnapshot> {
+  if (!globalThis.__amasoWorkerActivity) {
+    globalThis.__amasoWorkerActivity = new Map();
+  }
+  return globalThis.__amasoWorkerActivity;
+}
 // Bare prompt-marker / input-box residue from Claude Code's TUI.
 // After cleanScrollback strips box-drawing chars, the multi-line
 // input box collapses down to a lone `❯` (or `>`/`$`/`›`) — never the
@@ -147,6 +183,9 @@ export async function GET() {
   // Sessions are sorted oldest-first so the ordinal labels (#1, #2)
   // stay stable across polls — index 0 → "#1".
   const workers: WorkerStatus[] = [];
+  const activity = activityMap();
+  const liveSessionIds = new Set<string>();
+  const now = Date.now();
   for (const p of projects) {
     const sessions = [...listSessionsForProject(p.id)].sort(
       (a, b) => a.startedAt - b.startedAt,
@@ -166,6 +205,7 @@ export async function GET() {
         state: "idle",
         hint: "No terminal running.",
         lastLine: "",
+        outputChanging: false,
         // Even with no live PTY we still surface the latest prompt the
         // user/spar dispatched here — it's the easiest way to remember
         // "what was this worker doing before it exited" at a glance.
@@ -194,6 +234,29 @@ export async function GET() {
       );
       const cleanedSummary = cleanScrollback(summaryTail);
       const outputSummary = pickOutputSummary(cleanedSummary) || lastLine;
+
+      // Diff this session's tail against the previous snapshot. Any
+      // change (one byte is enough) re-stamps lastChangedAt; the row is
+      // "active" while now - lastChangedAt < ACTIVITY_WINDOW_MS.
+      liveSessionIds.add(session.sessionId);
+      const tail = sb.slice(Math.max(0, sb.length - ACTIVITY_TAIL_BYTES));
+      const prev = activity.get(session.sessionId);
+      let lastChangedAt: number;
+      if (!prev) {
+        // First observation — assume working. The next poll establishes
+        // the baseline, and if nothing actually moved we'll flip to
+        // idle within ACTIVITY_WINDOW_MS.
+        lastChangedAt = now;
+        activity.set(session.sessionId, { tail, lastChangedAt });
+      } else if (prev.tail !== tail) {
+        lastChangedAt = now;
+        prev.tail = tail;
+        prev.lastChangedAt = now;
+      } else {
+        lastChangedAt = prev.lastChangedAt;
+      }
+      const outputChanging = now - lastChangedAt < ACTIVITY_WINDOW_MS;
+
       workers.push({
         id: `${p.id}:${session.sessionId}`,
         projectId: p.id,
@@ -207,6 +270,7 @@ export async function GET() {
         state: finalState,
         hint: finalHint,
         lastLine,
+        outputChanging,
         lastPrompt: dispatchInfo
           ? truncatePrompt(dispatchInfo.latestPrompt)
           : "",
@@ -214,6 +278,12 @@ export async function GET() {
         promptCount: dispatchInfo?.count ?? 0,
       });
     });
+  }
+  // GC: drop activity snapshots for sessions that no longer appear in
+  // any project's live list, otherwise the map grows without bound as
+  // sessions come and go across long-running dashboard processes.
+  for (const id of activity.keys()) {
+    if (!liveSessionIds.has(id)) activity.delete(id);
   }
 
   return NextResponse.json({ workers });
