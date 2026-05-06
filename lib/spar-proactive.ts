@@ -1,14 +1,8 @@
 // Server-side proactive spar turns.
 //
 // Lets the assistant initiate a message without the user having spoken
-// first. Three triggers wired today:
+// first. Two triggers wired today:
 //
-//   - dispatch_complete  — a dispatched terminal task just went idle.
-//                          Server-side fallback for when the user has
-//                          NO spar tab open (tab-open users keep the
-//                          existing client-side queueCompletion path
-//                          which produces an Opus-quality, voice-
-//                          mode-aware reply).
 //   - heartbeat          — the heartbeat cron's tier-2 model verdict
 //                          said "alert this user". Replaces the bare
 //                          push notification with a real spar turn the
@@ -16,6 +10,13 @@
 //   - morning_briefing   — fired once per user per day in the 8:30-9:00
 //                          window. The brain knows the user wants a
 //                          coffee-chat-style daily roundup.
+//
+// Plus a `custom` trigger for ad-hoc directives.
+//
+// (Auto-report on terminal completion used to live here too, but it's
+// been replaced with a dumb synthetic user-message nudge — see
+// terminal-idle.fireIdle. The spar model handles the rest itself with
+// read_terminal_scrollback, no server-side summary generation needed.)
 //
 // Output of every trigger:
 //   1. A persisted assistant message in spar_messages (so it shows up
@@ -30,11 +31,9 @@
 
 import { collectFromClaudeCli } from "./spar-claude";
 import { getDb, type User } from "./db";
-import { getProject } from "./config";
 import { readHeartbeat } from "./heartbeat";
 import { readProfile } from "./user-profile";
 import { loadBrainContext } from "./spar-brain";
-import { getStatus as getTerminalStatus } from "./terminal-backend";
 import {
   appendMessage,
   createConversation,
@@ -49,25 +48,13 @@ import {
 } from "./proactive-telegram";
 
 const PROACTIVE_MODEL = process.env.AMASO_PROACTIVE_MODEL || "haiku";
-// Autopilot mode upgrades the auto-report path: sonnet so the loop can
-// reason across remarks + tool calls, with enough turns to actually run
-// list_recent_remarks → resolve_remark → dispatch_to_project, and a
-// looser char cap because the autonomous report needs room to explain
-// the decision.
-const AUTOPILOT_MODEL = "opus";
-const AUTOPILOT_MAX_TURNS = 8;
-const AUTOPILOT_MAX_REPLY_CHARS = 4000;
 const RATE_LIMIT_MS = Number(process.env.AMASO_PROACTIVE_RATE_LIMIT_MS ?? "300000"); // 5 min
 const MAX_PUSH_BODY_CHARS = 120;
 const MAX_REPLY_CHARS = 800;
 
 const lastSentAt = new Map<number, number>();
 
-export type ProactiveKind =
-  | "dispatch_complete"
-  | "heartbeat"
-  | "morning_briefing"
-  | "custom";
+export type ProactiveKind = "heartbeat" | "morning_briefing" | "custom";
 
 interface BaseInput {
   userId: number;
@@ -76,33 +63,6 @@ interface BaseInput {
    *  uses this so it never gets shadowed by an earlier dispatch ping
    *  fired in the same window. Default: respect the global cooldown. */
   bypassRateLimit?: boolean;
-}
-
-interface DispatchCompleteInput extends BaseInput {
-  kind: "dispatch_complete";
-  projectId: string;
-  /** The dispatch row id (passes through to the optional auto-report
-   *  log lines so we can correlate). Cosmetic. */
-  dispatchId?: string | null;
-  /** Stage 3 of remark #285: which terminal session for the project
-   *  just went idle. Equals projectId for the legacy single-session
-   *  case. The proactive turn uses this to read THAT session's
-   *  scrollback (instead of whichever session getStatus(projectId)
-   *  resolves first) and to label the trigger line so the autopilot
-   *  knows which sibling completed. Optional — fireIdle is the only
-   *  caller today and always passes it, but kept loose so future
-   *  triggers can stay project-scoped. */
-  sessionId?: string;
-  /** 1-based ordinal among the project's currently-live sessions when
-   *  this turn was queued. Surfaces "session #N" in the prompt when
-   *  the project has more than one live session. Snapshotted at fire-
-   *  time by the caller (terminal-idle.fireIdle) so a session that
-   *  exits between fire and turn-execution doesn't shift the label. */
-  sessionOrdinal?: number;
-  /** Total live sessions for the project at fire-time. Lets the
-   *  prompt builder decide whether to surface the "#N" suffix at all
-   *  — solo sessions look identical to pre-Stage-3 prompts. */
-  projectSessionCount?: number;
 }
 
 interface HeartbeatInput extends BaseInput {
@@ -131,7 +91,6 @@ interface CustomInput extends BaseInput {
 }
 
 export type ProactiveInput =
-  | DispatchCompleteInput
   | HeartbeatInput
   | MorningBriefingInput
   | CustomInput;
@@ -165,13 +124,11 @@ function userById(userId: number): User | null {
  */
 function buildSystemPrompt(userName: string, kind: ProactiveKind): string {
   const intro =
-    kind === "dispatch_complete"
-      ? "A dispatched task just finished. Tell the user what happened."
-      : kind === "heartbeat"
-        ? "Something on the user's plate needs surfacing right now."
-        : kind === "morning_briefing"
-          ? "Open the day with a short coffee-chat briefing for the user."
-          : "Speak up about the situation described below.";
+    kind === "heartbeat"
+      ? "Something on the user's plate needs surfacing right now."
+      : kind === "morning_briefing"
+        ? "Open the day with a short coffee-chat briefing for the user."
+        : "Speak up about the situation described below.";
   return `You are ${userName}'s sparring partner. You are reaching out FIRST — the user has not spoken to you yet. ${intro}
 
 Hard rules:
@@ -185,50 +142,7 @@ Hard rules:
 
 function buildUserPrompt(input: ProactiveInput, userName: string): string {
   const parts: string[] = [];
-  if (input.kind === "dispatch_complete") {
-    const project = getProject(input.projectId);
-    const projectLabel = project?.name ?? input.projectId;
-    // Disambiguate when the project has more than one live session,
-    // otherwise keep the legacy single-session phrasing so existing
-    // autopilot prompts read identically.
-    const multiSession =
-      (input.projectSessionCount ?? 0) > 1 &&
-      (input.sessionOrdinal ?? 0) > 0;
-    const triggerLabel = multiSession
-      ? `dispatch finished on project "${projectLabel}" (session #${input.sessionOrdinal} of ${input.projectSessionCount} live sessions).`
-      : `dispatch finished on project "${projectLabel}".`;
-    parts.push(`Trigger: ${triggerLabel}`);
-    try {
-      // Read the SPECIFIC session's scrollback when one was passed.
-      // Without this, getTerminalStatus(projectId) would resolve to
-      // whichever session shares sessionId=projectId (or fail when
-      // none does), and the autopilot would be reasoning about the
-      // wrong terminal.
-      const status = getTerminalStatus(input.projectId, input.sessionId);
-      const tail = status.scrollback.slice(-6_000).trim();
-      if (tail) {
-        parts.push(`Recent terminal output (most recent on the right):`);
-        parts.push("```");
-        parts.push(tail);
-        parts.push("```");
-      } else {
-        parts.push("No terminal scrollback was captured.");
-      }
-    } catch (err) {
-      parts.push(
-        `Could not read terminal scrollback: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    parts.push(
-      "Summarise what got done, whether it succeeded, and any open questions. Keep it brief and conversational.",
-    );
-    parts.push(
-      "[AUTO-REPORT — READ ONLY] This is a passive status report. " +
-        "DO NOT call dispatch_to_project, DO NOT send keys or prompts " +
-        "into any terminal, DO NOT create remarks or queue follow-up " +
-        "tasks. Read the scrollback above, summarise, stop.",
-    );
-  } else if (input.kind === "heartbeat") {
+  if (input.kind === "heartbeat") {
     parts.push("Trigger: heartbeat-cron flagged this for the user just now.");
     parts.push(`Cron summary: ${input.summary}`);
     const heartbeat = readHeartbeat(input.userId).trim();
@@ -291,31 +205,12 @@ function hasUndoneTodayItems(heartbeat: string): boolean {
   return false;
 }
 
-/** Heuristic: does the recent terminal scrollback look like a
- *  failure? Cheap regex over the tail; the assistant turn itself
- *  always reads the full output via read_terminal_scrollback when
- *  the user follows up. */
-function looksLikeTerminalError(scrollback: string): boolean {
-  if (!scrollback) return false;
-  const tail = scrollback.slice(-4_000);
-  return /\b(error|failed|fatal|exception|traceback|panic|denied|cannot find)\b/i.test(
-    tail,
-  );
-}
-
 type Urgency = "high" | "normal";
 
 /** Pick HIGH only when the event genuinely deserves a phone call.
  *  See lib/proactive-telegram.ts for the cooldown and call mechanics. */
-function classifyUrgency(
-  input: ProactiveInput,
-  scrollback: string,
-  heartbeat: string,
-): Urgency {
+function classifyUrgency(input: ProactiveInput, heartbeat: string): Urgency {
   if (input.kind === "morning_briefing") return "high";
-  if (input.kind === "dispatch_complete") {
-    return looksLikeTerminalError(scrollback) ? "high" : "normal";
-  }
   if (input.kind === "heartbeat") {
     return hasUndoneTodayItems(heartbeat) ? "high" : "normal";
   }
@@ -357,15 +252,6 @@ export async function runProactiveTurn(
     return { ok: false, reason: "unknown_user" };
   }
 
-  // Auto-report is a passive, read-only summary path. We used to upgrade
-  // dispatch_complete to opus + 8 turns + autopilot directive, which let
-  // Claude call dispatch_to_project on its own — that produced a runaway
-  // loop where each completion fired a fresh dispatch and the loop never
-  // ended. Auto-report now stays at the default haiku/single-turn budget
-  // for every kind, no exceptions. Manual autopilot stays available as a
-  // separate user-driven feature; it just doesn't auto-fire here.
-  const autopilotOn = false;
-
   let reply: string;
   try {
     const systemPrompt = buildSystemPrompt(user.name, input.kind);
@@ -383,8 +269,8 @@ export async function runProactiveTurn(
       userProfile,
       brain: brainBlock,
       history: [{ role: "user", content: userPrompt }],
-      model: autopilotOn ? AUTOPILOT_MODEL : PROACTIVE_MODEL,
-      maxTurns: autopilotOn ? AUTOPILOT_MAX_TURNS : 1,
+      model: PROACTIVE_MODEL,
+      maxTurns: 1,
     });
   } catch (err) {
     console.warn(
@@ -405,12 +291,11 @@ export async function runProactiveTurn(
     );
     return { ok: false, reason: "model_skipped" };
   }
-  // Hard cap so a runaway reply can't flood the transcript. Autopilot
-  // gets a much higher cap because the autonomous loop reports
-  // multi-step decisions (which remark, why, what was dispatched).
-  const replyCap = autopilotOn ? AUTOPILOT_MAX_REPLY_CHARS : MAX_REPLY_CHARS;
+  // Hard cap so a runaway reply can't flood the transcript.
   const content =
-    trimmed.length > replyCap ? trimmed.slice(0, replyCap) + "…" : trimmed;
+    trimmed.length > MAX_REPLY_CHARS
+      ? trimmed.slice(0, MAX_REPLY_CHARS) + "…"
+      : trimmed;
 
   // Resolve the destination conversation. If the user has any
   // existing thread we append there so the proactive turn sits in
@@ -470,16 +355,7 @@ export async function runProactiveTurn(
       ? input.pushTitle.slice(0, 80)
       : input.kind === "morning_briefing"
         ? "Morning briefing"
-        : input.kind === "dispatch_complete"
-          ? (() => {
-              const base =
-                getProject(input.projectId)?.name ?? input.projectId;
-              return (input.projectSessionCount ?? 0) > 1 &&
-                (input.sessionOrdinal ?? 0) > 0
-                ? `${base} #${input.sessionOrdinal} done`
-                : `${base} done`;
-            })()
-          : (input as CustomInput).pushTitle?.slice(0, 80) ?? "Spar";
+        : input.pushTitle?.slice(0, 80) ?? "Spar";
   const pushBody =
     input.kind === "heartbeat"
       ? input.pushBody.slice(0, MAX_PUSH_BODY_CHARS)
@@ -505,7 +381,6 @@ export async function runProactiveTurn(
   // event is genuinely urgent. classifyUrgency picks HIGH on:
   //   • morning_briefing  (the daily ritual the user explicitly
   //                        opted into via brain memory)
-  //   • dispatch_complete with error keywords in the scrollback tail
   //   • heartbeat with TODAY items not crossed off
   //   • custom turns whose directive contains "urgent"
   // Cooldown (1 / 30 min) prevents a flurry of urgent events from
@@ -513,30 +388,11 @@ export async function runProactiveTurn(
   // because the call → speak → hangup sequence can take 30 s+ and
   // we don't want to block the runProactiveTurn return.
   try {
-    let scrollbackForUrgency = "";
-    if (input.kind === "dispatch_complete") {
-      try {
-        // Same per-session lookup as the prompt builder above —
-        // urgency triage has to read the session that actually
-        // completed, not whichever session the project resolves to
-        // by default.
-        scrollbackForUrgency = getTerminalStatus(
-          input.projectId,
-          input.sessionId,
-        ).scrollback;
-      } catch {
-        /* terminal may be gone — treat as "no error signal" */
-      }
-    }
     const heartbeatForUrgency =
       input.kind === "heartbeat" || input.kind === "morning_briefing"
         ? readHeartbeat(input.userId)
         : "";
-    const urgency = classifyUrgency(
-      input,
-      scrollbackForUrgency,
-      heartbeatForUrgency,
-    );
+    const urgency = classifyUrgency(input, heartbeatForUrgency);
     if (urgency === "high" && !isCallCooldownActive(input.userId)) {
       console.log(
         `[proactive] escalating to telegram call user=${input.userId} kind=${input.kind}`,

@@ -30,10 +30,14 @@
 import { getProject } from "./config";
 import { pushToUsers } from "./push";
 import { markDispatchCompleted } from "./spar-dispatch";
-import { runProactiveTurn } from "./spar-proactive";
+import {
+  appendMessage,
+  createConversation,
+  latestConversationId,
+} from "./spar-conversations";
 import { detectWorkerState } from "./terminal-state";
 import { listSessionsForProject } from "./terminal-backend";
-import { broadcastDispatchCompleted, hasSparUserSocket } from "./ws";
+import { broadcastDispatchCompleted, broadcastSparMessage } from "./ws";
 
 // How long to wait after observing a non-thinking state before firing.
 // Absorbs the ~0.5–1 s gaps Claude leaves between tool calls without
@@ -379,54 +383,62 @@ function fireIdle(sessionId: string): void {
     }
   }
 
-  // If the user has a spar tab open, the SparProvider's queueCompletion
-  // path will produce the in-conversation summary itself (Opus quality,
-  // voice-mode aware). We still send the basic push here so the phone
-  // / locked-screen still buzzes. If NO tab is open, hand off to the
-  // server-side proactive turn — it generates a Haiku summary, persists
-  // an assistant message in the conversation, and sends a richer push
-  // with the actual summary as the body.
-  const tabOpen = hasSparUserSocket(userId);
-  // Disambiguate the push notification body when the project has
-  // multiple live sessions — the user otherwise can't tell which one
-  // just finished from the lock screen.
+  // Push so the phone / locked-screen buzzes regardless of tab state.
   const pushBody =
     projectSessionCount > 1 && sessionOrdinal > 0
       ? `${name} #${sessionOrdinal} wacht op je.`
       : `${name} wacht op je.`;
-  if (tabOpen || !completedDispatchId) {
-    void pushToUsers([userId], {
-      title: "Claude is klaar",
-      body: pushBody,
-      url: `/projects/${encodeURIComponent(projectId)}`,
-      // Per-session push tag so two sessions finishing back-to-back
-      // each get their own notification instead of one collapsing on
-      // top of the other. Falls back to project-only when we don't
-      // have an ordinal (single-session case).
-      tag:
-        projectSessionCount > 1 && sessionOrdinal > 0
-          ? `claude-idle-${projectId}-${sessionOrdinal}`
-          : `claude-idle-${projectId}`,
-      data: { projectId, sessionId, sessionOrdinal },
-    });
-    return;
-  }
+  void pushToUsers([userId], {
+    title: "Claude is klaar",
+    body: pushBody,
+    url: `/projects/${encodeURIComponent(projectId)}`,
+    tag:
+      projectSessionCount > 1 && sessionOrdinal > 0
+        ? `claude-idle-${projectId}-${sessionOrdinal}`
+        : `claude-idle-${projectId}`,
+    data: { projectId, sessionId, sessionOrdinal },
+  });
 
-  console.log(
-    `[idle] no spar tab for user=${userId} — running server-side proactive summary for project=${projectId} session=${sessionId}`,
-  );
-  void runProactiveTurn({
-    kind: "dispatch_complete",
-    userId,
-    projectId,
-    sessionId,
-    sessionOrdinal: projectSessionCount > 1 ? sessionOrdinal : undefined,
-    projectSessionCount,
-    dispatchId: completedDispatchId,
-  }).catch((err) => {
+  // No-op when this idle wasn't a spar dispatch (manual user typing
+  // straight into a terminal shouldn't litter the spar transcript).
+  if (!completedDispatchId) return;
+
+  // Drop a synthetic user message into the latest spar conversation.
+  // Reads exactly like Santi typed it, so the spar model picks it up
+  // and uses read_terminal_scrollback itself when he next interacts.
+  // No server-side AI summary, no Haiku call.
+  const sessionLabel =
+    projectSessionCount > 1 && sessionOrdinal > 0
+      ? `${projectId} session #${sessionOrdinal}`
+      : projectId;
+  const nudge = `check output of terminal for ${sessionLabel}`;
+  try {
+    let conversationId = latestConversationId(userId);
+    if (conversationId == null) {
+      conversationId = createConversation(userId, null).id;
+    }
+    const row = appendMessage({
+      conversationId,
+      userId,
+      role: "user",
+      content: nudge,
+    });
+    if (row) {
+      broadcastSparMessage(userId, {
+        conversationId: row.conversationId,
+        message: {
+          id: row.id,
+          role: row.role,
+          content: row.content,
+          toolCalls: row.toolCalls,
+          createdAt: row.createdAt,
+        },
+      });
+    }
+  } catch (err) {
     console.warn(
-      `[idle] proactive turn threw for project=${projectId} session=${sessionId}:`,
+      `[idle] nudge append failed for project=${projectId} session=${sessionId}:`,
       err instanceof Error ? err.message : String(err),
     );
-  });
+  }
 }

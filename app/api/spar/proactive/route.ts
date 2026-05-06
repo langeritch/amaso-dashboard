@@ -21,8 +21,6 @@ export const dynamic = "force-dynamic";
 
 interface IncomingBody {
   kind?: string;
-  projectId?: string;
-  dispatchId?: string;
   summary?: string;
   pushTitle?: string;
   pushBody?: string;
@@ -43,17 +41,7 @@ export async function POST(req: NextRequest) {
   }
 
   let input: ProactiveInput;
-  if (body.kind === "dispatch_complete") {
-    if (typeof body.projectId !== "string" || !body.projectId) {
-      return NextResponse.json({ error: "missing_projectId" }, { status: 400 });
-    }
-    input = {
-      kind: "dispatch_complete",
-      userId: auth.user.id,
-      projectId: body.projectId,
-      dispatchId: body.dispatchId ?? null,
-    };
-  } else if (body.kind === "heartbeat") {
+  if (body.kind === "heartbeat") {
     if (
       typeof body.summary !== "string" ||
       typeof body.pushTitle !== "string" ||
