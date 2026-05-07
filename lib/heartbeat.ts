@@ -4,9 +4,18 @@ import type { User } from "./db";
 
 const HEARTBEAT_DIR = path.resolve(process.cwd(), "data", "heartbeat");
 
-// Santi is the super-super user. Every admin has their own heartbeat; only
-// this email can touch someone else's file.
-const SUPER_USER_EMAIL = "santi@amaso.nl";
+// Head admins — operate the dashboard top-to-bottom and may touch
+// other users' private surfaces (heartbeat, knowledge, activity panels,
+// destructive global rebuilds). Every admin still has their own
+// heartbeat, but only these emails can read / write someone else's.
+//
+// Adding a co-founder here is a deliberate, named change — admin role
+// alone is not sufficient (a regular team admin shouldn't be able to
+// read Santi's private heartbeat journal, for example).
+const HEAD_ADMIN_EMAILS = new Set<string>([
+  "santi@amaso.nl",
+  "iliac@amaso.nl",
+]);
 
 function ensureDir(): void {
   fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });
@@ -17,7 +26,7 @@ function pathFor(userId: number): string {
 }
 
 export function isSuperUser(user: User): boolean {
-  return user.role === "admin" && user.email === SUPER_USER_EMAIL;
+  return user.role === "admin" && HEAD_ADMIN_EMAILS.has(user.email);
 }
 
 export function canEditHeartbeat(viewer: User, ownerId: number): boolean {
