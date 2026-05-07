@@ -608,6 +608,33 @@ function connectToCloud() {
       sendAck({ id: msg.id, ok, error, result });
       return;
     }
+    // Direct request/response protocol used by the dashboard's newer
+    // device-targeted command path. The legacy `command` envelope
+    // above wraps an inner type and replies with `ack`; this path
+    // takes the type at the top level and replies with
+    // `command.result` keyed on the same `id` for correlation.
+    if (msg.type === "companion.ping" && msg.id) {
+      // Health check. Only answer if the socket is still open at
+      // send time; a late pong via outbox would mislead the
+      // dashboard into thinking the device was alive at the time
+      // it asked.
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({
+            type: "companion.pong",
+            id: msg.id,
+            result: { status: "alive", uptime: process.uptime() },
+          }));
+        } catch {
+          /* socket raced with close; nothing useful to do */
+        }
+      }
+      return;
+    }
+    if ((msg.type === "shell.exec" || msg.type === "fs.read") && msg.id) {
+      handleCommandRequest(msg);
+      return;
+    }
   });
 
   ws.on("close", (code, reason) => {
@@ -682,6 +709,73 @@ function disconnectFromCloud() {
   }
   socket = null;
   wsStatus = "disconnected";
+}
+
+// Route a pre-built response message through the open socket or fall
+// back to the outbox. Used by the direct request/response handlers
+// (shell.exec, fs.read) so a brief disconnect between request arrival
+// and command completion still gets the result back to the dashboard
+// on the next reconnect, instead of forcing a server-side timeout.
+function sendResult(msg) {
+  if (socket?.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify(msg));
+      return;
+    } catch {
+      /* connection died between readyState check and send */
+    }
+  }
+  outboxPush(msg);
+}
+
+// Direct request/response handler for shell.exec and fs.read. Reuses
+// the existing runShell and readFile implementations so timeouts,
+// output caps, and home-dir expansion behave the same as the legacy
+// command envelope. Replies with `command.result` keyed on the
+// caller's id.
+async function handleCommandRequest(msg) {
+  const id = msg.id;
+  thinkingCount += 1;
+  refreshTrayIcon();
+  try {
+    if (msg.type === "shell.exec") {
+      try {
+        const r = await runShell({ cmd: msg?.args?.command });
+        sendResult({
+          type: "command.result",
+          id,
+          result: { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode },
+        });
+      } catch (err) {
+        sendResult({
+          type: "command.result",
+          id,
+          error: String(err?.message || err),
+        });
+      }
+      return;
+    }
+    if (msg.type === "fs.read") {
+      try {
+        const r = await readFile({ path: msg?.args?.path });
+        sendResult({
+          type: "command.result",
+          id,
+          result: { content: r.content },
+        });
+      } catch (err) {
+        sendResult({
+          type: "command.result",
+          id,
+          error: String(err?.message || err),
+        });
+      }
+      return;
+    }
+  } finally {
+    thinkingCount = Math.max(0, thinkingCount - 1);
+    refreshTrayIcon();
+  }
 }
 
 // Announce this companion to the dashboard. Sent right after the WS
