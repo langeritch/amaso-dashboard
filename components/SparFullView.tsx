@@ -520,7 +520,6 @@ export default function SparFullView() {
   // before the provider's busyRef sync) could double-send the same
   // entry or skip a guard.
   const drainingRef = useRef(false);
-  const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [heartbeatOpen, setHeartbeatOpen] = useState(false);
   const [autopilotSidebarOpen, setAutopilotSidebarOpen] = useState(false);
   // Mobile-only bottom sheet that holds the secondary controls
@@ -1410,56 +1409,11 @@ export default function SparFullView() {
         ttsMuted={ttsMuted}
         onSpeakerToggle={handleSpeakerToggle}
         endCall={endCall}
-        openTranscript={() => {
-          setTranscriptOpen(true);
-          setMenuOpen(false);
-        }}
         openHeartbeat={() => {
           setHeartbeatOpen(true);
           setMenuOpen(false);
         }}
       />
-
-      <SideDrawer
-        open={transcriptOpen}
-        onClose={() => setTranscriptOpen(false)}
-        title="transcript"
-      >
-        <div className="flex items-center gap-2 border-b border-neutral-800 px-3 py-2 text-xs text-neutral-400">
-          <span>
-            {messages.length} / {MAX_TRANSCRIPT}
-          </span>
-          <button
-            type="button"
-            disabled={messages.length === 0}
-            onClick={clearTranscript}
-            className="ml-auto rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-200 hover:border-red-500 hover:text-red-200 disabled:opacity-40"
-          >
-            clear
-          </button>
-        </div>
-        <ul className="flex flex-col gap-3 p-4">
-          {messages.length === 0 && (
-            <li className="text-sm text-neutral-500">no messages yet</li>
-          )}
-          {messages.map((m) => (
-            <li
-              key={m.id}
-              className={`max-w-[90%] rounded-2xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap ${
-                m.role === "user"
-                  ? "self-end bg-orange-700/30 text-orange-50"
-                  : "self-start bg-neutral-800/70 text-neutral-100"
-              }`}
-            >
-              {m.content || (busy && m.role === "assistant" ? "…" : "")}
-            </li>
-          ))}
-          {/* Drawer's auto-scroll anchor: only attaches when text mode
-              isn't using the shared ref, otherwise React's last-write-
-              wins ref handling causes the two to clobber each other. */}
-          <div ref={mode === "voice" ? messagesEndRef : null} />
-        </ul>
-      </SideDrawer>
 
       <HeartbeatPanel
         open={heartbeatOpen}
@@ -1998,7 +1952,6 @@ function MobileControlsSheet({
   ttsMuted,
   onSpeakerToggle,
   endCall,
-  openTranscript,
   openHeartbeat,
 }: {
   open: boolean;
@@ -2015,7 +1968,6 @@ function MobileControlsSheet({
   ttsMuted: boolean;
   onSpeakerToggle: () => void;
   endCall: () => void;
-  openTranscript: () => void;
   openHeartbeat: () => void;
 }) {
   return (
@@ -2173,21 +2125,6 @@ function MobileControlsSheet({
             <div className="flex flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40">
               <button
                 type="button"
-                onClick={openTranscript}
-                className="flex items-center gap-3 px-4 py-3 text-left transition hover:bg-neutral-900/80"
-              >
-                <MessageSquare className="h-4 w-4 flex-shrink-0 text-neutral-400" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm text-neutral-100">Transcript</div>
-                  <div className="text-[11px] text-neutral-500">
-                    full conversation history
-                  </div>
-                </div>
-                <ChevronRight className="h-4 w-4 flex-shrink-0 text-neutral-600" />
-              </button>
-              <div className="h-px bg-neutral-800" />
-              <button
-                type="button"
                 onClick={openHeartbeat}
                 className="flex items-center gap-3 px-4 py-3 text-left transition hover:bg-neutral-900/80"
               >
@@ -2212,51 +2149,3 @@ function MobileControlsSheet({
   );
 }
 
-function SideDrawer({
-  open,
-  onClose,
-  title,
-  children,
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={`fixed inset-0 z-40 ${open ? "" : "pointer-events-none"}`}
-      aria-hidden={!open}
-    >
-      <button
-        type="button"
-        aria-label="close"
-        tabIndex={-1}
-        onClick={onClose}
-        className={`absolute inset-0 bg-black/60 transition-opacity ${
-          open ? "opacity-100" : "opacity-0"
-        }`}
-      />
-      <div
-        className={`absolute inset-y-0 right-0 flex w-full max-w-md flex-col bg-neutral-950 shadow-xl transition-transform ${
-          open ? "translate-x-0" : "translate-x-full"
-        }`}
-      >
-        <div className="flex items-center gap-2 border-b border-neutral-800 px-4 py-3 text-sm">
-          <span className="text-xs uppercase tracking-[0.22em] text-neutral-500">
-            {title}
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
-            aria-label="close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto">{children}</div>
-      </div>
-    </div>
-  );
-}

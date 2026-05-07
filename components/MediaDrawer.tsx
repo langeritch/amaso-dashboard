@@ -33,6 +33,7 @@ import {
   getYoutubeCurrentTime,
   seekYoutube,
 } from "@/lib/youtube-player-handle";
+import { useSignoffWord } from "@/lib/tts-signoff";
 
 /**
  * Slide-up drawer mounted above the chat input. Hosts the full media
@@ -298,12 +299,63 @@ export default function MediaDrawer({ open, onClose }: MediaDrawerProps) {
           onToggle={handleTtsToggle}
         />
         <SectionDivider />
+        <EndPhraseRow />
+        <SectionDivider />
         <FillerModeRow
           ctx={sourceCtx}
           activeMode={effectiveMode}
           onApply={applyFillerMode}
         />
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TTS end phrase
+// ---------------------------------------------------------------------------
+
+/**
+ * Configurable word/phrase that Kokoro TTS speaks as a separate
+ * utterance after every assistant reply. Pure audio post-processing
+ * — never enters the chat transcript and never reaches the AI/model
+ * layer. Stored in localStorage under `tts-end-phrase`; SparProvider's
+ * `maybeFireSignoff()` reads the same key when the assistant's TTS
+ * queue drains and fires `speakChunk(word)` for the suffix. Empty
+ * disables the feature.
+ */
+function EndPhraseRow() {
+  const [word, setWord] = useSignoffWord();
+  const [draft, setDraft] = useState(word);
+  useEffect(() => setDraft(word), [word]);
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed !== word) setWord(trimmed);
+  };
+  return (
+    <div className="flex items-center gap-2 px-3 py-2">
+      <span className="text-[10px] uppercase tracking-[0.18em] text-neutral-500">
+        End phrase
+      </span>
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.currentTarget as HTMLInputElement).blur();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setDraft(word);
+            (e.currentTarget as HTMLInputElement).blur();
+          }
+        }}
+        placeholder="off"
+        title="Spoken after every reply via TTS. Blank disables. Never appears in the chat."
+        className="ml-auto h-7 w-32 rounded-md border border-neutral-700 bg-neutral-900 px-2 text-[12px] text-neutral-200 placeholder-neutral-500 focus:border-orange-500/60 focus:outline-none"
+      />
     </div>
   );
 }

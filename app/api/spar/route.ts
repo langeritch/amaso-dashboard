@@ -101,15 +101,6 @@ export async function POST(req: NextRequest) {
      *  Skips the user-turn appendMessage block so we don't end up
      *  with two identical user rows in the conversation. */
     skipPersistLastUser?: boolean;
-    /** Auto-report responder hard-guard. When true, the route strips
-     *  every tool that could mutate a project's terminal or queue more
-     *  work (`dispatch_to_project`, `send_keys_to_project`,
-     *  `start_terminal`, `stop_terminal`, `deploy_project`,
-     *  `create_project`, `delete_project`) from the model's allowed
-     *  tools list. Belt-and-braces on top of the system directive
-     *  telling it not to dispatch — needed because the *previous*
-     *  auto-report design produced infinite dispatch loops. */
-    readOnlyMode?: boolean;
   } | null = null;
   try {
     body = await req.json();
@@ -122,24 +113,6 @@ export async function POST(req: NextRequest) {
   const systemInjection =
     typeof body?.systemInjection === "string" ? body.systemInjection.trim() : "";
   const skipPersistLastUser = body?.skipPersistLastUser === true;
-  const readOnlyMode = body?.readOnlyMode === true;
-  // Tools that could mutate a terminal or queue more work. Stripped
-  // from the model's allowed-tools list when readOnlyMode is set, so
-  // the auto-report responder physically cannot kick off another
-  // dispatch (the previous Haiku-driven auto-report did exactly that
-  // and produced infinite loops).
-  const READ_ONLY_BANNED = new Set<string>([
-    "dispatch_to_project",
-    "send_keys_to_project",
-    "start_terminal",
-    "stop_terminal",
-    "deploy_project",
-    "create_project",
-    "delete_project",
-  ]);
-  const allowedTools = readOnlyMode
-    ? SPAR_TOOLS.filter((t) => !READ_ONLY_BANNED.has(t))
-    : SPAR_TOOLS;
 
   // Resolve / create the active conversation. The body's id is trusted
   // only after a per-user ownership check — otherwise a malicious
@@ -546,7 +519,7 @@ export async function POST(req: NextRequest) {
                 tools: {
                   token,
                   dashboardUrl,
-                  allowedTools,
+                  allowedTools: SPAR_TOOLS,
                   allowedPlaywrightTools: PLAYWRIGHT_TOOLS,
                 },
               },

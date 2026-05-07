@@ -1485,12 +1485,29 @@ export default function SparProvider({
     ) {
       ttsIdleRef.current = true;
       setTtsIdle(true);
+      signoffInFlightRef.current = false;
     }
     maybeFireSignoff();
   }
 
   function maybeFireSignoff() {
     if (!signoffArmedRef.current) return;
+    // State sanity: if `signoffInFlightRef` is true but everything
+    // else reads idle, a previous attempt's reset got missed — most
+    // commonly when speakChunk no-op'd (TTS muted, Telegram leg
+    // active, empty word) so its fetch chain never queued a finally
+    // to call checkTtsIdle. Heal the flag here so the next signoff
+    // always fires. Without this guard, the second assistant turn
+    // and onward would silently skip the end phrase forever once the
+    // flag got stuck.
+    if (
+      signoffInFlightRef.current &&
+      ttsPendingRef.current === 0 &&
+      ttsQueueRef.current.length === 0 &&
+      !ttsPlayingRef.current
+    ) {
+      signoffInFlightRef.current = false;
+    }
     if (signoffInFlightRef.current) return;
     if (ttsPendingRef.current !== 0) return;
     if (ttsQueueRef.current.length !== 0) return;
@@ -1498,6 +1515,14 @@ export default function SparProvider({
     const word = readSignoffWord().trim();
     signoffArmedRef.current = false;
     if (!word) return;
+    // Mirror speakChunk's gates here so a guaranteed no-op call
+    // doesn't leave in-flight dangling. checkTtsIdle would clear it
+    // in the same call stack today, but the heal-on-entry above is
+    // the durable fix; this just prevents the temporarily-stuck
+    // window between maybeFireSignoff returning and onEnded's final
+    // checkTtsIdle running.
+    if (ttsMutedRef.current && !inCallRef.current) return;
+    if (telegramActiveRef.current) return;
     signoffInFlightRef.current = true;
     speakChunk(word);
   }
@@ -1783,24 +1808,41 @@ export default function SparProvider({
   }, []);
 
   const sendMessage = useCallback(
-    async (raw: string, opts?: { kickoff?: boolean }) => {
+    async (
+      raw: string,
+      opts?: {
+        kickoff?: boolean;
+        /** Auto-report responder. The user-role turn is ALREADY in
+         *  messagesRef (server-broadcast via WS, persisted by
+         *  fireIdle) so we skip the optimistic insert and the chime.
+         *  Otherwise behaves identically to a typed message — same
+         *  POST, same streaming, same finally cleanup. */
+        skipUserBubble?: boolean;
+        /** Pairs with skipUserBubble: the synthetic user message is
+         *  already in spar_messages, so the route should not write
+         *  another row for it. */
+        skipPersistLastUser?: boolean;
+      },
+    ) => {
       const text = raw.trim();
-      if (!opts?.kickoff && !text && !pendingAttachmentsRef.current.length) return;
+      if (!opts?.kickoff && !opts?.skipUserBubble && !text && !pendingAttachmentsRef.current.length) return;
       if (busyRef.current) return;
       ttsCancel();
       spokenCharsRef.current = 0;
       setBusy(true);
       // Acknowledge the submit with a brief warm chime — fires for
-      // real user turns only (kickoff has no user message). Suppressed
-      // while a Telegram call holds the audio leg: the dashboard stays
-      // silent during a phone call, and the Python worker plays its
-      // own confirmation through the phone speaker.
-      if (!opts?.kickoff && text && !telegramActiveRef.current) {
+      // real user turns only (kickoff has no user message; auto-report
+      // wasn't typed by Santi so no chime either). Suppressed while a
+      // Telegram call holds the audio leg.
+      if (!opts?.kickoff && !opts?.skipUserBubble && text && !telegramActiveRef.current) {
         playMessageSentChime();
       }
-      const snapshotAttachments = pendingAttachmentsRef.current.length > 0 ? [...pendingAttachmentsRef.current] : undefined;
+      const snapshotAttachments =
+        !opts?.skipUserBubble && pendingAttachmentsRef.current.length > 0
+          ? [...pendingAttachmentsRef.current]
+          : undefined;
       if (snapshotAttachments) setPendingAttachments([]);
-      const userMsg = opts?.kickoff
+      const userMsg = opts?.kickoff || opts?.skipUserBubble
         ? null
         : { ...newMsg("user", text), attachments: snapshotAttachments };
       const assistantMsg = newMsg("assistant", "");
@@ -1880,6 +1922,9 @@ export default function SparProvider({
                   type: a.type,
                   dataUrl: a.dataUrl,
                 })),
+                ...(opts?.skipPersistLastUser
+                  ? { skipPersistLastUser: true }
+                  : {}),
               }),
             });
           } catch (err) {
@@ -2772,11 +2817,15 @@ export default function SparProvider({
         return;
       }
 
-      // Already answered? Skip.
+      // Already answered? Only if the very next message is an assistant
+      // reply. If a regular user message sits in between, any assistant
+      // response after that is answering the user, not the auto-report.
       const idx = messagesRef.current.indexOf(target);
-      const hasFollowup = messagesRef.current
-        .slice(idx + 1)
-        .some((m) => m.role === "assistant" && m.content.trim().length > 0);
+      const nextMsg = messagesRef.current[idx + 1];
+      const hasFollowup =
+        !!nextMsg &&
+        nextMsg.role === "assistant" &&
+        (nextMsg.content?.trim().length ?? 0) > 0;
       if (hasFollowup) {
         processedAutoReportsRef.current.add(messageId);
         persistProcessedAutoReports();
@@ -2790,256 +2839,28 @@ export default function SparProvider({
       // attempt. Fall through means we own this nudge.
       if (!tryClaimAutoReport(messageId)) return;
 
-      const directive =
-        "[AUTO-REPORT — READ ONLY]\n" +
-        "A dispatched terminal task just finished. The user message above " +
-        "(\"check output of terminal for …\") is a synthetic nudge — " +
-        "respond as if they typed it themselves. Read the terminal " +
-        "scrollback with read_terminal_scrollback if you need detail, " +
-        "then summarise what happened in 1-2 sentences.\n\n" +
-        "Hard constraints:\n" +
-        "- DO NOT call dispatch_to_project. No new terminal work.\n" +
-        "- DO NOT send keys, prompts, or any text into any terminal.\n" +
-        "- DO NOT create remarks, projects, or queue follow-up tasks.\n" +
-        "- This is a passive status report. Read, summarise, stop.";
-
-      ttsCancel();
-      spokenCharsRef.current = 0;
-      setBusy(true);
-      const assistantMsg = newMsg("assistant", "");
-      setMessages((prev) => [...prev, assistantMsg]);
-
-      const priorHistory = messagesRef.current
-        .slice(-MAX_TRANSCRIPT)
-        .map((m) => ({ role: m.role, content: m.content }));
-
-      let accumulatedText = "";
-      let accumulatedSteps: ToolStep[] = [];
-      let accumulatedSources: string[] = [];
-      let serverError: string | null = null;
-      let httpFailureText: string | null = null;
-      let allAttemptsFailed = false;
-      let realChunksEmitted = false;
-
-      const RETRY_DELAYS_MS = [0, 500, 1500];
-
+      // EXACT same path as a typed message — sendMessage handles the
+      // optimistic assistant bubble, the POST, the streaming retry
+      // loop, the spoken-text TTS, and the busy state. The two opts
+      // tell it: the user-role turn is already in messagesRef (server
+      // broadcast it via WS, fireIdle persisted it), so don't insert a
+      // duplicate bubble or trigger a duplicate DB write. Everything
+      // else — autopilot flag, system prompt, allowed tools, model —
+      // is identical to a turn Santi typed himself.
       try {
-        for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
-          if (RETRY_DELAYS_MS[attempt] > 0) {
-            await new Promise<void>((r) =>
-              setTimeout(r, RETRY_DELAYS_MS[attempt]),
-            );
-            accumulatedText = "";
-            accumulatedSteps = [];
-            accumulatedSources = [];
-            serverError = null;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantMsg.id
-                  ? { ...m, content: "", steps: [], sources: [] }
-                  : m,
-              ),
-            );
-          }
-
-          let r: Response;
-          try {
-            r = await fetch("/api/spar", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                autopilot: false,
-                conversationId,
-                messages: priorHistory,
-                systemInjection: directive,
-                skipPersistLastUser: true,
-                readOnlyMode: true,
-              }),
-            });
-          } catch (err) {
-            if (attempt < RETRY_DELAYS_MS.length - 1) {
-              console.warn(
-                `[auto-report] fetch failed (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
-                err instanceof Error ? err.message : String(err),
-              );
-              continue;
-            }
-            allAttemptsFailed = true;
-            break;
-          }
-
-          if (!r.ok || !r.body) {
-            httpFailureText = await r.text().catch(() => "spar failed");
-            break;
-          }
-
-          const reader = r.body.getReader();
-          const decoder = new TextDecoder();
-          let lineBuf = "";
-          let streamFailed = false;
-
-          const applyEvent = (evt: Record<string, unknown>) => {
-            const t = evt.t;
-            if (t === "ping") return;
-            if (t === "text" && typeof evt.v === "string") {
-              accumulatedText += evt.v;
-              return;
-            }
-            if (t === "sources" && Array.isArray(evt.v)) {
-              const seen = new Set(accumulatedSources);
-              for (const s of evt.v as unknown[]) {
-                if (typeof s === "string" && s && !seen.has(s)) {
-                  accumulatedSources = [...accumulatedSources, s];
-                  seen.add(s);
-                }
-              }
-              return;
-            }
-            if (
-              t === "tool_use" &&
-              typeof evt.id === "string" &&
-              typeof evt.label === "string"
-            ) {
-              const detail =
-                typeof evt.detail === "string" ? evt.detail : "";
-              accumulatedSteps = [
-                ...accumulatedSteps,
-                {
-                  id: evt.id,
-                  label: evt.label,
-                  detail,
-                  status: "running",
-                  startedAt: Date.now(),
-                },
-              ];
-              if (typeof evt.source === "string" && evt.source) {
-                if (!accumulatedSources.includes(evt.source)) {
-                  accumulatedSources = [...accumulatedSources, evt.source];
-                }
-              }
-              return;
-            }
-            if (t === "tool_result" && typeof evt.id === "string") {
-              const ok = evt.ok !== false;
-              const summary =
-                typeof evt.summary === "string" ? evt.summary : "";
-              accumulatedSteps = accumulatedSteps.map((step) =>
-                step.id === evt.id
-                  ? {
-                      ...step,
-                      status: ok ? "ok" : "error",
-                      summary,
-                      completedAt: Date.now(),
-                    }
-                  : step,
-              );
-              return;
-            }
-            if (t === "error" && typeof evt.v === "string") {
-              serverError = evt.v;
-              return;
-            }
-          };
-
-          try {
-            while (true) {
-              const { value, done } = await reader.read();
-              if (done) break;
-              lineBuf += decoder.decode(value, { stream: true });
-              let nl: number;
-              let touched = false;
-              while ((nl = lineBuf.indexOf("\n")) !== -1) {
-                const line = lineBuf.slice(0, nl).trim();
-                lineBuf = lineBuf.slice(nl + 1);
-                if (!line) continue;
-                let evt: unknown;
-                try {
-                  evt = JSON.parse(line);
-                } catch {
-                  continue;
-                }
-                if (!evt || typeof evt !== "object") continue;
-                const before = realChunksEmitted;
-                applyEvent(evt as Record<string, unknown>);
-                touched = true;
-                if (
-                  !before &&
-                  (evt as { t?: string }).t &&
-                  (evt as { t?: string }).t !== "ping"
-                ) {
-                  realChunksEmitted = true;
-                }
-              }
-              if (!touched) continue;
-              const soFarText = accumulatedText;
-              const soFarSteps = accumulatedSteps;
-              const soFarSources = accumulatedSources;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMsg.id
-                    ? {
-                        ...m,
-                        content: soFarText,
-                        steps: soFarSteps,
-                        sources: soFarSources,
-                      }
-                    : m,
-                ),
-              );
-              flushSpokenText(soFarText, false);
-            }
-          } catch (err) {
-            streamFailed = true;
-            if (realChunksEmitted) break;
-            if (attempt < RETRY_DELAYS_MS.length - 1) {
-              console.warn(
-                `[auto-report] stream dropped (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}); retrying:`,
-                err instanceof Error ? err.message : String(err),
-              );
-              continue;
-            }
-            allAttemptsFailed = true;
-            break;
-          }
-
-          if (!streamFailed) break;
-        }
-
-        const finalContent = httpFailureText
-          ? `[error: ${httpFailureText.slice(0, 200)}]`
-          : allAttemptsFailed
-            ? "Connection lost after 3 attempts — please try again."
-            : serverError
-              ? accumulatedText
-                ? accumulatedText + `\n[error: ${serverError}]`
-                : `[error: ${serverError}]`
-              : accumulatedText;
-
-        const completedAt = Date.now();
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsg.id
-              ? {
-                  ...m,
-                  content: finalContent,
-                  completedAt,
-                  steps: accumulatedSteps,
-                  sources: accumulatedSources,
-                }
-              : m,
-          ),
-        );
-        flushSpokenText(finalContent, true);
+        await sendMessage(target.content, {
+          skipUserBubble: true,
+          skipPersistLastUser: true,
+        });
       } finally {
-        // Single-fire guard: ALWAYS mark this nudge processed, even on
-        // failure. A failed turn shouldn't retry forever — the user
-        // can always type "what happened on X?" to re-ask manually.
+        // ALWAYS mark processed, even on failure — a stuck nudge
+        // shouldn't loop forever. Santi can ask manually if the
+        // initial attempt produced nothing useful.
         processedAutoReportsRef.current.add(messageId);
         persistProcessedAutoReports();
         dequeueAutoReport(messageId);
         releaseAutoReportClaim(messageId);
-        setBusy(false);
-        // Drain any other pending nudges that piled up while we were busy.
+        // Drain any other pending nudges that piled up while busy.
         if (autoReportQueueRef.current.length > 0) {
           scheduleAutoReportFlush();
         }

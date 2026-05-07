@@ -2,12 +2,32 @@
 
 import { useEffect, useState } from "react";
 
-const KEY = "tts-signoff-word";
+// localStorage key. Renamed from "tts-signoff-word" to "tts-end-phrase"
+// when the input moved from the global footer chip onto the spar page's
+// audio controls. The migration block below copies a stale value from
+// the legacy key one time so existing settings carry over silently.
+const KEY = "tts-end-phrase";
+const LEGACY_KEY = "tts-signoff-word";
 const DEFAULT = "";
-const EVT = "tts-signoff-change";
+const EVT = "tts-end-phrase-change";
+
+function migrateLegacy(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const current = window.localStorage.getItem(KEY);
+    if (current !== null) return;
+    const legacy = window.localStorage.getItem(LEGACY_KEY);
+    if (legacy === null) return;
+    window.localStorage.setItem(KEY, legacy);
+    window.localStorage.removeItem(LEGACY_KEY);
+  } catch {
+    /* localStorage may be disabled — non-fatal */
+  }
+}
 
 export function readSignoffWord(): string {
   if (typeof window === "undefined") return DEFAULT;
+  migrateLegacy();
   const v = window.localStorage.getItem(KEY);
   return v === null ? DEFAULT : v;
 }
