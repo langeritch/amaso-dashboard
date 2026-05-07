@@ -787,7 +787,7 @@ function sendRegister(ws) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
     ws.send(JSON.stringify({
-      type: "register",
+      type: "device.register",
       deviceId,
       deviceName,
       platform: process.platform,
