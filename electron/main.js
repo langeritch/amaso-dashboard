@@ -35,7 +35,7 @@ const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, execFileSync } = require("node:child_process");
 const { autoUpdater } = require("electron-updater");
 const { duckOthers, restoreOthers } = require("./audio-duck");
 
@@ -631,7 +631,13 @@ function connectToCloud() {
       }
       return;
     }
-    if ((msg.type === "shell.exec" || msg.type === "fs.read") && msg.id) {
+    if (
+      (msg.type === "shell.exec" ||
+        msg.type === "fs.read" ||
+        msg.type === "screenshot" ||
+        msg.type === "screenshot.region") &&
+      msg.id
+    ) {
       handleCommandRequest(msg);
       return;
     }
@@ -768,6 +774,23 @@ async function handleCommandRequest(msg) {
           type: "command.result",
           id,
           error: String(err?.message || err),
+        });
+      }
+      return;
+    }
+    if (msg.type === "screenshot" || msg.type === "screenshot.region") {
+      try {
+        const r = takeScreenshot(msg);
+        sendResult({
+          type: "command.result",
+          id,
+          result: r,
+        });
+      } catch (err) {
+        sendResult({
+          type: "command.result",
+          id,
+          error: `Screenshot failed: ${err?.message || err}`,
         });
       }
       return;
@@ -977,6 +1000,73 @@ function expandHome(p) {
   if (p === "~") return os.homedir();
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+// macOS screencapture + sips wrapper for the dashboard's screenshot
+// command. Coordinates are validated as finite numbers before being
+// passed to the binaries via execFileSync (no shell), so the dashboard
+// can never inject extra arguments through args. The temp file path
+// is fixed; concurrent requests collide, which is acceptable given the
+// dashboard's serialized command flight per device.
+const SCREENSHOT_PATH = "/tmp/companion-screenshot.png";
+const SCREENSHOT_DEFAULT_WIDTH = 1920;
+
+function takeScreenshot(msg) {
+  const args = msg?.args || {};
+  const argv = ["-x"];
+  if (msg.type === "screenshot.region") {
+    const x = Number(args.x);
+    const y = Number(args.y);
+    const w = Number(args.width);
+    const h = Number(args.height);
+    if (![x, y, w, h].every(Number.isFinite)) {
+      throw new Error("region requires numeric x, y, width, height");
+    }
+    argv.push("-R", `${x},${y},${w},${h}`);
+  }
+  argv.push(SCREENSHOT_PATH);
+
+  try {
+    execFileSync("screencapture", argv, { stdio: "pipe" });
+
+    if (msg.type === "screenshot") {
+      const requested = args.resize == null
+        ? SCREENSHOT_DEFAULT_WIDTH
+        : Number(args.resize);
+      if (!Number.isFinite(requested) || requested <= 0) {
+        throw new Error("resize must be a positive number");
+      }
+      // sips -Z bounds the longest edge in pixels and preserves aspect
+      // ratio; --out FILE writes back to the same path so we don't
+      // need to track two temp files.
+      execFileSync(
+        "sips",
+        ["-Z", String(Math.round(requested)), SCREENSHOT_PATH, "--out", SCREENSHOT_PATH],
+        { stdio: "pipe" },
+      );
+    }
+
+    const buf = fs.readFileSync(SCREENSHOT_PATH);
+    return {
+      screenshot: buf.toString("base64"),
+      width: readPngWidth(buf),
+      format: "png",
+    };
+  } finally {
+    try {
+      fs.unlinkSync(SCREENSHOT_PATH);
+    } catch {
+      /* file may not exist if screencapture failed before writing */
+    }
+  }
+}
+
+// PNG layout: 8-byte signature, then a 4-byte chunk length, then the
+// 4-byte chunk type "IHDR", then the 4-byte width as a big-endian
+// uint32. So the width is always at byte offset 16 in a valid PNG.
+function readPngWidth(buf) {
+  if (buf.length < 24) return 0;
+  return buf.readUInt32BE(16);
 }
 
 module.exports = { dispatchCommand, sendEvent };
