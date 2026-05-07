@@ -15,6 +15,8 @@ import {
   SPAR_TOOLS,
   buildSparSystemPrompt,
 } from "@/lib/spar-prompt";
+import { buildAutopilotPromptBlock } from "@/lib/autopilot-prompt";
+import { readAutopilotDirective } from "@/lib/autopilot";
 import {
   formatGraphForPrompt,
   queryGraph,
@@ -143,6 +145,30 @@ export async function POST(req: NextRequest) {
   const userProfile = readProfile(user.id);
   const brain = loadBrainContext();
   const baseSystemPrompt = buildSparSystemPrompt(user.name);
+
+  // Auto-report turn detection. flushNudgeBatch (lib/terminal-idle.ts)
+  // and buildMergedAutoReportContent (components/SparProvider.tsx) both
+  // emit a synthetic user turn that always starts with "Check the
+  // output of terminal for X[, Y, Z]." — that prefix is the contract.
+  // When this turn fires UNDER AUTOPILOT, swap the generic suffix for
+  // the rich autonomous-loop block (lib/autopilot-prompt.ts): tells
+  // the model to evaluate each terminal, resolve any matching remark,
+  // then orient on the directive / goals and dispatch the next move
+  // without waiting for approval. Generic typed turns under autopilot
+  // continue to use SPAR_AUTOPILOT_SUFFIX (handle gates, don't re-ask
+  // about already-discussed dispatches) — the loop block is scoped to
+  // the auto-report case so it doesn't bombard every regular reply.
+  const latestUserContent =
+    [...history].reverse().find((m) => m?.role === "user")?.content ?? "";
+  const isAutoReportTurn = /^check\s+(?:the\s+)?output\s+of\s+terminal[s]?\s+for\s+/i.test(
+    latestUserContent.trim(),
+  );
+  const autopilotDirective =
+    autopilot && isAutoReportTurn ? readAutopilotDirective(user.id) : "";
+  const autopilotPromptAddon =
+    autopilot && isAutoReportTurn
+      ? buildAutopilotPromptBlock({ directive: autopilotDirective })
+      : "";
 
   // Skills are matched off the most recent user turn(s) — workflow
   // playbooks the assistant should follow when the request matches.
@@ -505,7 +531,12 @@ export async function POST(req: NextRequest) {
             await streamFromClaudeCli(
               {
                 systemPrompt: autopilot
-                  ? baseSystemPrompt + SPAR_AUTOPILOT_SUFFIX
+                  ? autopilotPromptAddon
+                    ? baseSystemPrompt +
+                      SPAR_AUTOPILOT_SUFFIX +
+                      "\n\n" +
+                      autopilotPromptAddon
+                    : baseSystemPrompt + SPAR_AUTOPILOT_SUFFIX
                   : baseSystemPrompt,
                 heartbeat,
                 profile,

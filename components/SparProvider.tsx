@@ -2877,13 +2877,23 @@ export default function SparProvider({
 
   /**
    * Build the merged user-message text for one or more queued
-   * auto-report nudges. Single nudge → "check output of terminal for
-   * X" (verbatim). Multiple nudges → "check output of terminals for
-   * X, Y, Z" so the model gets one combined prompt instead of N
-   * back-to-back identical-shaped turns.
+   * auto-report nudges. The server (lib/terminal-idle.flushNudgeBatch)
+   * already builds a fully-formed nudge per chunk that includes the
+   * boilerplate, the project labels, AND a "Last sent prompts:" block
+   * with the full text of each completed dispatch. So the client side
+   * just preserves that content verbatim:
+   *   - Single entry → pass the captured content straight through.
+   *   - Multiple entries → concatenate with a separator. This only
+   *     happens when two server flushes (or two chunks within one
+   *     flush) raced past the 50 ms client merge window. We don't try
+   *     to re-parse and re-glue the prompt blocks; that would risk
+   *     dropping per-project prompts on a regex miss. Concatenation
+   *     keeps every project's instructions intact at the cost of a
+   *     repeated boilerplate header — acceptable since the model
+   *     reads both as one turn anyway.
    */
   function buildMergedAutoReportContent(items: AutoReportEntry[]): string {
-    const labels: string[] = [];
+    const contents: string[] = [];
     for (const it of items) {
       // Trust the queue entry's captured content. messagesRef would
       // have been wrong here once MAX_TRANSCRIPT trimmed the row
@@ -2891,19 +2901,11 @@ export default function SparProvider({
       // call routinely push older auto-reports off the tail.
       const raw = (it.content ?? "").trim();
       if (!raw) continue;
-      // Strip the leading "check output of terminal for " prefix so
-      // we can re-emit a clean comma-joined list. Falls back to the
-      // raw content for any nudge whose shape differs from the
-      // expected pattern (older server build, manual injection).
-      const match = raw.match(
-        /^check output of terminal[s]? for (.+)$/i,
-      );
-      const label = match ? match[1].trim() : raw;
-      if (label && !labels.includes(label)) labels.push(label);
+      if (!contents.includes(raw)) contents.push(raw);
     }
-    if (labels.length === 0) return "";
-    if (labels.length === 1) return `check output of terminal for ${labels[0]}`;
-    return `check output of terminals for ${labels.join(", ")}`;
+    if (contents.length === 0) return "";
+    if (contents.length === 1) return contents[0];
+    return contents.join("\n\n---\n\n");
   }
 
   const respondToAutoReportBatch = useCallback(
@@ -3114,15 +3116,7 @@ export default function SparProvider({
     const toolCallsRaw = m.toolCalls;
 
     void refreshConversations();
-    if (activeConversationIdRef.current !== convId) return;
 
-    // Detect terminal-completion auto-report nudges (server tags them
-    // via toolCalls.kind = "auto_report"). When one lands, we still
-    // render the user bubble exactly as if Santi had typed the same
-    // message, but we ALSO enqueue an automatic assistant response so
-    // the AI processes it without a manual prod. The respondToAutoReport
-    // path layers in the read-only guard so this can never re-loop into
-    // dispatch_to_project.
     if (role === "user" && isAutoReportTag(toolCallsRaw)) {
       enqueueAutoReport({
         messageId,
@@ -3130,6 +3124,8 @@ export default function SparProvider({
         content,
       });
     }
+
+    if (activeConversationIdRef.current !== convId) return;
 
     setMessages((prev) => {
       // Case 2: already attached → no-op.

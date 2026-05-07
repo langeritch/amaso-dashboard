@@ -37,14 +37,13 @@ export function buildAutopilotPromptBlock(input: AutopilotPromptInput): string {
     `  • read_graph / read_heartbeat / read_brain_file goals.md — pull live goals + open loops\n` +
     `  • list_recent_remarks (resolved=false) — see the live queue across every project\n` +
     `  • resolve_remark / edit_remark — close out finished items, tag stuck items "needs-human"\n\n` +
-    `Decision chain:\n` +
-    `1. EVALUATE: Read the terminal output. Did the task succeed or fail?\n` +
-    `2. RESOLVE: On success, resolve the remark that triggered this dispatch using resolve_remark.\n` +
+    `Decision chain (the trigger for this turn is the synthetic "Check the output of terminal for X[, Y, Z]" nudge — one or many projects may have completed in the same batch, and the nudge body itself includes a "Last sent prompts:" block listing the FULL prompt text that was just dispatched into each project):\n` +
+    `1. EVALUATE: For EACH project in the batch, use the matching entry under "Last sent prompts:" as ground truth for what the task was meant to do, then call read_terminal_scrollback and decide whether it succeeded, failed, or is still mid-flight. Don't lump them together — each project gets its own verdict.\n` +
+    `2. RESOLVE: For each project that succeeded, call list_recent_remarks (resolved=false, project_id=that project) to find the open remark whose text matches the prompt block, then close it with resolve_remark. If the task failed, leave the remark open and tag it briefly with edit_remark so the next loop knows it needs another approach. If the chunked nudge spans multiple messages, repeat for every project across all chunks before moving on.\n` +
     `3. ORIENT: If the directive is set, anchor on it. Otherwise read the brain's goals.md and read_graph to surface the user's quarterly priorities. Use list_recent_remarks (resolved=false) to see what's already queued.\n` +
-    `4. CHOOSE: Pick the single highest-leverage next move. The directive (or, when empty, revenue + active goals) decides priority. Default revenue order when nothing else discriminates: badkamerstijl > woonklasse > client invoicing > amaso-portfolio > dashboard improvements > everything else.\n` +
+    `4. CHOOSE: Pick the single highest-leverage next move from the REMAINING open remark queue (after step 2's resolutions). The directive (or, when empty, revenue + active goals) decides priority. Default revenue order when nothing else discriminates: badkamerstijl > woonklasse > client invoicing > amaso-portfolio > dashboard improvements > everything else.\n` +
     `5. HUMAN CHECK: If the chosen item needs the user's judgment (financial details, external account access, contacting real people, scope decisions only Santi should make) — tag it "needs-human" with edit_remark and skip past it. Don't get stuck.\n` +
     `6. CREATE WHEN EMPTY: If every open remark is "needs-human" or the queue is empty, do NOT stop. Create new remarks (or spin up a new project) that align with the directive / goals and that you can execute autonomously. Then dispatch the first one.\n` +
-    `7. DISPATCH: Craft a precise technical prompt and call dispatch_to_project. Keep the loop alive.\n` +
-    `8. REPORT: Tell Santi in 1-2 sentences what you decided and why. Don't wait for approval.`
+    `7. DISPATCH: Craft a precise technical prompt and call dispatch_to_project. Keep the loop alive. Send ONE dispatch per turn — the next completion will fire its own auto-report and we'll loop again.`
   );
 }

@@ -103,6 +103,12 @@ interface PendingNudge {
   sessionId: string;
   completedDispatchId: string;
   sessionLabel: string;
+  /** Full text of the dispatch prompt that just finished. Captured at
+   *  fireIdle time from markDispatchCompleted's returned entry, then
+   *  surfaced inline in the merged nudge so the model can decide
+   *  success/failure + match the right open remark without first having
+   *  to look it up. Empty string when the dispatch row vanished. */
+  prompt: string;
 }
 
 const pendingNudgesByUser = new Map<number, PendingNudge[]>();
@@ -126,29 +132,95 @@ function queueNudge(userId: number, nudge: PendingNudge) {
   );
 }
 
-function flushNudgeBatch(userId: number) {
-  nudgeBatchTimers.delete(userId);
-  const nudges = pendingNudgesByUser.get(userId);
-  pendingNudgesByUser.delete(userId);
-  if (!nudges || nudges.length === 0) return;
+// Hard ceiling on a single auto-report nudge message. When the merged
+// nudge (boilerplate + label list + "Last sent prompts" bullets) would
+// exceed this, splitNudgesIntoChunks splits the projects across
+// multiple sequential messages instead of dumping one wall of text.
+// Picked to comfortably fit a typical 5-12 project burst without
+// chunking, while keeping any one chunk readable as a chat bubble.
+const NUDGE_MAX_CHARS = 1500;
 
-  const labels = nudges.map((n) => n.sessionLabel);
-  const nudge =
+// Delay between sequential chunk emissions for the same user. Long
+// enough that the client-side merge window (~50 ms) won't recombine
+// them, short enough that the operator perceives them as one event.
+const NUDGE_CHUNK_DELAY_MS = 250;
+
+function buildNudgeMessage(chunk: PendingNudge[]): string {
+  const labels: string[] = [];
+  for (const n of chunk) {
+    if (!labels.includes(n.sessionLabel)) labels.push(n.sessionLabel);
+  }
+  const labelList = labels.join(", ");
+  const perProject =
     labels.length === 1
-      ? `check output of terminal for ${labels[0]}`
-      : `check output of terminals for ${labels.join(", ")}`;
+      ? "Read the terminal"
+      : "For each project, read the terminal";
+
+  // One bullet per project carrying the FULL prompt text that just
+  // finished. The model uses these to decide success/failure and to
+  // match the right open remark in the queue without having to grep
+  // recent dispatches itself.
+  const promptLines: string[] = [];
+  for (const n of chunk) {
+    if (n.prompt && n.prompt.trim().length > 0) {
+      promptLines.push(`- ${n.sessionLabel}: ${n.prompt.trim()}`);
+    }
+  }
+  const promptBlock =
+    promptLines.length > 0
+      ? `\n\nLast sent prompts:\n${promptLines.join("\n")}`
+      : "";
+
+  return (
+    `Check the output of terminal for ${labelList}. ` +
+    `${perProject} to see if the dispatched task finished successfully. ` +
+    `If it did, resolve any open remark that matches the task ` +
+    `using resolve_remark.${promptBlock}`
+  );
+}
+
+// Greedy packer: walks the nudges in arrival order, accumulating
+// projects into a chunk until adding the next project would push the
+// rendered message past NUDGE_MAX_CHARS. A single project whose own
+// prompt already exceeds the limit becomes its own chunk (we can't
+// split a single dispatch — it's atomic). Order is preserved so the
+// chat reads in the same sequence the terminals finished.
+function splitNudgesIntoChunks(nudges: PendingNudge[]): PendingNudge[][] {
+  if (nudges.length === 0) return [];
+  if (buildNudgeMessage(nudges).length <= NUDGE_MAX_CHARS) return [nudges];
+
+  const chunks: PendingNudge[][] = [];
+  let current: PendingNudge[] = [];
+  for (const n of nudges) {
+    const candidate = [...current, n];
+    if (
+      current.length > 0 &&
+      buildNudgeMessage(candidate).length > NUDGE_MAX_CHARS
+    ) {
+      chunks.push(current);
+      current = [n];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
+  const nudge = buildNudgeMessage(chunk);
 
   const toolCalls =
-    nudges.length === 1
+    chunk.length === 1
       ? {
           kind: "auto_report" as const,
-          projectId: nudges[0].projectId,
-          sessionId: nudges[0].sessionId,
-          completedDispatchId: nudges[0].completedDispatchId,
+          projectId: chunk[0].projectId,
+          sessionId: chunk[0].sessionId,
+          completedDispatchId: chunk[0].completedDispatchId,
         }
       : {
           kind: "auto_report" as const,
-          projects: nudges.map((n) => ({
+          projects: chunk.map((n) => ({
             projectId: n.projectId,
             sessionId: n.sessionId,
             completedDispatchId: n.completedDispatchId,
@@ -168,12 +240,12 @@ function flushNudgeBatch(userId: number) {
       toolCalls,
     });
     if (row) {
-      // Cooldown latches per project once the merged message lands —
-      // queue-time would race a same-project completion against its
-      // own batch entry. Flush time is the right boundary: every
-      // project that made it into this merged turn now blocks
-      // descendants for AUTO_REPORT_COOLDOWN_MS.
-      for (const n of nudges) {
+      // Cooldown latches per project once the chunk lands. With
+      // chunking, a project's cooldown starts on the chunk that
+      // carried it — chunks for the same flush still happen within
+      // a few hundred ms of each other, so the loop guard's 90 s
+      // window covers the whole sequence.
+      for (const n of chunk) {
         startAutoReportCooldown(userId, n.projectId);
       }
       broadcastSparMessage(userId, {
@@ -189,10 +261,37 @@ function flushNudgeBatch(userId: number) {
     }
   } catch (err) {
     console.warn(
-      `[idle] merged nudge append failed for ${nudges.length} projects:`,
+      `[idle] nudge chunk append failed for ${chunk.length} projects:`,
       err instanceof Error ? err.message : String(err),
     );
   }
+}
+
+function flushNudgeBatch(userId: number) {
+  nudgeBatchTimers.delete(userId);
+  const nudges = pendingNudgesByUser.get(userId);
+  pendingNudgesByUser.delete(userId);
+  if (!nudges || nudges.length === 0) return;
+
+  const chunks = splitNudgesIntoChunks(nudges);
+
+  // Emit chunks sequentially with a short delay between them. The first
+  // fires immediately; subsequent chunks are scheduled relative to the
+  // batch's flush instant so the spacing is deterministic regardless of
+  // how long each appendMessage / broadcast takes. The delay must stay
+  // above the client-side merge window in SparProvider (~50 ms) so the
+  // chunks land as separate auto-report turns instead of being re-glued
+  // back into one giant prompt.
+  chunks.forEach((chunk, idx) => {
+    if (idx === 0) {
+      emitNudgeChunk(userId, chunk);
+    } else {
+      setTimeout(
+        () => emitNudgeChunk(userId, chunk),
+        idx * NUDGE_CHUNK_DELAY_MS,
+      );
+    }
+  });
 }
 
 interface IdleState {
@@ -502,9 +601,11 @@ function fireIdle(sessionId: string): void {
   // resolver picks the right pending entry when multiple sessions
   // for the same project have queued dispatches.
   let completedDispatchId: string | null = null;
+  let completedPrompt = "";
   try {
     const completed = markDispatchCompleted(userId, projectId, sessionId);
     completedDispatchId = completed?.id ?? null;
+    completedPrompt = completed?.prompt ?? "";
   } catch (err) {
     console.warn(`[idle] markDispatchCompleted threw for project=${projectId}:`, err);
   }
@@ -582,5 +683,6 @@ function fireIdle(sessionId: string): void {
     sessionId,
     completedDispatchId,
     sessionLabel,
+    prompt: completedPrompt,
   });
 }
