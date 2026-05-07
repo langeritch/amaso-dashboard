@@ -236,46 +236,75 @@ function writeMcpConfig(tools: SparToolsConfig): string {
     },
   };
   if ((tools.allowedPlaywrightTools?.length ?? 0) > 0) {
-    // Resolve the playwright-mcp CLI from this project's node_modules so
-    // we don't depend on `npx` being on the Claude CLI's PATH (the same
-    // reason we spawn `node` for the spar server above).
-    const pwCli = path
-      .resolve(
-        process.cwd(),
-        "node_modules",
-        "@playwright",
-        "mcp",
-        "cli.js",
-      )
-      .split("\\")
-      .join("/");
-    // Connect to the user's real Chrome profile so logins (WhatsApp Web,
-    // Gmail, etc.) persist across sessions. Caveat: Chrome locks the
-    // user-data-dir while it's running — if the user has Chrome open
-    // with this profile, Playwright will fail to launch. The override
-    // env var `AMASO_PLAYWRIGHT_USER_DATA_DIR` lets us point at a
-    // dedicated copy if that becomes a recurring problem; the default
-    // matches what the user asked for in the install instructions.
-    const userDataDir =
-      process.env.AMASO_PLAYWRIGHT_USER_DATA_DIR ??
-      "C:\\Users\\santi\\AppData\\Local\\Google\\Chrome\\User Data";
-    const pwArgs: string[] = [
-      pwCli,
-      "--browser",
-      "chrome",
-      "--user-data-dir",
-      userDataDir,
-    ];
-    // Optional CDP attach for "reuse the existing Chrome window" — set
-    // AMASO_PLAYWRIGHT_CDP_ENDPOINT=http://127.0.0.1:9222 after starting
-    // Chrome with --remote-debugging-port=9222 and Playwright will
-    // attach instead of launching a fresh process.
-    const cdp = process.env.AMASO_PLAYWRIGHT_CDP_ENDPOINT;
-    if (cdp) pwArgs.push("--cdp-endpoint", cdp);
-    mcpServers.playwright = {
-      command: nodeBin,
-      args: pwArgs,
-    };
+    // Two browser-driver options:
+    //
+    //   AMASO_SPAR_DRIVER=extension — talk to the user's real Chrome
+    //     via the Amaso extension's CDP bridge. The browser_* tools
+    //     are exposed by `scripts/extension-mcp-server.mjs`, which
+    //     POSTs each call to /api/internal/ext-tools and the dashboard
+    //     forwards it over the ext-bridge WebSocket. Picks up real
+    //     logins, cookies, profile state — no separate Chrome process.
+    //     Requires the user to install extension/ in their Chrome and
+    //     have the dashboard tab open at least once.
+    //
+    //   default — @playwright/mcp launches its own Chrome against a
+    //     copy of the user-data-dir. Doesn't share live state and
+    //     fails if Chrome already has the profile locked.
+    if (process.env.AMASO_SPAR_DRIVER === "extension") {
+      const extServer = path
+        .resolve(process.cwd(), "scripts", "extension-mcp-server.mjs")
+        .split("\\")
+        .join("/");
+      mcpServers.extension = {
+        command: nodeBin,
+        args: [extServer],
+        env: {
+          AMASO_SPAR_TOKEN: tools.token,
+          AMASO_DASHBOARD_URL: tools.dashboardUrl,
+        },
+      };
+    } else {
+      // Resolve the playwright-mcp CLI from this project's node_modules so
+      // we don't depend on `npx` being on the Claude CLI's PATH (the same
+      // reason we spawn `node` for the spar server above).
+      const pwCli = path
+        .resolve(
+          process.cwd(),
+          "node_modules",
+          "@playwright",
+          "mcp",
+          "cli.js",
+        )
+        .split("\\")
+        .join("/");
+      // Connect to the user's real Chrome profile so logins (WhatsApp Web,
+      // Gmail, etc.) persist across sessions. Caveat: Chrome locks the
+      // user-data-dir while it's running — if the user has Chrome open
+      // with this profile, Playwright will fail to launch. The override
+      // env var `AMASO_PLAYWRIGHT_USER_DATA_DIR` lets us point at a
+      // dedicated copy if that becomes a recurring problem; the default
+      // matches what the user asked for in the install instructions.
+      const userDataDir =
+        process.env.AMASO_PLAYWRIGHT_USER_DATA_DIR ??
+        "C:\\Users\\santi\\AppData\\Local\\Google\\Chrome\\User Data";
+      const pwArgs: string[] = [
+        pwCli,
+        "--browser",
+        "chrome",
+        "--user-data-dir",
+        userDataDir,
+      ];
+      // Optional CDP attach for "reuse the existing Chrome window" — set
+      // AMASO_PLAYWRIGHT_CDP_ENDPOINT=http://127.0.0.1:9222 after starting
+      // Chrome with --remote-debugging-port=9222 and Playwright will
+      // attach instead of launching a fresh process.
+      const cdp = process.env.AMASO_PLAYWRIGHT_CDP_ENDPOINT;
+      if (cdp) pwArgs.push("--cdp-endpoint", cdp);
+      mcpServers.playwright = {
+        command: nodeBin,
+        args: pwArgs,
+      };
+    }
   }
   const cfg = { mcpServers };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "amaso-spar-"));
@@ -424,10 +453,17 @@ export async function streamFromClaudeCli(
     // looks identical to "model decided not to use any tool" — i.e.
     // the spar chat shows no tool cards. Comma-separated has no such
     // ambiguity.
+    // Tool prefix follows whichever driver writeMcpConfig registered.
+    // The browser-tool *names* (browser_navigate etc.) are identical
+    // either way; only the MCP-server namespace differs.
+    const browserPrefix =
+      process.env.AMASO_SPAR_DRIVER === "extension"
+        ? "mcp__extension__"
+        : "mcp__playwright__";
     const allow = [
       ...opts.tools.allowedTools.map((n) => `mcp__spar__${n}`),
       ...(opts.tools.allowedPlaywrightTools ?? []).map(
-        (n) => `mcp__playwright__${n}`,
+        (n) => `${browserPrefix}${n}`,
       ),
     ];
     args.push("--allowedTools", allow.join(","));

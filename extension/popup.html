@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Amaso Driver</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+        font-size: 13px;
+        margin: 0;
+        padding: 12px;
+        width: 320px;
+      }
+      h1 {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+      .row {
+        margin: 8px 0;
+      }
+      label {
+        display: block;
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 2px;
+      }
+      input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px 6px;
+        font-size: 12px;
+      }
+      button {
+        font-size: 12px;
+        padding: 4px 8px;
+        margin-right: 6px;
+        cursor: pointer;
+      }
+      .status {
+        font-size: 11px;
+        padding: 4px 6px;
+        border-radius: 4px;
+        background: #f3f3f3;
+        margin: 6px 0;
+      }
+      .status.ok {
+        background: #e6f7e6;
+        color: #1a661a;
+      }
+      .status.bad {
+        background: #fbe9e9;
+        color: #7a1a1a;
+      }
+      .muted {
+        color: #888;
+        font-size: 11px;
+      }
+      code {
+        font-size: 11px;
+        background: #eee;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Amaso Driver</h1>
+
+    <div id="status" class="status">…</div>
+
+    <div class="row">
+      <label for="origin">Dashboard URL</label>
+      <input id="origin" type="text" placeholder="https://dashboard.amaso.nl" />
+      <div style="margin-top: 4px">
+        <button id="save-origin">Save & connect</button>
+        <button id="reconnect">Reconnect</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <label>Driver tab</label>
+      <div id="tab-info" class="muted">…</div>
+      <div style="margin-top: 4px">
+        <button id="use-current">Use this tab</button>
+      </div>
+    </div>
+
+    <div class="muted">
+      Make sure you're logged in to the dashboard in this browser — the
+      driver authenticates with the same cookie as the dashboard tab.
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

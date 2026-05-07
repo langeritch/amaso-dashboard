@@ -27,6 +27,7 @@ data/terminal-uploads/
 data/demo-project/
 .env
 .env.local
+.mcp.json
 *.log
 logs/
 .DS_Store

@@ -1,17 +1,24 @@
-// Amaso Recorder — background service worker.
+// Amaso Recorder + Driver — background service worker.
 //
-// Responsibilities:
-//   - Owns the active session id and dashboard origin (persisted in
-//     chrome.storage.local so a service-worker restart doesn't lose
-//     them).
-//   - Receives event batches from content scripts, queues them, and
-//     flushes to the dashboard's events endpoint on a fixed cadence.
-//   - Picks up the session id from the dashboard tab's URL fragment
-//     (#recording=<id>) the first time it sees it after the
-//     RECORDING_DASHBOARD_URL is loaded.
+// Two responsibilities, kept in one worker because MV3 only allows one:
 //
-// The wire format is the RecordingEvent type from
-// types/recording.ts — keep them in sync by hand.
+//   1. Recorder (legacy): receives event batches from content scripts,
+//      queues them, flushes to the dashboard's recording endpoint.
+//   2. Driver: opens a persistent WebSocket to the dashboard's
+//      ext-bridge, receives browser_* tool calls, dispatches them to
+//      driver.js (which talks CDP via chrome.debugger), sends acks back.
+//
+// Both share `dashboardOrigin` from chrome.storage.local — populated
+// either by the recorder fragment hook (#recording=<id>) or, if the
+// user only uses the driver, by the popup's "Connect to dashboard"
+// flow which writes the origin manually.
+//
+// Wire format for the recorder events matches the RecordingEvent type
+// in types/recording.ts — keep in sync by hand.
+//
+// Wire format for the ext-bridge is documented in lib/ext-bridge-ws.ts.
+
+import { runTool, setActiveDriverTab, getActiveDriverTab } from "./driver.js";
 
 const FLUSH_INTERVAL_MS = 1500;
 const MAX_BATCH = 50;
@@ -53,7 +60,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.kind === "events" && Array.isArray(msg.events)) {
     for (const ev of msg.events) queue.push(ev);
     sendResponse({ queued: msg.events.length });
@@ -64,8 +71,218 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ active: state.sessionId != null });
     return true;
   }
+  // ---- Popup ↔ worker control plane --------------------------------
+  // The popup uses these to show status, set the dashboard origin
+  // (when the recorder hook hasn't fired yet), pick the driver tab,
+  // and force-reconnect the bridge WS.
+  if (msg && msg.kind === "driver/status") {
+    void (async () => {
+      const tabId = await getActiveDriverTab();
+      sendResponse({
+        dashboardOrigin: state.dashboardOrigin,
+        driverTabId: tabId,
+        bridgeConnected: bridge.ws && bridge.ws.readyState === 1,
+        bridgeLastError: bridge.lastError,
+      });
+    })();
+    return true;
+  }
+  if (msg && msg.kind === "driver/setOrigin" && typeof msg.origin === "string") {
+    state.dashboardOrigin = msg.origin.replace(/\/$/, "");
+    void chrome.storage.local.set({ dashboardOrigin: state.dashboardOrigin });
+    void connectBridge(); // reconnect against the new origin
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (msg && msg.kind === "driver/setDriverTab") {
+    void (async () => {
+      let tabId = msg.tabId;
+      if (typeof tabId !== "number" && sender && sender.tab && sender.tab.id) {
+        tabId = sender.tab.id;
+      }
+      if (typeof tabId !== "number") {
+        // Fall back to the active tab in the focused window.
+        const [active] = await chrome.tabs.query({
+          active: true,
+          lastFocusedWindow: true,
+        });
+        tabId = active && active.id;
+      }
+      if (typeof tabId === "number") {
+        await setActiveDriverTab(tabId);
+        sendResponse({ ok: true, tabId });
+      } else {
+        sendResponse({ ok: false, error: "no tab" });
+      }
+    })();
+    return true;
+  }
+  if (msg && msg.kind === "driver/reconnect") {
+    void connectBridge();
+    sendResponse({ ok: true });
+    return true;
+  }
   return false;
 });
+
+// =====================================================================
+// Driver bridge — WebSocket to /api/ext-bridge
+// =====================================================================
+//
+// One persistent WS per worker lifetime. MV3 service workers can be
+// recycled; we re-open on demand whenever a popup pings or the worker
+// boots after dashboardOrigin is known. Backoff caps at 30 s to avoid
+// hammering the dashboard during outages.
+
+const bridge = {
+  ws: null,
+  reconnectTimer: null,
+  reconnectDelayMs: 1000,
+  lastError: null,
+  /** Have we been told to stop reconnecting (e.g. dashboardOrigin
+   *  cleared)? Set by disconnectBridge(). */
+  shouldRun: true,
+};
+
+function bridgeUrl(origin) {
+  // ws:// for http://, wss:// for https://. URL parsing handles ports
+  // automatically.
+  const u = new URL(origin);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.pathname = "/api/ext-bridge";
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+async function connectBridge() {
+  if (!state.dashboardOrigin) {
+    bridge.lastError =
+      "no dashboardOrigin set — open the dashboard or use the popup";
+    return;
+  }
+  bridge.shouldRun = true;
+  // Tear down any existing socket cleanly.
+  if (bridge.ws) {
+    try {
+      bridge.ws.close();
+    } catch {
+      /* ignore */
+    }
+    bridge.ws = null;
+  }
+  if (bridge.reconnectTimer) {
+    clearTimeout(bridge.reconnectTimer);
+    bridge.reconnectTimer = null;
+  }
+  let url;
+  try {
+    url = bridgeUrl(state.dashboardOrigin);
+  } catch (err) {
+    bridge.lastError = `bad dashboardOrigin: ${err && err.message}`;
+    return;
+  }
+  let ws;
+  try {
+    ws = new WebSocket(url);
+  } catch (err) {
+    bridge.lastError = `WebSocket() threw: ${err && err.message}`;
+    scheduleBridgeReconnect();
+    return;
+  }
+  bridge.ws = ws;
+  ws.onopen = () => {
+    bridge.lastError = null;
+    bridge.reconnectDelayMs = 1000;
+    console.log("[ext-bridge] connected to", url);
+  };
+  ws.onmessage = (ev) => {
+    void handleBridgeMessage(ev.data);
+  };
+  ws.onerror = (ev) => {
+    // The Event isn't very informative in extension WSs; the close
+    // event that follows usually has the real reason.
+    bridge.lastError = "WebSocket error (see chrome://extensions logs)";
+    console.warn("[ext-bridge] error", ev);
+  };
+  ws.onclose = (ev) => {
+    if (bridge.ws === ws) bridge.ws = null;
+    bridge.lastError = `closed (${ev.code} ${ev.reason || "no reason"})`;
+    console.log("[ext-bridge] closed", ev.code, ev.reason);
+    if (bridge.shouldRun) scheduleBridgeReconnect();
+  };
+}
+
+function scheduleBridgeReconnect() {
+  if (!bridge.shouldRun) return;
+  if (bridge.reconnectTimer) return;
+  const delay = bridge.reconnectDelayMs;
+  bridge.reconnectTimer = setTimeout(() => {
+    bridge.reconnectTimer = null;
+    bridge.reconnectDelayMs = Math.min(30_000, bridge.reconnectDelayMs * 2);
+    void connectBridge();
+  }, delay);
+}
+
+async function handleBridgeMessage(raw) {
+  let msg;
+  try {
+    msg = JSON.parse(typeof raw === "string" ? raw : await raw.text());
+  } catch {
+    return;
+  }
+  if (msg.type === "hello") {
+    // No-op; we know who we are because we authed via cookie.
+    return;
+  }
+  if (msg.type === "ping") {
+    safeSend({ type: "pong", ts: msg.ts });
+    return;
+  }
+  if (msg.type === "command") {
+    const id = msg.id;
+    const cmd = msg.command || {};
+    try {
+      const result = await runTool(cmd.tool, cmd.args || {});
+      safeSend({ type: "ack", id, ok: true, result });
+    } catch (err) {
+      safeSend({
+        type: "ack",
+        id,
+        ok: false,
+        error: err && err.message ? err.message : String(err),
+      });
+    }
+    return;
+  }
+}
+
+function safeSend(obj) {
+  if (!bridge.ws || bridge.ws.readyState !== 1) return;
+  try {
+    bridge.ws.send(JSON.stringify(obj));
+  } catch (err) {
+    console.warn("[ext-bridge] send failed", err);
+  }
+}
+
+// Kick off the bridge as soon as we know the dashboardOrigin. The
+// recorder hook (webNavigation listener above) writes it the first
+// time the user opens the dashboard with #recording=<id>; the popup
+// can also write it directly. We retry on a slow loop until it
+// appears so a fresh install just needs the user to visit the
+// dashboard once.
+(async () => {
+  // Wait for hydration of `state` from storage above to finish; the
+  // existing chrome.storage.local.get(...).then(...) doesn't expose a
+  // promise to await on, so just poll briefly.
+  for (let i = 0; i < 50 && !state.dashboardOrigin; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  if (state.dashboardOrigin) {
+    void connectBridge();
+  }
+})();
 
 async function scheduleFlush() {
   if (flushing) return;

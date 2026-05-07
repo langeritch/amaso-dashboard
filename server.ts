@@ -34,7 +34,53 @@
 
 import { createServer } from "node:http";
 import { connect as tcpConnect } from "node:net";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import next from "next";
+
+// Event-loop-blocked detector. The dashboard had a recurring "becomes
+// unresponsive after some minutes" pattern that the watchdog correctly
+// flagged but we couldn't pinpoint from logs alone — process was alive,
+// memory stable, no exception, but HTTP probes were timing out at >12s.
+// That matches "synchronous code is monopolising the event loop".
+//
+// monitorEventLoopDelay() is libuv-level: it samples the gap between
+// when a timer should fire and when it actually does. Because it runs
+// inside libuv (not JS), it is NOT affected by JS blocking — so it can
+// truthfully report "the JS layer was unresponsive for 31000ms" even
+// while it's recording. Sampling resolution=20ms gives enough fidelity
+// to catch sub-second blocks; we report on a 5s tick so the log isn't
+// spammy. Anything over 1s is genuinely bad and worth a WARN.
+{
+  const histogram = monitorEventLoopDelay({ resolution: 20 });
+  histogram.enable();
+  setInterval(() => {
+    const maxMs = histogram.max / 1e6;
+    const meanMs = histogram.mean / 1e6;
+    const p99Ms = histogram.percentile(99) / 1e6;
+    histogram.reset();
+    if (maxMs >= 1000) {
+      // Active handles/requests give a hint at WHICH subsystem was busy.
+      // Synchronous CPU work won't show, but file I/O and pending HTTP
+      // sockets will — and those are the most common culprits in this
+      // app (chokidar walking, NDJSON parsing, brain-file reads).
+      let reqCount = 0;
+      let handleCount = 0;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const proc = process as any;
+        reqCount = proc._getActiveRequests?.().length ?? 0;
+        handleCount = proc._getActiveHandles?.().length ?? 0;
+      } catch {
+        /* ignore */
+      }
+      console.warn(
+        `[loop-lag] BLOCKED max=${maxMs.toFixed(0)}ms p99=${p99Ms.toFixed(0)}ms ` +
+          `mean=${meanMs.toFixed(1)}ms activeReqs=${reqCount} activeHandles=${handleCount}`,
+      );
+    }
+  }, 5000).unref();
+}
+
 import { getWatcher } from "./lib/watcher";
 import { createWsServer } from "./lib/ws";
 import { createTerminalWs } from "./lib/terminal-ws";
@@ -42,6 +88,7 @@ import { init as initTerminalBackend } from "./lib/terminal-backend";
 import { createBrowserWs } from "./lib/browser-ws";
 import { createCompanionWs } from "./lib/companion-ws";
 import { createSpar2Ws } from "./lib/spar2-ws";
+import { createExtBridgeWs } from "./lib/ext-bridge-ws";
 import { shutdownAll as shutdownLiveBrowsers } from "./lib/browser-stream";
 import { seedFromConfig } from "./lib/history";
 import { startKokoro } from "./lib/kokoro";
@@ -323,6 +370,7 @@ async function main() {
   const browserWs = createBrowserWs();
   const companionWs = createCompanionWs();
   const spar2Ws = createSpar2Ws();
+  const extBridgeWs = createExtBridgeWs();
   boot("ws servers constructed");
 
   const server = createServer((req, res) => {
@@ -382,6 +430,12 @@ async function main() {
       // /spar2 — singleton Hermes-in-WSL-tmux session for the operator.
       // Admin-only; CSWSH guard with X-Forwarded-Host inside the module.
       spar2Ws.handleUpgrade(req, socket, head);
+    } else if (url.startsWith("/api/ext-bridge")) {
+      // The Amaso browser extension's CDP bridge — drives the user's
+      // *real* Chrome session for the sparring partner. Cookie-authed,
+      // origin-allowlisted in the module (chrome-extension:// IDs +
+      // optional AMASO_EXT_BRIDGE_ALLOWED_ORIGINS env override).
+      extBridgeWs.handleUpgrade(req, socket, head);
     } else if (url.startsWith("/_next")) {
       // Next.js HMR and any other framework-internal upgrades. Hand
       // them off to Next's own handler — rejecting these used to

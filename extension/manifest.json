@@ -1,9 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Amaso Recorder",
-  "version": "0.1.0",
-  "description": "Captures browser actions for Amaso dashboard recording sessions.",
-  "permissions": ["storage", "tabs", "scripting", "webNavigation"],
+  "name": "Amaso Recorder + Driver",
+  "version": "0.2.0",
+  "description": "Records dashboard sessions AND lets the Amaso sparring partner drive your real Chrome via the DevTools protocol.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "webNavigation",
+    "debugger",
+    "activeTab"
+  ],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
@@ -18,6 +25,7 @@
     }
   ],
   "action": {
-    "default_title": "Amaso Recorder"
+    "default_title": "Amaso Recorder + Driver",
+    "default_popup": "popup.html"
   }
 }
