@@ -30,6 +30,7 @@
 import { getProject } from "./config";
 import { pushToUsers } from "./push";
 import { markDispatchCompleted } from "./spar-dispatch";
+import { readAutopilotDirective } from "./autopilot";
 import {
   appendMessage,
   createConversation,
@@ -121,6 +122,11 @@ function queueNudge(userId: number, nudge: PendingNudge) {
     pendingNudgesByUser.set(userId, queue);
   }
   queue.push(nudge);
+  console.log(
+    `[idle] queueNudge user=${userId} project=${nudge.projectId} session=${nudge.sessionId} ` +
+      `dispatch=${nudge.completedDispatchId} promptLen=${nudge.prompt.length} ` +
+      `pendingCount=${queue.length} timerArmed=${NUDGE_BATCH_MS}ms`,
+  );
   // (Re)start the batch timer so late arrivals extend the window —
   // a 5 s drip with one completion per second still produces one
   // merged message at the end, not five separate ones.
@@ -145,7 +151,10 @@ const NUDGE_MAX_CHARS = 1500;
 // them, short enough that the operator perceives them as one event.
 const NUDGE_CHUNK_DELAY_MS = 250;
 
-function buildNudgeMessage(chunk: PendingNudge[]): string {
+function buildNudgeMessage(
+  chunk: PendingNudge[],
+  customInstructions: string,
+): string {
   const labels: string[] = [];
   for (const n of chunk) {
     if (!labels.includes(n.sessionLabel)) labels.push(n.sessionLabel);
@@ -171,11 +180,23 @@ function buildNudgeMessage(chunk: PendingNudge[]): string {
       ? `\n\nLast sent prompts:\n${promptLines.join("\n")}`
       : "";
 
+  // User-set custom instructions ride along on EVERY auto-report,
+  // basic or smart mode alike. Stored in `autopilot_users.directive`
+  // (legacy field name; surfaces in the UI as "Custom instructions").
+  // The smart-mode autopilot block also reads the same value as a
+  // strategic directive — the Auto-report sidebar makes that single
+  // source of truth explicit.
+  const trimmedInstructions = customInstructions.trim();
+  const instructionsBlock =
+    trimmedInstructions.length > 0
+      ? `\n\nCustom instructions:\n${trimmedInstructions}`
+      : "";
+
   return (
     `Check the output of terminal for ${labelList}. ` +
     `${perProject} to see if the dispatched task finished successfully. ` +
     `If it did, resolve any open remark that matches the task ` +
-    `using resolve_remark.${promptBlock}`
+    `using resolve_remark.${promptBlock}${instructionsBlock}`
   );
 }
 
@@ -185,9 +206,13 @@ function buildNudgeMessage(chunk: PendingNudge[]): string {
 // prompt already exceeds the limit becomes its own chunk (we can't
 // split a single dispatch — it's atomic). Order is preserved so the
 // chat reads in the same sequence the terminals finished.
-function splitNudgesIntoChunks(nudges: PendingNudge[]): PendingNudge[][] {
+function splitNudgesIntoChunks(
+  nudges: PendingNudge[],
+  customInstructions: string,
+): PendingNudge[][] {
   if (nudges.length === 0) return [];
-  if (buildNudgeMessage(nudges).length <= NUDGE_MAX_CHARS) return [nudges];
+  if (buildNudgeMessage(nudges, customInstructions).length <= NUDGE_MAX_CHARS)
+    return [nudges];
 
   const chunks: PendingNudge[][] = [];
   let current: PendingNudge[] = [];
@@ -195,7 +220,7 @@ function splitNudgesIntoChunks(nudges: PendingNudge[]): PendingNudge[][] {
     const candidate = [...current, n];
     if (
       current.length > 0 &&
-      buildNudgeMessage(candidate).length > NUDGE_MAX_CHARS
+      buildNudgeMessage(candidate, customInstructions).length > NUDGE_MAX_CHARS
     ) {
       chunks.push(current);
       current = [n];
@@ -207,8 +232,12 @@ function splitNudgesIntoChunks(nudges: PendingNudge[]): PendingNudge[][] {
   return chunks;
 }
 
-function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
-  const nudge = buildNudgeMessage(chunk);
+function emitNudgeChunk(
+  userId: number,
+  chunk: PendingNudge[],
+  customInstructions: string,
+): void {
+  const nudge = buildNudgeMessage(chunk, customInstructions);
 
   const toolCalls =
     chunk.length === 1
@@ -229,9 +258,15 @@ function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
 
   try {
     let conversationId = latestConversationId(userId);
+    const wasFresh = conversationId == null;
     if (conversationId == null) {
       conversationId = createConversation(userId, null).id;
     }
+    console.log(
+      `[idle] emitNudgeChunk user=${userId} chunkSize=${chunk.length} ` +
+        `nudgeLen=${nudge.length} conversationId=${conversationId} ` +
+        `wasFresh=${wasFresh} firstProject=${chunk[0]?.projectId}`,
+    );
     const row = appendMessage({
       conversationId,
       userId,
@@ -239,15 +274,25 @@ function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
       content: nudge,
       toolCalls,
     });
-    if (row) {
-      // Cooldown latches per project once the chunk lands. With
-      // chunking, a project's cooldown starts on the chunk that
-      // carried it — chunks for the same flush still happen within
-      // a few hundred ms of each other, so the loop guard's 90 s
-      // window covers the whole sequence.
-      for (const n of chunk) {
-        startAutoReportCooldown(userId, n.projectId);
-      }
+    if (!row) {
+      console.warn(
+        `[idle] emitNudgeChunk user=${userId} appendMessage returned null — ` +
+          `nudge NOT persisted (chunk=${chunk.length} conv=${conversationId})`,
+      );
+      return;
+    }
+    console.log(
+      `[idle] emitNudgeChunk user=${userId} appended messageId=${row.id} conv=${row.conversationId}`,
+    );
+    // Cooldown latches per project once the chunk lands. With
+    // chunking, a project's cooldown starts on the chunk that
+    // carried it — chunks for the same flush still happen within
+    // a few hundred ms of each other, so the loop guard's 90 s
+    // window covers the whole sequence.
+    for (const n of chunk) {
+      startAutoReportCooldown(userId, n.projectId);
+    }
+    try {
       broadcastSparMessage(userId, {
         conversationId: row.conversationId,
         message: {
@@ -258,6 +303,14 @@ function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
           createdAt: row.createdAt,
         },
       });
+      console.log(
+        `[idle] emitNudgeChunk user=${userId} broadcast OK messageId=${row.id}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[idle] emitNudgeChunk broadcast failed for messageId=${row.id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   } catch (err) {
     console.warn(
@@ -268,12 +321,34 @@ function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
 }
 
 function flushNudgeBatch(userId: number) {
+  console.log(`[idle] flushNudgeBatch fired user=${userId}`);
   nudgeBatchTimers.delete(userId);
   const nudges = pendingNudgesByUser.get(userId);
   pendingNudgesByUser.delete(userId);
-  if (!nudges || nudges.length === 0) return;
+  if (!nudges || nudges.length === 0) {
+    console.log(`[idle] flushNudgeBatch user=${userId} bailed (queue empty)`);
+    return;
+  }
 
-  const chunks = splitNudgesIntoChunks(nudges);
+  // Pull the user's custom instructions once per flush so every chunk
+  // in this batch carries the same trailing block. Reading inside the
+  // loop would race a mid-flush directive edit and produce chunks that
+  // disagree with each other.
+  let customInstructions = "";
+  try {
+    customInstructions = readAutopilotDirective(userId);
+  } catch (err) {
+    console.warn(
+      `[idle] readAutopilotDirective threw for user=${userId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  const chunks = splitNudgesIntoChunks(nudges, customInstructions);
+  console.log(
+    `[idle] flushNudgeBatch user=${userId} nudges=${nudges.length} chunks=${chunks.length} ` +
+      `instructionsLen=${customInstructions.length}`,
+  );
 
   // Emit chunks sequentially with a short delay between them. The first
   // fires immediately; subsequent chunks are scheduled relative to the
@@ -284,10 +359,10 @@ function flushNudgeBatch(userId: number) {
   // back into one giant prompt.
   chunks.forEach((chunk, idx) => {
     if (idx === 0) {
-      emitNudgeChunk(userId, chunk);
+      emitNudgeChunk(userId, chunk, customInstructions);
     } else {
       setTimeout(
-        () => emitNudgeChunk(userId, chunk),
+        () => emitNudgeChunk(userId, chunk, customInstructions),
         idx * NUDGE_CHUNK_DELAY_MS,
       );
     }

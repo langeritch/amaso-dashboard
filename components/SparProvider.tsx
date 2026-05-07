@@ -4131,10 +4131,22 @@ export default function SparProvider({
   // out → mic stays dark for 450 ms after silence" gate.
   // Cancel any pending clear if either source goes audible again
   // mid-tail so we don't drop the gate while audio is still playing.
+  // Track whether audio was previously playing so the tail window only
+  // arms on a real audible→silent edge — not on initial mount, where
+  // both flags are false and the old code would set ttsTailSettling=true
+  // for 450 ms after every page load. That dead window was blocking
+  // acquireMicStream (the freshly-acquired stream got stopped because
+  // shouldSilence saw ttsTailSettling=true) AND blocking SR results
+  // (the onresult `blocked` check ANDs in ttsTailSettlingRef). Net
+  // effect: starting a call within ~half a second of opening /spar
+  // produced a stream-acquired-then-stopped flash and a "speaking but
+  // nothing happens" first turn.
+  const wasAudibleRef = useRef(false);
   useEffect(() => {
     const POST_AUDIO_TAIL_MS = 450;
     const audible = ttsAudible || fillerAudible;
     if (audible) {
+      wasAudibleRef.current = true;
       if (ttsTailTimerRef.current !== null) {
         window.clearTimeout(ttsTailTimerRef.current);
         ttsTailTimerRef.current = null;
@@ -4142,6 +4154,11 @@ export default function SparProvider({
       setTtsTailSettling(false);
       return;
     }
+    // Falling edge only: skip if audio was never playing in the first
+    // place (e.g. fresh mount). Without this guard, every page load
+    // burns a 450 ms mic-dark window for no reason.
+    if (!wasAudibleRef.current) return;
+    wasAudibleRef.current = false;
     setTtsTailSettling(true);
     if (ttsTailTimerRef.current !== null) {
       window.clearTimeout(ttsTailTimerRef.current);

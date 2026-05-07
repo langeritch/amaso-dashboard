@@ -1359,15 +1359,16 @@ export default function SparFullView() {
         onClose={() => setAutopilotSidebarOpen(false)}
       />
 
-      {/* Right-edge presence indicator. Only shows when autopilot is on
-          AND the panel is closed — gives a subtle "loop is alive" cue
-          without taking up footer space. Tap to open the panel. */}
+      {/* Right-edge presence indicator. Only shows when smart mode is
+          on AND the auto-report panel is closed — gives a subtle "the
+          smart loop is alive" cue without taking up footer space. Tap
+          to open the panel. */}
       {autopilot && !autopilotSidebarOpen && (
         <button
           type="button"
           onClick={() => setAutopilotSidebarOpen(true)}
-          aria-label="open autopilot panel"
-          title="autopilot is on — open panel"
+          aria-label="open auto-report panel"
+          title="smart mode is on — open auto-report panel"
           className="fixed right-1.5 top-1/2 z-30 flex h-8 w-3 -translate-y-1/2 items-center justify-center rounded-l-md bg-orange-500/10 transition hover:bg-orange-500/20"
         >
           <span
@@ -1633,8 +1634,8 @@ export default function SparFullView() {
               <button
                 type="button"
                 onClick={() => setAutopilotSidebarOpen(true)}
-                aria-label="open autopilot panel"
-                title="autopilot controls"
+                aria-label="open auto-report panel"
+                title="auto-report settings"
                 className="inline-flex h-8 w-7 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900/80 text-neutral-500 transition hover:border-neutral-700 hover:text-neutral-200"
               >
                 <ChevronRight className="h-3.5 w-3.5" />
