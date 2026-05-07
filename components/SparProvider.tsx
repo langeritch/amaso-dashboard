@@ -1148,7 +1148,11 @@ export default function SparProvider({
           const m = incoming[i];
           if (m.role === "assistant" && (m.content ?? "").trim().length > 0) break;
           if (m.role === "user" && isAutoReportTag(m.toolCalls)) {
-            enqueueAutoReport({ messageId: m.id, conversationId: id });
+            enqueueAutoReport({
+              messageId: m.id,
+              conversationId: id,
+              content: m.content,
+            });
             break;
           }
         }
@@ -2754,7 +2758,16 @@ export default function SparProvider({
   const AUTO_REPORT_CLAIM_TTL_MS = 60_000;
   const AUTO_REPORT_MAX_PROCESSED = 500;
 
-  type AutoReportEntry = { messageId: number; conversationId: number };
+  // Captured at WS-broadcast time so the batch processor never has
+  // to walk messagesRef to figure out what to merge — once
+  // MAX_TRANSCRIPT trims the row out of local state we'd otherwise
+  // lose the project label and the merged content would come up
+  // empty. content carries the full nudge string verbatim.
+  type AutoReportEntry = {
+    messageId: number;
+    conversationId: number;
+    content: string;
+  };
   const autoReportQueueRef = useRef<AutoReportEntry[]>([]);
   const processedAutoReportsRef = useRef<Set<number>>(new Set());
   const autoReportFlushTimerRef = useRef<number | null>(null);
@@ -2872,15 +2885,16 @@ export default function SparProvider({
   function buildMergedAutoReportContent(items: AutoReportEntry[]): string {
     const labels: string[] = [];
     for (const it of items) {
-      const m = messagesRef.current.find(
-        (msg) => msg.persistedId === it.messageId,
-      );
-      if (!m) continue;
+      // Trust the queue entry's captured content. messagesRef would
+      // have been wrong here once MAX_TRANSCRIPT trimmed the row
+      // out of local state — burst arrivals during a long voice
+      // call routinely push older auto-reports off the tail.
+      const raw = (it.content ?? "").trim();
+      if (!raw) continue;
       // Strip the leading "check output of terminal for " prefix so
       // we can re-emit a clean comma-joined list. Falls back to the
       // raw content for any nudge whose shape differs from the
       // expected pattern (older server build, manual injection).
-      const raw = m.content.trim();
       const match = raw.match(
         /^check output of terminal[s]? for (.+)$/i,
       );
@@ -2913,19 +2927,14 @@ export default function SparProvider({
       const onActive = fresh.filter((it) => it.conversationId === activeConv);
       if (onActive.length === 0) return;
 
-      // Make sure every targeted message is in messagesRef (the WS
-      // broadcast may not have fully applied to local state yet).
-      // If any is missing, defer — the next 200 ms tick will retry.
-      const allPresent = onActive.every((it) =>
-        messagesRef.current.some((m) => m.persistedId === it.messageId),
-      );
-      if (!allPresent) {
-        autoReportFlushTimerRef.current = window.setTimeout(() => {
-          autoReportFlushTimerRef.current = null;
-          flushAutoReportQueue();
-        }, 200);
-        return;
-      }
+      // We used to gate the merge on "every messageId is present in
+      // messagesRef" to wait out the WS-broadcast→setMessages tick.
+      // Dropped — the queue entries already carry their content
+      // captured at broadcast time, so messagesRef can be entirely
+      // empty (MAX_TRANSCRIPT trimmed the rows, voice mode replaced
+      // them, etc.) and the merge still works. The verified WS
+      // broadcast that produced the queue entry is the source of
+      // truth, not local view state.
 
       // Skip anything that's already pending in the main message queue
       // — re-enqueueing the same merged content would fire the model
@@ -3029,13 +3038,20 @@ export default function SparProvider({
       if (rawQueue) {
         const parsed = JSON.parse(rawQueue);
         if (Array.isArray(parsed)) {
-          autoReportQueueRef.current = parsed.filter(
-            (x): x is AutoReportEntry =>
-              !!x &&
-              typeof x === "object" &&
-              typeof (x as AutoReportEntry).messageId === "number" &&
-              typeof (x as AutoReportEntry).conversationId === "number",
-          );
+          autoReportQueueRef.current = parsed
+            .filter(
+              (x): x is { messageId: number; conversationId: number; content?: unknown } =>
+                !!x &&
+                typeof x === "object" &&
+                typeof (x as AutoReportEntry).messageId === "number" &&
+                typeof (x as AutoReportEntry).conversationId === "number",
+            )
+            .map((x) => ({
+              messageId: x.messageId,
+              conversationId: x.conversationId,
+              content:
+                typeof x.content === "string" ? x.content : "",
+            }));
         }
       }
     } catch {
@@ -3108,7 +3124,11 @@ export default function SparProvider({
     // path layers in the read-only guard so this can never re-loop into
     // dispatch_to_project.
     if (role === "user" && isAutoReportTag(toolCallsRaw)) {
-      enqueueAutoReport({ messageId, conversationId: convId });
+      enqueueAutoReport({
+        messageId,
+        conversationId: convId,
+        content,
+      });
     }
 
     setMessages((prev) => {

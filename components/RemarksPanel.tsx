@@ -291,7 +291,7 @@ export default function RemarksPanel({
     : 0;
 
   return (
-    <div className="flex h-full flex-col border-l border-neutral-800 bg-neutral-950/40">
+    <div className="flex h-full flex-col border-l border-neutral-800 bg-neutral-950/40 pb-[var(--spar-footer-h,0px)]">
       <div className="border-b border-neutral-800 px-3 py-2">
         <div className="flex items-center justify-between">
           <span className="text-xs text-neutral-400">
@@ -396,7 +396,16 @@ export default function RemarksPanel({
         onSubmit={submit}
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDrop}
-        className="pb-safe pl-safe pr-safe max-h-[55vh] shrink-0 space-y-2 overflow-y-auto border-t border-neutral-800 bg-neutral-950/40 p-3"
+        // The form has its own scroll container (overflow-y-auto, max-
+        // h-[55vh]) and sits inside a flex column whose outer wrapper
+        // already pads for the GlobalFooter via --spar-footer-h. But
+        // when the form itself is the part the user is interacting
+        // with, its bottom edge has to clear the footer too — without
+        // this the textarea + buttons end up tucked behind the fixed
+        // strip. p-3 gives the form the normal interior padding;
+        // pb-[…] adds the footer-height extra on top so the bottom
+        // padding is "12px + footer" rather than just "12px".
+        className="pl-safe pr-safe max-h-[55vh] shrink-0 space-y-2 overflow-y-auto border-t border-neutral-800 bg-neutral-950/40 p-3 pb-[calc(0.75rem+var(--spar-footer-h,0px))]"
       >
         {/* Prominent target banner — always visible, always obvious */}
         <div

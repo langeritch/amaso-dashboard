@@ -46,36 +46,45 @@ const SETTLE_MS = 1_500;
 
 // Loop guard for the auto-report nudge.
 //
-// After fireIdle drops a "check output of terminal for X" message into
-// the spar conversation for user U, suppress any further auto-report
-// for that user during this window. The first auto-report in a chain
-// fires fully — sparring partner reads scrollback, may even
-// dispatch_to_project — and that's intentional. If the AI's response
-// dispatches more work, the descendant dispatch will complete and try
-// to fire its own auto-report; we silently swallow it here so the
-// previous infinite loop ("AR → AI dispatches → completion → AR → AI
-// dispatches → …") can't restart.
+// After fireIdle drops a "check output of terminal for X" message for
+// project P into spar, suppress further auto-reports FOR THAT SAME
+// PROJECT for AUTO_REPORT_COOLDOWN_MS. Other projects firing their
+// completions during the window get through unimpeded — the loop
+// case we're guarding against is "P fires AR → AI dispatches into P
+// → P finishes → AR → loop", which is per-project by construction.
+// Twelve unrelated projects all completing in a one-second burst
+// should produce twelve auto-reports (merged client-side into one
+// model turn), not one project's report and eleven dropped on the
+// floor.
 //
-// Side effect: if Santi himself manually fires another dispatch within
-// the window, that completion's auto-report is also suppressed. He can
-// always ask "what happened on X?" by hand. Acceptable trade-off — a
-// hard rate limit is the only way to break the loop without threading
-// chain metadata through every dispatch row.
+// Cooldown key is `${userId}:${projectId}` so two operators in the
+// same workspace each get independent windows per project.
 const AUTO_REPORT_COOLDOWN_MS = 90_000;
-const autoReportCooldownUntil = new Map<number, number>();
+const autoReportCooldownUntil = new Map<string, number>();
 
-function isAutoReportCooldownActive(userId: number): boolean {
-  const until = autoReportCooldownUntil.get(userId);
+function cooldownKey(userId: number, projectId: string): string {
+  return `${userId}:${projectId}`;
+}
+
+function isAutoReportCooldownActive(
+  userId: number,
+  projectId: string,
+): boolean {
+  const key = cooldownKey(userId, projectId);
+  const until = autoReportCooldownUntil.get(key);
   if (until == null) return false;
   if (until <= Date.now()) {
-    autoReportCooldownUntil.delete(userId);
+    autoReportCooldownUntil.delete(key);
     return false;
   }
   return true;
 }
 
-function startAutoReportCooldown(userId: number) {
-  autoReportCooldownUntil.set(userId, Date.now() + AUTO_REPORT_COOLDOWN_MS);
+function startAutoReportCooldown(userId: number, projectId: string) {
+  autoReportCooldownUntil.set(
+    cooldownKey(userId, projectId),
+    Date.now() + AUTO_REPORT_COOLDOWN_MS,
+  );
 }
 
 interface IdleState {
@@ -437,14 +446,16 @@ function fireIdle(sessionId: string): void {
   // straight into a terminal shouldn't litter the spar transcript).
   if (!completedDispatchId) return;
 
-  // Loop guard. If the previous auto-report response triggered the
-  // sparring partner to dispatch another task, that task's completion
-  // would land here within seconds and try to fire its own
-  // auto-report — restarting the loop the original Haiku-driven
-  // design fell into. The cooldown stops the chain at depth 1.
-  if (isAutoReportCooldownActive(userId)) {
+  // Loop guard. If THIS project's previous auto-report response
+  // triggered the sparring partner to dispatch another task INTO THE
+  // SAME PROJECT, that task's completion would land here within
+  // seconds and try to fire its own auto-report — restarting the
+  // loop the original Haiku-driven design fell into. The cooldown
+  // stops the chain at depth 1, scoped per project so a parallel
+  // completion in some other project still gets through.
+  if (isAutoReportCooldownActive(userId, projectId)) {
     console.log(
-      `[idle] auto-report cooldown active for user=${userId} — suppressing nudge for project=${projectId} session=${sessionId} dispatch=${completedDispatchId}`,
+      `[idle] auto-report cooldown active for user=${userId} project=${projectId} — suppressing nudge session=${sessionId} dispatch=${completedDispatchId}`,
     );
     return;
   }
@@ -482,7 +493,7 @@ function fireIdle(sessionId: string): void {
     if (row) {
       // Start the cooldown only AFTER a successful append — a failed
       // write shouldn't shut the door on the next attempt.
-      startAutoReportCooldown(userId);
+      startAutoReportCooldown(userId, projectId);
       broadcastSparMessage(userId, {
         conversationId: row.conversationId,
         message: {

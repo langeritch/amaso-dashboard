@@ -33,7 +33,7 @@ export default function TeamHub({
   const [activeTab, setActiveTab] = useState<TabId>("chat");
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       <nav className="flex gap-1 rounded-lg border border-neutral-800/80 bg-neutral-950/60 p-1">
         {tabs.map(({ id, label, Icon }) => {
           const active = id === activeTab;
