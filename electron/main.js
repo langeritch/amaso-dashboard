@@ -608,39 +608,6 @@ function connectToCloud() {
       sendAck({ id: msg.id, ok, error, result });
       return;
     }
-    // Direct request/response protocol used by the dashboard's newer
-    // device-targeted command path. The legacy `command` envelope
-    // above wraps an inner type and replies with `ack`; this path
-    // takes the type at the top level and replies with
-    // `command.result` keyed on the same `id` for correlation.
-    if (msg.type === "companion.ping" && msg.id) {
-      // Health check. Only answer if the socket is still open at
-      // send time; a late pong via outbox would mislead the
-      // dashboard into thinking the device was alive at the time
-      // it asked.
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({
-            type: "companion.pong",
-            id: msg.id,
-            result: { status: "alive", uptime: process.uptime() },
-          }));
-        } catch {
-          /* socket raced with close; nothing useful to do */
-        }
-      }
-      return;
-    }
-    if (
-      (msg.type === "shell.exec" ||
-        msg.type === "fs.read" ||
-        msg.type === "screenshot" ||
-        msg.type === "screenshot.region") &&
-      msg.id
-    ) {
-      handleCommandRequest(msg);
-      return;
-    }
   });
 
   ws.on("close", (code, reason) => {
@@ -717,90 +684,6 @@ function disconnectFromCloud() {
   wsStatus = "disconnected";
 }
 
-// Route a pre-built response message through the open socket or fall
-// back to the outbox. Used by the direct request/response handlers
-// (shell.exec, fs.read) so a brief disconnect between request arrival
-// and command completion still gets the result back to the dashboard
-// on the next reconnect, instead of forcing a server-side timeout.
-function sendResult(msg) {
-  if (socket?.readyState === WebSocket.OPEN) {
-    try {
-      socket.send(JSON.stringify(msg));
-      return;
-    } catch {
-      /* connection died between readyState check and send */
-    }
-  }
-  outboxPush(msg);
-}
-
-// Direct request/response handler for shell.exec and fs.read. Reuses
-// the existing runShell and readFile implementations so timeouts,
-// output caps, and home-dir expansion behave the same as the legacy
-// command envelope. Replies with `command.result` keyed on the
-// caller's id.
-async function handleCommandRequest(msg) {
-  const id = msg.id;
-  thinkingCount += 1;
-  refreshTrayIcon();
-  try {
-    if (msg.type === "shell.exec") {
-      try {
-        const r = await runShell({ cmd: msg?.args?.command });
-        sendResult({
-          type: "command.result",
-          id,
-          result: { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode },
-        });
-      } catch (err) {
-        sendResult({
-          type: "command.result",
-          id,
-          error: String(err?.message || err),
-        });
-      }
-      return;
-    }
-    if (msg.type === "fs.read") {
-      try {
-        const r = await readFile({ path: msg?.args?.path });
-        sendResult({
-          type: "command.result",
-          id,
-          result: { content: r.content },
-        });
-      } catch (err) {
-        sendResult({
-          type: "command.result",
-          id,
-          error: String(err?.message || err),
-        });
-      }
-      return;
-    }
-    if (msg.type === "screenshot" || msg.type === "screenshot.region") {
-      try {
-        const r = takeScreenshot(msg);
-        sendResult({
-          type: "command.result",
-          id,
-          result: r,
-        });
-      } catch (err) {
-        sendResult({
-          type: "command.result",
-          id,
-          error: `Screenshot failed: ${err?.message || err}`,
-        });
-      }
-      return;
-    }
-  } finally {
-    thinkingCount = Math.max(0, thinkingCount - 1);
-    refreshTrayIcon();
-  }
-}
-
 // Announce this companion to the dashboard. Sent right after the WS
 // open handshake and again whenever the user renames the device, so
 // the dashboard's device list always reflects the current label
@@ -874,6 +757,17 @@ async function dispatchCommand(msg) {
       return runShell(msg);
     case "fs.read":
       return readFile(msg);
+    case "fs.read.binary":
+      return readFileBinary(msg);
+    case "fs.write":
+      return writeFile(msg);
+    case "screenshot":
+      return takeScreenshot(msg);
+    case "input.type":
+    case "input.key":
+    case "input.click":
+    case "input.move":
+      return runInput(msg);
     default:
       throw new Error(`unknown command: ${msg?.type || "?"}`);
   }
@@ -1003,24 +897,26 @@ function expandHome(p) {
 }
 
 // macOS screencapture + sips wrapper for the dashboard's screenshot
-// command. Coordinates are validated as finite numbers before being
-// passed to the binaries via execFileSync (no shell), so the dashboard
-// can never inject extra arguments through args. The temp file path
-// is fixed; concurrent requests collide, which is acceptable given the
-// dashboard's serialized command flight per device.
+// command. The dashboard sends the inner shape `{ resize?, region? }`
+// at the top level of the envelope; coordinates are validated as
+// finite numbers before being passed to the binaries via
+// execFileSync (no shell), so a malformed region cannot inject extra
+// arguments. The temp file path is fixed; concurrent requests
+// collide, which is acceptable given the dashboard's serialized
+// per-device command flight.
 const SCREENSHOT_PATH = "/tmp/companion-screenshot.png";
 const SCREENSHOT_DEFAULT_WIDTH = 1920;
 
 function takeScreenshot(msg) {
-  const args = msg?.args || {};
   const argv = ["-x"];
-  if (msg.type === "screenshot.region") {
-    const x = Number(args.x);
-    const y = Number(args.y);
-    const w = Number(args.width);
-    const h = Number(args.height);
+  const region = msg?.region;
+  if (region) {
+    const x = Number(region.x);
+    const y = Number(region.y);
+    const w = Number(region.width);
+    const h = Number(region.height);
     if (![x, y, w, h].every(Number.isFinite)) {
-      throw new Error("region requires numeric x, y, width, height");
+      throw new Error("screenshot region requires numeric x, y, width, height");
     }
     argv.push("-R", `${x},${y},${w},${h}`);
   }
@@ -1029,22 +925,22 @@ function takeScreenshot(msg) {
   try {
     execFileSync("screencapture", argv, { stdio: "pipe" });
 
-    if (msg.type === "screenshot") {
-      const requested = args.resize == null
-        ? SCREENSHOT_DEFAULT_WIDTH
-        : Number(args.resize);
-      if (!Number.isFinite(requested) || requested <= 0) {
-        throw new Error("resize must be a positive number");
-      }
-      // sips -Z bounds the longest edge in pixels and preserves aspect
-      // ratio; --out FILE writes back to the same path so we don't
-      // need to track two temp files.
-      execFileSync(
-        "sips",
-        ["-Z", String(Math.round(requested)), SCREENSHOT_PATH, "--out", SCREENSHOT_PATH],
-        { stdio: "pipe" },
-      );
+    // sips -Z bounds the longest edge in pixels and preserves aspect
+    // ratio; --out FILE writes back to the same path so we don't
+    // need to track two temp files. Region captures on Retina
+    // displays produce 2x pixel output, so they benefit from the
+    // resize cap as much as full-screen captures.
+    const requested = msg?.resize == null
+      ? SCREENSHOT_DEFAULT_WIDTH
+      : Number(msg.resize);
+    if (!Number.isFinite(requested) || requested <= 0) {
+      throw new Error("screenshot resize must be a positive number");
     }
+    execFileSync(
+      "sips",
+      ["-Z", String(Math.round(requested)), SCREENSHOT_PATH, "--out", SCREENSHOT_PATH],
+      { stdio: "pipe" },
+    );
 
     const buf = fs.readFileSync(SCREENSHOT_PATH);
     return {
@@ -1067,6 +963,121 @@ function takeScreenshot(msg) {
 function readPngWidth(buf) {
   if (buf.length < 24) return 0;
   return buf.readUInt32BE(16);
+}
+
+async function writeFile(msg) {
+  const target = typeof msg?.path === "string" ? msg.path : "";
+  if (!target) throw new Error("fs.write: empty path");
+  const resolved = expandHome(target);
+  const content = typeof msg?.content === "string" ? msg.content : "";
+  const encoding = typeof msg?.encoding === "string" && msg.encoding.trim()
+    ? msg.encoding.trim()
+    : "utf8";
+  if (encoding !== "utf8" && encoding !== "base64") {
+    throw new Error(`fs.write: unsupported encoding ${encoding}`);
+  }
+  const bytes = encoding === "base64"
+    ? Buffer.from(content, "base64")
+    : Buffer.from(content, "utf8");
+  await fsp.writeFile(resolved, bytes);
+  return { written: true, path: resolved, size: bytes.length };
+}
+
+async function readFileBinary(msg) {
+  const target = typeof msg?.path === "string" ? msg.path : "";
+  if (!target) throw new Error("fs.read.binary: empty path");
+  const resolved = expandHome(target);
+
+  const stat = await fsp.stat(resolved);
+  if (!stat.isFile()) throw new Error(`fs.read.binary: not a file: ${resolved}`);
+  const truncated = stat.size > FS_READ_MAX_BYTES;
+  const bytesToRead = truncated ? FS_READ_MAX_BYTES : stat.size;
+
+  const fh = await fsp.open(resolved, "r");
+  try {
+    const buf = Buffer.alloc(bytesToRead);
+    if (bytesToRead > 0) await fh.read(buf, 0, bytesToRead, 0);
+    return {
+      path: resolved,
+      size: stat.size,
+      bytesRead: bytesToRead,
+      truncated,
+      content: buf.toString("base64"),
+    };
+  } finally {
+    await fh.close();
+  }
+}
+
+// GUI input via cliclick (https://github.com/BlueM/cliclick). cliclick
+// must be on PATH; install with `brew install cliclick`. We catch the
+// ENOENT case explicitly so the dashboard sees an actionable error
+// instead of "spawn cliclick ENOENT".
+function runInput(msg) {
+  const argv = buildCliclickArgs(msg);
+  try {
+    execFileSync("cliclick", argv, { stdio: "pipe" });
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      throw new Error(
+        "cliclick is required for input commands. Install with: brew install cliclick",
+      );
+    }
+    throw err;
+  }
+  return { acted: true, action: msg.type };
+}
+
+function buildCliclickArgs(msg) {
+  switch (msg.type) {
+    case "input.type": {
+      const text = typeof msg?.text === "string" ? msg.text : "";
+      if (text.length === 0) throw new Error("input.type: empty text");
+      // cliclick `t:` splits on the first colon so the rest of the
+      // arg is the literal text, including any further colons.
+      return [`t:${text}`];
+    }
+    case "input.key": {
+      const key = typeof msg?.key === "string" ? msg.key.trim() : "";
+      if (!key) throw new Error("input.key: empty key");
+      const modifiers = Array.isArray(msg?.modifiers)
+        ? msg.modifiers.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
+        : [];
+      const argv = [];
+      for (const m of modifiers) argv.push(`kd:${m}`);
+      argv.push(`kp:${key}`);
+      // Release modifiers in reverse order so the OS sees a tidy
+      // press/release sequence.
+      for (let i = modifiers.length - 1; i >= 0; i -= 1) argv.push(`ku:${modifiers[i]}`);
+      return argv;
+    }
+    case "input.click": {
+      const x = Number(msg?.x);
+      const y = Number(msg?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        throw new Error("input.click: x and y must be numeric");
+      }
+      // cliclick verbs: c = left click, rc = right click, dc = double
+      // (left) click. doubleClick wins over button: a "right
+      // double-click" isn't a primitive cliclick exposes.
+      const verb = msg?.doubleClick
+        ? "dc"
+        : msg?.button === "right"
+          ? "rc"
+          : "c";
+      return [`${verb}:${x},${y}`];
+    }
+    case "input.move": {
+      const x = Number(msg?.x);
+      const y = Number(msg?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        throw new Error("input.move: x and y must be numeric");
+      }
+      return [`m:${x},${y}`];
+    }
+    default:
+      throw new Error(`unknown input action: ${msg?.type || "?"}`);
+  }
 }
 
 module.exports = { dispatchCommand, sendEvent };
