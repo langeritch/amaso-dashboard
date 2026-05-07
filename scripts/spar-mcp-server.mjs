@@ -1140,6 +1140,116 @@ const TOOLS = [
     },
   },
   {
+    name: "companion_write_file",
+    description:
+      "Write a file to a paired companion device. Pass content as utf8 text by default, or set encoding to base64 for binary blobs (images, PDFs, etc). Creates the file if missing, overwrites it if it exists. 30 second timeout. Returns { saved size, written:true }. Use when the user asks you to drop a script on their machine, save notes locally, or stash a binary you generated server-side.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Absolute path on the companion. Tilde expansion (~/foo) works on macOS / Linux. Parent directories must already exist.",
+        },
+        content: {
+          type: "string",
+          description:
+            "File contents. Plain text when encoding is utf8 (default), or a base64 string when encoding is base64.",
+        },
+        encoding: {
+          type: "string",
+          enum: ["utf8", "base64"],
+          description:
+            "How to interpret content. utf8 for text files (default), base64 for binary.",
+        },
+        device_id: {
+          type: "string",
+          description:
+            "Optional. The deviceId of the target machine. Omit to default to the first connected device.",
+        },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "companion_read_binary",
+    description:
+      "Read a binary file (PDF, image, audio, archive, etc) off a paired companion device. The bytes are saved into the dashboard's tmp folder and the path is returned; chain a Read tool call on saved_to to view or further process the file. 30 second timeout. For text files prefer companion_read_file so the model gets the contents inline.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Absolute path to the binary file on the companion device.",
+        },
+        device_id: {
+          type: "string",
+          description:
+            "Optional. The deviceId of the target machine. Omit to default to the first connected device.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "companion_input",
+    description:
+      "GUI automation on a paired companion device. Four actions: type text into the active app, press a key (with optional modifiers), click a screen coordinate, or move the mouse to a coordinate. macOS click / move requires cliclick to be installed (brew install cliclick); the companion errors out clearly when it's missing. Use deliberately, this drives the user's actual screen.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["type", "key", "click", "move"],
+          description:
+            "type: enter text into the active focus. key: press a single key (with optional modifiers). click: click at (x, y). move: move the cursor to (x, y) without clicking.",
+        },
+        text: {
+          type: "string",
+          description: "Required for action 'type'. The text to enter.",
+        },
+        key: {
+          type: "string",
+          description:
+            "Required for action 'key'. The key name, eg 'a', 'enter', 'tab', 'space', 'left'. The companion maps these to platform key codes.",
+        },
+        modifiers: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional modifier list for action 'key', eg ['cmd'], ['ctrl','shift']. macOS uses cmd / alt / ctrl / shift; Windows uses ctrl / alt / shift / win.",
+        },
+        x: {
+          type: "number",
+          description: "Required for actions 'click' and 'move'. X pixel coordinate.",
+        },
+        y: {
+          type: "number",
+          description: "Required for actions 'click' and 'move'. Y pixel coordinate.",
+        },
+        button: {
+          type: "string",
+          enum: ["left", "right"],
+          description: "Optional for action 'click'. Default 'left'.",
+        },
+        doubleClick: {
+          type: "boolean",
+          description: "Optional for action 'click'. Default false.",
+        },
+        device_id: {
+          type: "string",
+          description:
+            "Optional. The deviceId of the target machine. Omit to default to the first connected device.",
+        },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "companion_screenshot",
     description:
       "Take a screenshot of a paired companion device's screen. The PNG is saved to the dashboard's tmp directory and the path is returned; chain a Read tool call on saved_to to actually view the image. Optional resize caps the max width in pixels (default 1920); optional region crops to a rectangle. 30 second timeout. Use sparingly: a full-screen capture can be a few MB.",

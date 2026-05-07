@@ -80,6 +80,9 @@ export const SPAR_TOOLS = [
   "companion_exec",
   "companion_read_file",
   "companion_screenshot",
+  "companion_write_file",
+  "companion_read_binary",
+  "companion_input",
 ];
 
 /**
@@ -353,6 +356,31 @@ deliberately, this runs on the user's actual computer.
     resize is 1920px wide; pass region:{x,y,width,height} when you
     only need a slice ("show me just the menu bar"). Use sparingly,
     a full-screen capture can be a few MB.
+  • companion_write_file({ path, content, encoding?, device_id? })
+    creates or overwrites a file on the companion. Default encoding
+    is utf8 for plain text; pass encoding:"base64" with a base64-
+    encoded string when writing binary blobs (images, PDFs, archives).
+    Parent directory must already exist; use companion_exec with
+    mkdir -p first if it doesn't. The file is overwritten without
+    prompting, so for anything risky read the existing file first
+    or talk it through with the user before firing.
+  • companion_read_binary({ path, device_id? }) pulls a binary file
+    (PDFs, images, audio, archives) off the companion and saves it
+    into the dashboard's tmp folder. Returns saved_to plus filename,
+    extension, and size. Chain a Read on saved_to to view it. For
+    text files prefer companion_read_file so the contents come back
+    inline.
+  • companion_input({ action, ... , device_id? }) drives the
+    companion's GUI. Four actions:
+      action:"type",  text:"hello"            - types into focus
+      action:"key",   key:"c", modifiers:["cmd"]  - presses a chord
+      action:"click", x, y, button?, doubleClick?  - clicks at xy
+      action:"move",  x, y                    - moves the cursor
+    On macOS, click and move need cliclick installed
+    (brew install cliclick); the companion errors out clearly when
+    it's missing. Treat this like the user's own keyboard and mouse:
+    talk through anything destructive (typing into a chat box that
+    sends on enter, clicking submit on a form) before firing.
   • If no device is connected, all of these throw a clear error.
     Tell the user to open the menu-bar app, don't keep retrying.
   • Treat the companion like the user's terminal in their hands.

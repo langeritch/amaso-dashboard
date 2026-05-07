@@ -226,6 +226,57 @@ const LABELS: Record<string, LabelDef> = {
       return "";
     },
   },
+  companion_write_file: {
+    verb: "Writing a file on the companion",
+    detail: (i) => {
+      const p = pickString(i, "path");
+      const enc = pickString(i, "encoding");
+      if (p && enc && enc !== "utf8") return `${truncate(p, 50)} (${enc})`;
+      return p ? truncate(p, 60) : "";
+    },
+  },
+  companion_read_binary: {
+    verb: "Reading a binary file from the companion",
+    detail: (i) => {
+      const p = pickString(i, "path");
+      return p ? truncate(p, 60) : "";
+    },
+  },
+  companion_input: {
+    verb: "Driving companion input",
+    detail: (i) => {
+      const action = pickString(i, "action");
+      if (action === "type") {
+        const text = pickString(i, "text");
+        return text ? `typing ${truncate(text, 40)}` : "typing";
+      }
+      if (action === "key") {
+        const key = pickString(i, "key");
+        const mods = i.modifiers;
+        if (Array.isArray(mods) && mods.length > 0 && key) {
+          return `pressing ${mods.join("+")}+${key}`;
+        }
+        return key ? `pressing ${key}` : "pressing key";
+      }
+      if (action === "click") {
+        const x = i.x;
+        const y = i.y;
+        if (typeof x === "number" && typeof y === "number") {
+          return `clicking ${Math.round(x)},${Math.round(y)}`;
+        }
+        return "clicking";
+      }
+      if (action === "move") {
+        const x = i.x;
+        const y = i.y;
+        if (typeof x === "number" && typeof y === "number") {
+          return `moving to ${Math.round(x)},${Math.round(y)}`;
+        }
+        return "moving cursor";
+      }
+      return action ? action : "";
+    },
+  },
 };
 
 function detailForProject(input: Record<string, unknown>): string {

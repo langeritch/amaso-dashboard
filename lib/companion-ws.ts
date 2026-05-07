@@ -57,6 +57,21 @@ export type CompanionCommand =
   | { type: "shell.exec"; cmd: string; cwd?: string }
   | { type: "fs.read"; path: string }
   | {
+      /** Read a binary file off the companion. The companion responds
+       *  with base64-encoded content; the dashboard side decodes and
+       *  drops it into tmp/ for the agent to Read. */
+      type: "fs.read.binary";
+      path: string;
+    }
+  | {
+      /** Write a text or base64-encoded blob to a path on the
+       *  companion. encoding defaults to utf8. */
+      type: "fs.write";
+      path: string;
+      content: string;
+      encoding?: string;
+    }
+  | {
       type: "screenshot";
       /** Max width in pixels, scaling preserves aspect. Companion
        *  decides the actual resize implementation (sips on macOS,
@@ -64,7 +79,22 @@ export type CompanionCommand =
       resize?: number;
       /** Optional rectangular crop. macOS: maps to `screencapture -R`. */
       region?: { x: number; y: number; width: number; height: number };
-    };
+    }
+  // GUI input variants. The companion implements these via cliclick
+  // on macOS / SendInput on Windows. Keeping them as separate union
+  // members (rather than one input.* with a discriminator) means
+  // each variant carries only the fields it actually uses, which the
+  // type checker enforces all the way to the wire.
+  | { type: "input.type"; text: string }
+  | { type: "input.key"; key: string; modifiers?: string[] }
+  | {
+      type: "input.click";
+      x: number;
+      y: number;
+      button?: "left" | "right";
+      doubleClick?: boolean;
+    }
+  | { type: "input.move"; x: number; y: number };
 
 export interface CompanionAck {
   id: string;

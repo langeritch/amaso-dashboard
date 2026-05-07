@@ -78,6 +78,7 @@ import { commitAndPush } from "./git";
 import {
   isCompanionConnected,
   sendCompanionCommandToDevice,
+  type CompanionCommand,
 } from "./companion-ws";
 import {
   getAllDevices as getAllCompanionDevices,
@@ -2426,6 +2427,231 @@ export async function companionScreenshotTool(
   };
 }
 
+export async function companionWriteFileTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const filePath = getStr(args, "path").trim();
+  if (!filePath) throw new Error("path must not be empty");
+  const content = getStr(args, "content");
+  const encodingRaw =
+    typeof args.encoding === "string" ? args.encoding.trim() : "";
+  const encoding = encodingRaw === "" ? "utf8" : encodingRaw;
+  if (encoding !== "utf8" && encoding !== "base64") {
+    throw new Error("encoding must be 'utf8' or 'base64'");
+  }
+  const deviceId = resolveDeviceId(ctx, args);
+  if (!deviceId && !isCompanionConnected(ctx.user.id)) {
+    throw new Error(
+      "no companion device connected. Open the Amaso menu-bar app on the target machine.",
+    );
+  }
+  const ack = await sendCompanionCommandToDevice(
+    ctx.user.id,
+    { type: "fs.write", path: filePath, content, encoding },
+    deviceId,
+    COMPANION_DEFAULT_TIMEOUT_MS,
+  );
+  if (!ack.ok) {
+    throw new Error(ack.error || "fs.write failed");
+  }
+  const result = (ack.result as Record<string, unknown> | null) ?? {};
+  const size =
+    typeof result.size === "number"
+      ? result.size
+      : encoding === "base64"
+        ? Buffer.from(content, "base64").length
+        : Buffer.byteLength(content, "utf8");
+  return {
+    deviceId,
+    path: filePath,
+    written: true,
+    size,
+  };
+}
+
+const COMPANION_BINARY_DIR = path.resolve(process.cwd(), "tmp");
+
+function extractExtension(p: string): string {
+  // path.extname returns ".pdf" or "". Strip the dot, lowercase, and
+  // fall back to "bin" so the saved file always has SOMETHING after
+  // the dot. Keeps tooling that keys off extensions (image previews,
+  // file-type sniffers) happy.
+  const ext = path.extname(p).replace(/^\./, "").toLowerCase();
+  return ext || "bin";
+}
+
+export async function companionReadBinaryTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const filePath = getStr(args, "path").trim();
+  if (!filePath) throw new Error("path must not be empty");
+  const deviceId = resolveDeviceId(ctx, args);
+  if (!deviceId && !isCompanionConnected(ctx.user.id)) {
+    throw new Error(
+      "no companion device connected. Open the Amaso menu-bar app on the target machine.",
+    );
+  }
+  const ack = await sendCompanionCommandToDevice(
+    ctx.user.id,
+    { type: "fs.read.binary", path: filePath },
+    deviceId,
+    COMPANION_DEFAULT_TIMEOUT_MS,
+  );
+  if (!ack.ok) {
+    throw new Error(ack.error || "fs.read.binary failed");
+  }
+  const result = (ack.result as Record<string, unknown> | null) ?? {};
+  const base64 =
+    typeof result.content === "string"
+      ? result.content
+      : typeof result.data === "string"
+        ? result.data
+        : "";
+  if (!base64) {
+    throw new Error("companion returned no binary content");
+  }
+  const cleaned = base64.includes(",")
+    ? base64.slice(base64.indexOf(",") + 1)
+    : base64;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(cleaned, "base64");
+  } catch (err) {
+    throw new Error(
+      `failed to decode binary base64: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  await fs.mkdir(COMPANION_BINARY_DIR, { recursive: true });
+  const stamp = Date.now();
+  const ext = extractExtension(filePath);
+  const filename = `companion-binary-${stamp}.${ext}`;
+  const savedTo = path.join(COMPANION_BINARY_DIR, filename);
+  await fs.writeFile(savedTo, bytes);
+  return {
+    deviceId,
+    saved_to: savedTo,
+    size: bytes.length,
+    filename,
+    extension: ext,
+  };
+}
+
+const COMPANION_INPUT_ACTIONS = ["type", "key", "click", "move"] as const;
+type CompanionInputAction = (typeof COMPANION_INPUT_ACTIONS)[number];
+
+function isInputAction(value: unknown): value is CompanionInputAction {
+  return (
+    typeof value === "string" &&
+    (COMPANION_INPUT_ACTIONS as readonly string[]).includes(value)
+  );
+}
+
+function normaliseModifiers(raw: unknown): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new Error("modifiers must be an array of strings");
+  }
+  const out: string[] = [];
+  for (const m of raw) {
+    if (typeof m !== "string") {
+      throw new Error("modifiers must be an array of strings");
+    }
+    const trimmed = m.trim();
+    if (trimmed) out.push(trimmed);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+export async function companionInputTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const action = args.action;
+  if (!isInputAction(action)) {
+    throw new Error(
+      `action must be one of: ${COMPANION_INPUT_ACTIONS.join(", ")}`,
+    );
+  }
+  const deviceId = resolveDeviceId(ctx, args);
+  if (!deviceId && !isCompanionConnected(ctx.user.id)) {
+    throw new Error(
+      "no companion device connected. Open the Amaso menu-bar app on the target machine.",
+    );
+  }
+
+  let command: CompanionCommand;
+  if (action === "type") {
+    if (typeof args.text !== "string" || args.text.length === 0) {
+      throw new Error("text is required for action 'type'");
+    }
+    command = { type: "input.type", text: args.text };
+  } else if (action === "key") {
+    if (typeof args.key !== "string" || args.key.trim().length === 0) {
+      throw new Error("key is required for action 'key'");
+    }
+    const modifiers = normaliseModifiers(args.modifiers);
+    command = {
+      type: "input.key",
+      key: args.key.trim(),
+      ...(modifiers ? { modifiers } : {}),
+    };
+  } else if (action === "click") {
+    if (typeof args.x !== "number" || !Number.isFinite(args.x)) {
+      throw new Error("x is required and must be a number for action 'click'");
+    }
+    if (typeof args.y !== "number" || !Number.isFinite(args.y)) {
+      throw new Error("y is required and must be a number for action 'click'");
+    }
+    let button: "left" | "right" | undefined;
+    if (args.button !== undefined && args.button !== null) {
+      if (args.button !== "left" && args.button !== "right") {
+        throw new Error("button must be 'left' or 'right'");
+      }
+      button = args.button;
+    }
+    const doubleClickRaw = args.doubleClick;
+    if (
+      doubleClickRaw !== undefined &&
+      doubleClickRaw !== null &&
+      typeof doubleClickRaw !== "boolean"
+    ) {
+      throw new Error("doubleClick must be a boolean");
+    }
+    command = {
+      type: "input.click",
+      x: args.x,
+      y: args.y,
+      ...(button ? { button } : {}),
+      ...(doubleClickRaw === true ? { doubleClick: true } : {}),
+    };
+  } else {
+    if (typeof args.x !== "number" || !Number.isFinite(args.x)) {
+      throw new Error("x is required and must be a number for action 'move'");
+    }
+    if (typeof args.y !== "number" || !Number.isFinite(args.y)) {
+      throw new Error("y is required and must be a number for action 'move'");
+    }
+    command = { type: "input.move", x: args.x, y: args.y };
+  }
+
+  const ack = await sendCompanionCommandToDevice(
+    ctx.user.id,
+    command,
+    deviceId,
+    COMPANION_DEFAULT_TIMEOUT_MS,
+  );
+  if (!ack.ok) {
+    throw new Error(ack.error || `${command.type} failed`);
+  }
+  return {
+    deviceId,
+    action,
+    ...((ack.result as Record<string, unknown> | null) ?? {}),
+  };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -2510,4 +2736,7 @@ export const TOOL_HANDLERS: Record<
   companion_exec: (ctx, a) => companionExecTool(ctx, a),
   companion_read_file: (ctx, a) => companionReadFileTool(ctx, a),
   companion_screenshot: (ctx, a) => companionScreenshotTool(ctx, a),
+  companion_write_file: (ctx, a) => companionWriteFileTool(ctx, a),
+  companion_read_binary: (ctx, a) => companionReadBinaryTool(ctx, a),
+  companion_input: (ctx, a) => companionInputTool(ctx, a),
 };
