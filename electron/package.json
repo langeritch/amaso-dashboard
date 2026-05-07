@@ -1,6 +1,6 @@
 {
   "name": "amaso-companion",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Amaso Companion — tiny macOS menu-bar agent. Signs into the Amaso dashboard and runs local-only actions (shell, filesystem, system audio) on its behalf. NOT a dashboard — the dashboard is the PWA.",
   "main": "main.js",
