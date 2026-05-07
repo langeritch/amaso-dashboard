@@ -54,6 +54,10 @@ interface WorkerStatus {
   projectSessionCount: number;
   name: string;
   visibility: "team" | "client" | "public";
+  /** Optional category label from the project config. The workers
+   *  panel groups rows under this label so related projects render
+   *  together. Undefined for ungrouped entries. */
+  group?: string;
   running: boolean;
   startedAt: number | null;
   state:
@@ -200,6 +204,7 @@ export async function GET() {
         projectSessionCount: 0,
         name: p.name,
         visibility: p.visibility,
+        group: p.group,
         running: false,
         startedAt: null,
         state: "idle",
@@ -265,6 +270,7 @@ export async function GET() {
         projectSessionCount: sessions.length,
         name: p.name,
         visibility: p.visibility,
+        group: p.group,
         running: true,
         startedAt: session.startedAt,
         state: finalState,

@@ -33,6 +33,14 @@ export interface ProjectConfig {
   devPort?: number;
   devCommand?: string;
   deployBranch?: string;
+  /**
+   * Optional category label used by the workers panel to visually
+   * group related projects together (e.g. "Amaso Platform",
+   * "Client Sites", "Directory Sites"). Free-form string; rows
+   * with no group fall under a generic "Other" header. Pure
+   * presentation — never affects access, dispatch, or routing.
+   */
+  group?: string;
 }
 
 export interface AmasoConfig {

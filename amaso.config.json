@@ -9,7 +9,8 @@
       "visibility": "client",
       "previewUrl": "https://neva17.amaso.nl",
       "devPort": 1717,
-      "liveUrl": "https://neva17-preview.vercel.app"
+      "liveUrl": "https://neva17-preview.vercel.app",
+      "group": "Client Sites"
     },
     {
       "id": "amaso-portfolio",
@@ -18,7 +19,8 @@
       "visibility": "team",
       "previewUrl": "https://amaso-portfolio.amaso.nl",
       "liveUrl": "https://amaso.nl",
-      "devPort": 1718
+      "devPort": 1718,
+      "group": "Amaso Platform"
     },
     {
       "id": "tf-pricing-saas",
@@ -28,7 +30,8 @@
       "previewUrl": "https://tf-pricing-saas.amaso.nl",
       "devPort": 3030,
       "_note": "port 1719 is IANA-reserved (H.323 gatestat), Next.js refuses it",
-      "devCommand": "npx next dev --port {{PORT}}"
+      "devCommand": "npx next dev --port {{PORT}}",
+      "group": "Products"
     },
     {
       "id": "prom-declaraties",
@@ -36,20 +39,23 @@
       "path": "C:/Users/santi/projects/prom-declaraties",
       "visibility": "team",
       "previewUrl": "https://prom-declaraties.amaso.nl",
-      "devPort": 1720
+      "devPort": 1720,
+      "group": "Products"
     },
     {
       "id": "concert-lab",
       "name": "Concert Lab",
       "path": "C:/Users/santi/projects/concert-lab",
       "visibility": "team",
-      "devPort": 1722
+      "devPort": 1722,
+      "group": "Experiments"
     },
     {
       "id": "dashboard-sparring-partner",
-      "name": "Project Dashboard 2",
+      "name": "Amaso Dashboard",
       "path": "C:/Users/santi/projects/amaso-dashboard",
-      "visibility": "team"
+      "visibility": "team",
+      "group": "Amaso Platform"
     },
     {
       "id": "woonklasse",
@@ -58,7 +64,8 @@
       "subPath": "Woonklasse",
       "visibility": "team",
       "previewUrl": "https://woonklasse.amaso.nl",
-      "devPort": 1721
+      "devPort": 1721,
+      "group": "Directory Sites"
     },
     {
       "id": "badkamerstijl",
@@ -67,13 +74,15 @@
       "subPath": "BadkamerStijl",
       "visibility": "team",
       "previewUrl": "https://woonklasse.amaso.nl",
-      "devPort": 1721
+      "devPort": 1721,
+      "group": "Directory Sites"
     },
     {
       "id": "amaso-pty-service",
       "name": "PTY Service",
       "path": "C:/Users/santi/projects/amaso-pty-service",
-      "visibility": "team"
+      "visibility": "team",
+      "group": "Amaso Platform"
     },
     {
       "id": "superskunk",
@@ -81,19 +90,22 @@
       "path": "C:/Users/santi/projects/superskunk",
       "visibility": "public",
       "previewUrl": "https://superskunk-amsterdam.vercel.app",
-      "devPort": 1723
+      "devPort": 1723,
+      "group": "Client Sites"
     },
     {
       "id": "tradingalgo",
       "name": "Trading Algo",
       "path": "C:/Users/santi/projects/tradingalgo",
-      "visibility": "team"
+      "visibility": "team",
+      "group": "Experiments"
     },
     {
       "id": "amaso-leads",
       "name": "Amaso Leads",
       "path": "C:/Users/santi/projects/amaso-leads",
-      "visibility": "team"
+      "visibility": "team",
+      "group": "Amaso Platform"
     }
   ],
   "ignore": [

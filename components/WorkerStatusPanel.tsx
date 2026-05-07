@@ -46,6 +46,9 @@ interface WorkerStatus {
   projectSessionCount?: number;
   name: string;
   visibility: "team" | "client" | "public";
+  /** Optional category label from the project config — workers panel
+   *  renders a subtle header above each group of related projects. */
+  group?: string;
   running: boolean;
   startedAt: number | null;
   state:
@@ -167,6 +170,38 @@ async function killSession(
   });
 }
 
+/**
+ * Bucket the ready-list rows into preserved-config-order groups.
+ * Busy rows still pop to the top flat (those need attention NOW —
+ * grouping would just bury them) so this only runs over the ready
+ * section. Ungrouped rows fall through to a generic "Other" header
+ * at the bottom. Returns null when only one group is present so the
+ * caller can skip the headers entirely (no point in a single bucket).
+ */
+function groupReady(
+  ready: WorkerStatus[],
+): { name: string; workers: WorkerStatus[] }[] | null {
+  const buckets = new Map<string, WorkerStatus[]>();
+  for (const w of ready) {
+    const g = w.group?.trim() || "Other";
+    const arr = buckets.get(g);
+    if (arr) arr.push(w);
+    else buckets.set(g, [w]);
+  }
+  if (buckets.size <= 1) return null;
+  // Preserve insertion order (= config order via the API), then push
+  // "Other" to the end if it's there. Map iteration is insertion-
+  // ordered in modern JS engines.
+  const ordered: { name: string; workers: WorkerStatus[] }[] = [];
+  let other: { name: string; workers: WorkerStatus[] } | null = null;
+  for (const [name, ws] of buckets) {
+    if (name === "Other") other = { name, workers: ws };
+    else ordered.push({ name, workers: ws });
+  }
+  if (other) ordered.push(other);
+  return ordered;
+}
+
 function partitionWorkers(workers: WorkerStatus[]) {
   // Busy = needs human attention (permission_gate, awaiting_input) OR
   // actively processing per the visible status row. Trusting the
@@ -244,14 +279,26 @@ export function WorkerList() {
       </div>
     );
   }
+  const readyGroups = groupReady(ready);
   return (
     <ul className="divide-y divide-neutral-800/70">
       {busy.map((w) => (
         <WorkerRow key={w.id} w={w} onRefresh={refresh} />
       ))}
-      {ready.map((w) => (
-        <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-      ))}
+      {readyGroups
+        ? readyGroups.map((g) => (
+            <li key={g.name} className="py-0">
+              <GroupHeader name={g.name} />
+              <ul className="divide-y divide-neutral-800/70">
+                {g.workers.map((w) => (
+                  <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                ))}
+              </ul>
+            </li>
+          ))
+        : ready.map((w) => (
+            <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+          ))}
     </ul>
   );
 }
@@ -325,18 +372,47 @@ export default function WorkerStatusPanel() {
             {collapsed ? "show" : "hide"}
           </button>
         </header>
-        {!collapsed && (
-          <ul className="max-h-[28vh] divide-y divide-neutral-800/70 overflow-y-auto border-t border-neutral-800/70">
-            {busy.map((w) => (
-              <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-            ))}
-            {ready.map((w) => (
-              <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-            ))}
-          </ul>
-        )}
+        {!collapsed && (() => {
+          const readyGroups = groupReady(ready);
+          return (
+            <ul className="max-h-[28vh] divide-y divide-neutral-800/70 overflow-y-auto border-t border-neutral-800/70">
+              {busy.map((w) => (
+                <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+              ))}
+              {readyGroups
+                ? readyGroups.map((g) => (
+                    <li key={g.name} className="py-0">
+                      <GroupHeader name={g.name} />
+                      <ul className="divide-y divide-neutral-800/70">
+                        {g.workers.map((w) => (
+                          <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                        ))}
+                      </ul>
+                    </li>
+                  ))
+                : ready.map((w) => (
+                    <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                  ))}
+            </ul>
+          );
+        })()}
       </div>
     </section>
+  );
+}
+
+/**
+ * Subtle category divider rendered between groups in the ready
+ * section. Visually quiet — uppercase mini-cap label at low contrast
+ * so it categorises without competing with the worker rows. Sits
+ * inline with the divide-y border above; the slim top padding gives
+ * each group a touch of breathing room.
+ */
+function GroupHeader({ name }: { name: string }) {
+  return (
+    <div className="px-3 pt-2 pb-1 text-[9.5px] uppercase tracking-[0.18em] text-neutral-600">
+      {name}
+    </div>
   );
 }
 

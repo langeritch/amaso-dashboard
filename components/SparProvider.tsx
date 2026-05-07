@@ -1695,19 +1695,19 @@ export default function SparProvider({
     };
   }, []);
 
-  function speakChunk(text: string) {
+  function speakChunk(text: string): boolean {
     // Mute is text-chat only — when the user is actively in a call
     // we always speak regardless of the persisted preference. The
     // call leg owns the audio output, so respecting the mute there
     // would silence the assistant mid-conversation.
-    if (ttsMutedRef.current && !inCallRef.current) return;
+    if (ttsMutedRef.current && !inCallRef.current) return false;
     // Shared session moved to Telegram → the phone call is voicing
     // the reply. Skipping here prevents the laptop from echoing it
     // 200 ms later (the call's audio path is longer than the local
     // one, so they'd collide rather than stack cleanly).
-    if (telegramActiveRef.current) return;
+    if (telegramActiveRef.current) return false;
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed) return false;
     const gen = ttsGenRef.current;
     ttsPendingRef.current += 1;
     ttsIdleRef.current = false;
@@ -1736,12 +1736,14 @@ export default function SparProvider({
         checkTtsIdle();
       }
     });
+    return true;
   }
 
   function flushSpokenText(fullText: string, final: boolean) {
     // Same call-aware gate as speakChunk. Marking the cursor as
     // fully consumed prevents a later un-mute from suddenly
-    // back-speaking the entire reply.
+    // back-speaking the entire reply. Muted users get no signoff
+    // either — speakChunk's mute gate also skips arming.
     if (ttsMutedRef.current && !inCallRef.current) {
       spokenCharsRef.current = fullText.length;
       return;
@@ -1768,11 +1770,21 @@ export default function SparProvider({
     if (chunkEnd > 0) {
       const chunk = tail.slice(0, chunkEnd);
       spokenCharsRef.current += chunkEnd;
-      speakChunk(chunk);
-    }
-    if (final && spokenCharsRef.current > 0) {
-      signoffArmedRef.current = true;
-      maybeFireSignoff();
+      // Arm the signoff IFF speakChunk actually queued audio. It
+      // returns false on its mute / telegram / empty-text gates,
+      // and in those cases we don't want to arm — there's no
+      // assistant audio for the end phrase to follow. Re-armed on
+      // every successful speakChunk call so a mid-response pause
+      // (tool call, network gap) also produces its own end phrase:
+      // each "speaking → silent" transition gets one. Lives here
+      // rather than inside speakChunk so the signoff utterance
+      // itself (invoked by maybeFireSignoff) doesn't recursively
+      // re-arm and loop. checkTtsIdle / the audio-element onEnded
+      // handler is what actually fires it once pending=0 /
+      // queue=0 / !playing.
+      if (speakChunk(chunk)) {
+        signoffArmedRef.current = true;
+      }
     }
   }
 
