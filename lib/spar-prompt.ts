@@ -79,6 +79,7 @@ export const SPAR_TOOLS = [
   "companion_list_devices",
   "companion_exec",
   "companion_read_file",
+  "companion_screenshot",
 ];
 
 /**
@@ -345,8 +346,15 @@ deliberately, this runs on the user's actual computer.
     "show me the latest entry in ~/notes.md"). For anything bigger
     than a single file, prefer companion_exec with cat / head / tail
     so the device can stream just what you need.
-  • If no device is connected, both tools throw a clear error. Tell
-    the user to open the menu-bar app, don't keep retrying.
+  • companion_screenshot({ device_id?, resize?, region? }) captures
+    the device's screen and saves the PNG into the dashboard's tmp
+    folder. Returns saved_to (a path) plus width and format. Chain
+    a Read tool call on saved_to to actually view the image. Default
+    resize is 1920px wide; pass region:{x,y,width,height} when you
+    only need a slice ("show me just the menu bar"). Use sparingly,
+    a full-screen capture can be a few MB.
+  • If no device is connected, all of these throw a clear error.
+    Tell the user to open the menu-bar app, don't keep retrying.
   • Treat the companion like the user's terminal in their hands.
     Don't run destructive commands without spelling out what you're
     about to do (rm, mv, anything that deletes / overwrites). Read-

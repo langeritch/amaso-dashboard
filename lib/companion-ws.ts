@@ -55,7 +55,16 @@ export type CompanionCommand =
   | { type: "audio.duck"; level?: number }
   | { type: "audio.restore" }
   | { type: "shell.exec"; cmd: string; cwd?: string }
-  | { type: "fs.read"; path: string };
+  | { type: "fs.read"; path: string }
+  | {
+      type: "screenshot";
+      /** Max width in pixels, scaling preserves aspect. Companion
+       *  decides the actual resize implementation (sips on macOS,
+       *  PowerShell on Windows). */
+      resize?: number;
+      /** Optional rectangular crop. macOS: maps to `screencapture -R`. */
+      region?: { x: number; y: number; width: number; height: number };
+    };
 
 export interface CompanionAck {
   id: string;

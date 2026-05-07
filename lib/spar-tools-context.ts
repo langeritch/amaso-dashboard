@@ -2320,6 +2320,112 @@ export async function companionReadFileTool(
   };
 }
 
+const COMPANION_SCREENSHOT_DIR = path.resolve(process.cwd(), "tmp");
+
+interface ScreenshotRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function normaliseRegion(raw: unknown): ScreenshotRegion | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const x = typeof r.x === "number" ? r.x : NaN;
+  const y = typeof r.y === "number" ? r.y : NaN;
+  const width = typeof r.width === "number" ? r.width : NaN;
+  const height = typeof r.height === "number" ? r.height : NaN;
+  if (![x, y, width, height].every((v) => Number.isFinite(v))) {
+    throw new Error(
+      "region must be an object with numeric x, y, width, height",
+    );
+  }
+  if (width <= 0 || height <= 0) {
+    throw new Error("region width and height must be positive");
+  }
+  return { x, y, width, height };
+}
+
+export async function companionScreenshotTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const deviceId = resolveDeviceId(ctx, args);
+  if (!deviceId && !isCompanionConnected(ctx.user.id)) {
+    throw new Error(
+      "no companion device connected. Open the Amaso menu-bar app on the target machine.",
+    );
+  }
+  const resizeRaw = args.resize;
+  let resize: number | undefined;
+  if (resizeRaw === undefined || resizeRaw === null) {
+    resize = 1920;
+  } else if (typeof resizeRaw === "number" && Number.isFinite(resizeRaw)) {
+    if (resizeRaw <= 0) throw new Error("resize must be positive");
+    resize = Math.floor(resizeRaw);
+  } else {
+    throw new Error("resize must be a number");
+  }
+  const region = normaliseRegion(args.region);
+
+  const command: { type: "screenshot"; resize?: number; region?: ScreenshotRegion } = {
+    type: "screenshot",
+  };
+  if (resize !== undefined) command.resize = resize;
+  if (region) command.region = region;
+
+  const ack = await sendCompanionCommandToDevice(
+    ctx.user.id,
+    command,
+    deviceId,
+    COMPANION_DEFAULT_TIMEOUT_MS,
+  );
+  if (!ack.ok) {
+    throw new Error(ack.error || "screenshot failed");
+  }
+  const result = (ack.result as Record<string, unknown> | null) ?? {};
+  const base64 = typeof result.screenshot === "string" ? result.screenshot : "";
+  if (!base64) {
+    throw new Error("companion returned no screenshot bytes");
+  }
+  // The base64 may carry a "data:image/png;base64," prefix when the
+  // companion went through a canvas / dataURL path. Strip if present
+  // so Buffer.from doesn't choke and the saved bytes are pure PNG.
+  const cleaned = base64.includes(",")
+    ? base64.slice(base64.indexOf(",") + 1)
+    : base64;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(cleaned, "base64");
+  } catch (err) {
+    throw new Error(
+      `failed to decode screenshot base64: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  await fs.mkdir(COMPANION_SCREENSHOT_DIR, { recursive: true });
+  const stamp = Date.now();
+  const savedTo = path.join(
+    COMPANION_SCREENSHOT_DIR,
+    `companion-screenshot-${stamp}.png`,
+  );
+  await fs.writeFile(savedTo, bytes);
+
+  const width =
+    typeof result.width === "number" ? result.width : undefined;
+  const format =
+    typeof result.format === "string" ? result.format : "png";
+
+  return {
+    deviceId,
+    saved_to: savedTo,
+    width,
+    format,
+    bytes: bytes.length,
+    message: "Screenshot saved. Use the Read tool to view it.",
+  };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -2403,4 +2509,5 @@ export const TOOL_HANDLERS: Record<
   companion_list_devices: (ctx) => companionListDevicesTool(ctx),
   companion_exec: (ctx, a) => companionExecTool(ctx, a),
   companion_read_file: (ctx, a) => companionReadFileTool(ctx, a),
+  companion_screenshot: (ctx, a) => companionScreenshotTool(ctx, a),
 };

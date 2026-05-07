@@ -1139,6 +1139,40 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "companion_screenshot",
+    description:
+      "Take a screenshot of a paired companion device's screen. The PNG is saved to the dashboard's tmp directory and the path is returned; chain a Read tool call on saved_to to actually view the image. Optional resize caps the max width in pixels (default 1920); optional region crops to a rectangle. 30 second timeout. Use sparingly: a full-screen capture can be a few MB.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device_id: {
+          type: "string",
+          description:
+            "Optional. The deviceId of the target machine (from companion_list_devices). Omit to default to the first connected device.",
+        },
+        resize: {
+          type: "number",
+          description:
+            "Optional max width in pixels. Defaults to 1920. The companion preserves aspect ratio.",
+        },
+        region: {
+          type: "object",
+          description:
+            "Optional rectangular crop. macOS uses screencapture -R under the hood. All four fields are required when present.",
+          properties: {
+            x: { type: "number", description: "Left edge in pixels." },
+            y: { type: "number", description: "Top edge in pixels." },
+            width: { type: "number", description: "Width in pixels." },
+            height: { type: "number", description: "Height in pixels." },
+          },
+          required: ["x", "y", "width", "height"],
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function callTool(name, args, _attempt = 1) {

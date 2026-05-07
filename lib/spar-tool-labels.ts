@@ -208,6 +208,24 @@ const LABELS: Record<string, LabelDef> = {
       return p ? truncate(p, 60) : "";
     },
   },
+  companion_screenshot: {
+    verb: "Capturing a companion screenshot",
+    detail: (i) => {
+      const region = i.region;
+      if (region && typeof region === "object") {
+        const r = region as Record<string, unknown>;
+        if (
+          typeof r.width === "number" &&
+          typeof r.height === "number"
+        ) {
+          return `region ${r.width}x${r.height}`;
+        }
+      }
+      const resize = i.resize;
+      if (typeof resize === "number") return `max ${resize}px`;
+      return "";
+    },
+  },
 };
 
 function detailForProject(input: Record<string, unknown>): string {
