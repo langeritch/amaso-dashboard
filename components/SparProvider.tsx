@@ -168,6 +168,28 @@ export default function SparProvider({
   const [speakingUserId, setSpeakingUserId] = useState<number>(currentUser.id);
   const [ttsIdle, setTtsIdle] = useState(true);
   const ttsIdleRef = useRef(true);
+  // Outbound message queue. Both user-typed drafts (submitted while
+  // the model is mid-turn or TTS is still speaking) AND auto-report
+  // nudges go through THIS queue — the drain effect below pops the
+  // head and fires sendMessage when busy + TTS go idle. Keeping it
+  // here in the provider (rather than per-page) means auto-reports
+  // and typed messages travel the same path: enqueue, wait, drain.
+  type QueueItem = {
+    id: number;
+    text: string;
+    opts?: { skipUserBubble?: boolean; skipPersistLastUser?: boolean };
+  };
+  const [messageQueue, setMessageQueue] = useState<QueueItem[]>([]);
+  const messageQueueRef = useRef<QueueItem[]>([]);
+  const queueIdRef = useRef(0);
+  // Latches between "we picked the next queued message" and
+  // "sendMessage finished". Without it, a re-render mid-drain (queue
+  // shifted but busy hasn't flipped yet) could double-fire the same
+  // entry or skip a guard.
+  const queueDrainingRef = useRef(false);
+  useEffect(() => {
+    messageQueueRef.current = messageQueue;
+  }, [messageQueue]);
   // Direct "the <audio> element is literally emitting sound RIGHT
   // NOW" flag, bound to its play / pause / ended events. We use
   // this as the primary signal for YouTube ducking because the
@@ -2207,6 +2229,49 @@ export default function SparProvider({
     [playMessageSentChime, refreshConversations],
   );
 
+  // Single shared queue for everything that wants to send a message
+  // through the model: typed drafts the user submits while busy, and
+  // auto-report nudges from terminal-idle. Both paths land here, both
+  // wait their turn, both get drained by the same effect below.
+  const enqueueMessage = useCallback(
+    (text: string, opts?: QueueItem["opts"]): number => {
+      queueIdRef.current += 1;
+      const id = queueIdRef.current;
+      setMessageQueue((q) => [...q, { id, text, opts }]);
+      return id;
+    },
+    [],
+  );
+
+  const editQueuedMessage = useCallback((id: number): string | null => {
+    const item = messageQueueRef.current.find((x) => x.id === id);
+    if (!item) return null;
+    setMessageQueue((q) => q.filter((x) => x.id !== id));
+    return item.text;
+  }, []);
+
+  const removeQueuedMessage = useCallback((id: number) => {
+    setMessageQueue((q) => q.filter((x) => x.id !== id));
+  }, []);
+
+  // Drain the queue once the model is idle AND TTS has finished
+  // speaking. Both gates matter: busy alone goes false the moment
+  // the model finishes streaming text, but TTS often keeps speaking
+  // for several more seconds and we don't want to talk over it.
+  // FIFO — the head of the queue fires next, regardless of whether
+  // it was a typed draft or an auto-report nudge.
+  useEffect(() => {
+    if (queueDrainingRef.current) return;
+    if (busy || !ttsIdle) return;
+    if (messageQueue.length === 0) return;
+    const next = messageQueue[0];
+    queueDrainingRef.current = true;
+    setMessageQueue((q) => q.slice(1));
+    void sendMessage(next.text, next.opts).finally(() => {
+      queueDrainingRef.current = false;
+    });
+  }, [busy, ttsIdle, messageQueue, sendMessage]);
+
   // Server-driven assistant turn. Used by the dispatch-completion
   // auto-reporter and any future event-driven path where the spar
   // should speak up without the user having said anything. The
@@ -2787,17 +2852,11 @@ export default function SparProvider({
   }
 
   function flushAutoReportQueue() {
-    if (busyRef.current) {
-      // Try again shortly — the queue is persisted, so even a hard
-      // reload couldn't lose it. We just wait for the user's current
-      // turn to finish. Multiple nudges that pile up here will all
-      // drain together as ONE merged turn when busy clears.
-      autoReportFlushTimerRef.current = window.setTimeout(() => {
-        autoReportFlushTimerRef.current = null;
-        flushAutoReportQueue();
-      }, 1500);
-      return;
-    }
+    // No busy gate here — respondToAutoReportBatch only ENQUEUES into
+    // the shared messageQueue; it doesn't fire sendMessage itself.
+    // The provider's drain effect handles the actual busy/ttsIdle
+    // wait. So this flush can run anytime; multiple nudges that pile
+    // up between flushes still merge in respondToAutoReportBatch.
     const q = autoReportQueueRef.current;
     if (q.length === 0) return;
     void respondToAutoReportBatch(q.slice());
@@ -2845,7 +2904,6 @@ export default function SparProvider({
         for (const it of items) dequeueAutoReport(it.messageId);
         return;
       }
-      if (busyRef.current) return;
       // Only the tab on this conversation answers — keeps priorHistory
       // honest. If multiple conversations are mixed in the queue, take
       // the first item's conversation as the active turn and leave
@@ -2866,6 +2924,26 @@ export default function SparProvider({
           autoReportFlushTimerRef.current = null;
           flushAutoReportQueue();
         }, 200);
+        return;
+      }
+
+      // Skip anything that's already pending in the main message queue
+      // — re-enqueueing the same merged content would fire the model
+      // twice for the same nudges. The drain effect picks the existing
+      // entry up when busy clears.
+      const alreadyEnqueued = messageQueueRef.current.some(
+        (q) => q.opts?.skipUserBubble === true,
+      );
+      if (alreadyEnqueued) {
+        // Even if we don't re-enqueue, mark these items as queued so
+        // we don't keep re-trying the autoReportQueue flush. The
+        // existing queued entry will fire and respond to the latest
+        // priorHistory which includes all queued auto-report rows.
+        for (const it of onActive) {
+          processedAutoReportsRef.current.add(it.messageId);
+          dequeueAutoReport(it.messageId);
+        }
+        persistProcessedAutoReports();
         return;
       }
 
@@ -2900,42 +2978,26 @@ export default function SparProvider({
         return;
       }
 
-      // EXACT same path as a typed message — sendMessage handles the
-      // optimistic assistant bubble, the POST, the streaming retry
-      // loop, the spoken-text TTS, and the busy state. The two opts
-      // tell it: the user-role turns are already in messagesRef
+      // SAME queue as a typed message. enqueueMessage drops the merged
+      // content into the shared messageQueue; the provider's drain
+      // effect pops it (FIFO, after any queued user drafts) and fires
+      // sendMessage when busy + ttsIdle clear. The opts tell
+      // sendMessage: the user-role turns are already in messagesRef
       // (server broadcasts via WS, fireIdle persisted them), so
       // don't insert a duplicate bubble or write another DB row.
-      // Returns false when sendMessage's pre-checks bailed (busy,
-      // empty, etc.) — in that case we DON'T mark processed, so the
-      // next flush retry can try again instead of permanently
-      // dropping the nudge.
-      let ran = false;
-      try {
-        ran = await sendMessage(merged, {
-          skipUserBubble: true,
-          skipPersistLastUser: true,
-        });
-      } catch (err) {
-        console.warn(
-          "[auto-report] sendMessage threw:",
-          err instanceof Error ? err.message : String(err),
-        );
+      enqueueMessage(merged, {
+        skipUserBubble: true,
+        skipPersistLastUser: true,
+      });
+      // Mark items processed and release claims now — the queue
+      // entry is now responsible for the actual fire. The drain
+      // effect will pick it up when busy + ttsIdle clear.
+      for (const it of onActive) {
+        processedAutoReportsRef.current.add(it.messageId);
+        dequeueAutoReport(it.messageId);
+        releaseAutoReportClaim(it.messageId);
       }
-      if (ran) {
-        for (const it of onActive) {
-          processedAutoReportsRef.current.add(it.messageId);
-          dequeueAutoReport(it.messageId);
-          releaseAutoReportClaim(it.messageId);
-        }
-        persistProcessedAutoReports();
-      } else {
-        // Release claims so a retry can re-claim. Leave in queue.
-        for (const id of claimed) releaseAutoReportClaim(id);
-      }
-      if (autoReportQueueRef.current.length > 0) {
-        scheduleAutoReportFlush();
-      }
+      persistProcessedAutoReports();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -4357,6 +4419,10 @@ export default function SparProvider({
       removeAttachment,
       clearAttachments,
       sendMessage,
+      messageQueue,
+      enqueueMessage,
+      editQueuedMessage,
+      removeQueuedMessage,
       saveHeartbeat,
       loadHeartbeatFor,
       clearTranscript,
@@ -4423,6 +4489,10 @@ export default function SparProvider({
       removeAttachment,
       clearAttachments,
       sendMessage,
+      messageQueue,
+      enqueueMessage,
+      editQueuedMessage,
+      removeQueuedMessage,
       saveHeartbeat,
       loadHeartbeatFor,
       clearTranscript,

@@ -484,6 +484,10 @@ export default function SparFullView() {
     addAttachments,
     removeAttachment,
     sendMessage,
+    messageQueue,
+    enqueueMessage,
+    editQueuedMessage,
+    removeQueuedMessage,
     saveHeartbeat,
     loadHeartbeatFor,
     clearTranscript,
@@ -495,6 +499,7 @@ export default function SparFullView() {
     dismissDriftNotice,
     newConversation,
   } = useSpar();
+  const queue = messageQueue;
 
   // Latest heartbeat tick drives the small status dot on the heartbeat
   // button so the user can see at a glance whether the last cron tick
@@ -511,15 +516,10 @@ export default function SparFullView() {
   const [slashDismissed, setSlashDismissed] = useState(false);
   // Pending messages the user submitted while the agent is thinking
   // or TTS is still speaking. Drained FIFO once both go idle so the
-  // user can keep typing without waiting on a reply.
-  const [queue, setQueue] = useState<{ id: number; text: string }[]>([]);
-  const queueIdRef = useRef(0);
-  // Latches between "we picked the next queued message" and
-  // "sendMessage finished". Without it, a re-render mid-drain (queue
-  // shifted but busy hasn't flipped yet, or React firing child effects
-  // before the provider's busyRef sync) could double-send the same
-  // entry or skip a guard.
-  const drainingRef = useRef(false);
+  // user can keep typing without waiting on a reply. Lives in the
+  // provider so auto-report nudges can use the SAME queue — they
+  // enqueue, wait their turn, and drain through sendMessage exactly
+  // the same way a typed draft does.
   const [heartbeatOpen, setHeartbeatOpen] = useState(false);
   const [autopilotSidebarOpen, setAutopilotSidebarOpen] = useState(false);
   // Mobile-only bottom sheet that holds the secondary controls
@@ -841,14 +841,11 @@ export default function SparFullView() {
       }
     }
     setDraft("");
-    const canSendNow =
-      !busy && ttsIdle && queue.length === 0 && !drainingRef.current;
+    const canSendNow = !busy && ttsIdle && queue.length === 0;
     if (canSendNow) {
       void sendMessage(text);
     } else {
-      queueIdRef.current += 1;
-      const id = queueIdRef.current;
-      setQueue((q) => [...q, { id, text }]);
+      enqueueMessage(text);
     }
   }
 
@@ -867,33 +864,19 @@ export default function SparFullView() {
   }
 
   function editQueued(id: number) {
-    const item = queue.find((x) => x.id === id);
-    if (!item) return;
-    setQueue((q) => q.filter((x) => x.id !== id));
-    setDraft((d) => (d ? d + "\n" + item.text : item.text));
+    const text = editQueuedMessage(id);
+    if (text == null) return;
+    setDraft((d) => (d ? d + "\n" + text : text));
     // Defer focus so the textarea has the new value when we land on it.
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
   function removeQueued(id: number) {
-    setQueue((q) => q.filter((x) => x.id !== id));
+    removeQueuedMessage(id);
   }
 
-  // Drain the queue once the agent is idle AND TTS has finished. We
-  // intentionally check both — busy alone goes false the moment the
-  // model finishes streaming text, but TTS often keeps speaking for
-  // several seconds afterwards and we don't want to talk over it.
-  useEffect(() => {
-    if (drainingRef.current) return;
-    if (busy || !ttsIdle) return;
-    if (queue.length === 0) return;
-    const next = queue[0];
-    drainingRef.current = true;
-    setQueue((q) => q.slice(1));
-    void sendMessage(next.text).finally(() => {
-      drainingRef.current = false;
-    });
-  }, [busy, ttsIdle, queue, sendMessage]);
+  // Drain effect lives in the provider now (so auto-report nudges
+  // share the same FIFO drain). Nothing to do here.
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-gradient-to-b from-neutral-950 via-neutral-900 to-black text-neutral-100">

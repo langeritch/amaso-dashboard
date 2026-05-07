@@ -296,6 +296,26 @@ export type SparContextValue = {
       skipPersistLastUser?: boolean;
     },
   ) => Promise<boolean>;
+  /** Outbound message queue. User-typed drafts submitted while busy
+   *  AND auto-report nudges from terminal-idle land here; the
+   *  provider's drain effect pops the head and fires sendMessage when
+   *  the model is idle and TTS has finished. */
+  messageQueue: Array<{
+    id: number;
+    text: string;
+    opts?: { skipUserBubble?: boolean; skipPersistLastUser?: boolean };
+  }>;
+  /** Append text (and optional sendMessage opts) to the queue. Returns
+   *  the new entry's id so the caller can edit / remove it later. */
+  enqueueMessage: (
+    text: string,
+    opts?: { skipUserBubble?: boolean; skipPersistLastUser?: boolean },
+  ) => number;
+  /** Pop a queued entry by id and return its text (the page UI uses
+   *  this to drop the entry back into the composer for editing). */
+  editQueuedMessage: (id: number) => string | null;
+  /** Drop a queued entry without sending. */
+  removeQueuedMessage: (id: number) => void;
   saveHeartbeat: () => Promise<void>;
   loadHeartbeatFor: (userId: number) => Promise<void>;
   clearTranscript: () => void;
