@@ -44,7 +44,11 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import crypto from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
-import { sessionIdFromHeader, userFromSession } from "./auth-core";
+import {
+  sessionIdFromHeader,
+  userFromSession,
+  verifySigned,
+} from "./auth-core";
 import type { User } from "./db";
 
 export interface ExtCommand {
@@ -243,7 +247,26 @@ function buildExtBridgeWs() {
         socket.destroy();
         return;
       }
-      const sid = sessionIdFromHeader(req.headers.cookie);
+      // Auth: prefer the cookie header (parsed + signature-verified by
+      // sessionIdFromHeader). Chrome MV3 service workers can't send
+      // Cookie on a WebSocket handshake though, so we also accept the
+      // signed cookie value as a query param: ?session=<sid>.<mac>.
+      // verifySigned MUST run on the query value too, otherwise the
+      // signed form ends up passed straight into userFromSession,
+      // which queries `sessions WHERE id = '<sid>.<mac>'` and never
+      // matches the unsigned id stored in the DB. That mismatch was
+      // the actual cause of the 401 + close-code-1006 the popup was
+      // surfacing.
+      let sid: string | null = sessionIdFromHeader(req.headers.cookie);
+      if (!sid) {
+        try {
+          const u = new URL(req.url ?? "", `http://${req.headers.host}`);
+          const raw = u.searchParams.get("session");
+          if (raw) sid = verifySigned(raw);
+        } catch {
+          /* ignore */
+        }
+      }
       const user = sid ? userFromSession(sid) : null;
       if (!user) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");

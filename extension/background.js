@@ -144,15 +144,23 @@ const bridge = {
   shouldRun: true,
 };
 
-function bridgeUrl(origin) {
-  // ws:// for http://, wss:// for https://. URL parsing handles ports
-  // automatically.
+function bridgeUrl(origin, sessionCookie) {
   const u = new URL(origin);
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
   u.pathname = "/api/ext-bridge";
-  u.search = "";
+  u.search = sessionCookie ? `?session=${encodeURIComponent(sessionCookie)}` : "";
   u.hash = "";
   return u.toString();
+}
+
+async function getSessionCookie(origin) {
+  try {
+    const u = new URL(origin);
+    const cookie = await chrome.cookies.get({ url: origin, name: "amaso_session" });
+    return cookie ? cookie.value : null;
+  } catch {
+    return null;
+  }
 }
 
 async function connectBridge() {
@@ -175,9 +183,31 @@ async function connectBridge() {
     clearTimeout(bridge.reconnectTimer);
     bridge.reconnectTimer = null;
   }
+  // Read the signed amaso_session cookie out of the user's Chrome
+  // profile and append it to the WebSocket URL as ?session=<value>.
+  // Chrome MV3 service workers cannot attach Cookie headers to
+  // WebSocket handshakes, so passing the value via the URL is the
+  // only cross-host-safe way to authenticate the connection. The
+  // server validates the HMAC signature on its end (lib/ext-bridge-ws,
+  // which calls verifySigned), so the wire still carries an
+  // unforgeable token.
+  //
+  // No-cookie path: log a warning and try to connect anyway. The
+  // server will return 401 if it really needs auth and the popup
+  // will surface "1006 closed without auth" so the user can debug
+  // why the cookie isn't readable instead of the extension silently
+  // never opening the socket.
+  const sessionCookie = await getSessionCookie(state.dashboardOrigin);
+  if (!sessionCookie) {
+    console.warn(
+      "[ext-bridge] no amaso_session cookie for",
+      state.dashboardOrigin,
+      ". connecting without auth so the close code surfaces clearly.",
+    );
+  }
   let url;
   try {
-    url = bridgeUrl(state.dashboardOrigin);
+    url = bridgeUrl(state.dashboardOrigin, sessionCookie);
   } catch (err) {
     bridge.lastError = `bad dashboardOrigin: ${err && err.message}`;
     return;
