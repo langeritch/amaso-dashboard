@@ -504,6 +504,13 @@ function connectToCloud() {
       headers: {
         cookie: session.cookie,
         "user-agent": "Amaso Companion",
+        // The dashboard's CSWSH guard rejects upgrades whose Origin
+        // doesn't match Host. node-ws doesn't set Origin by default,
+        // so we send it explicitly. Native clients aren't CSWSH targets
+        // (no third-party can attach our cookie to their request) but
+        // the server-side check is shared with browser-facing sockets,
+        // and matching the convention is cleaner than relaxing it.
+        origin: DASHBOARD_URL,
       },
       // The dashboard is typically behind a Cloudflare tunnel or a
       // localhost dev server; 10 s is plenty for either.
