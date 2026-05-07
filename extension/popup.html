@@ -16,40 +16,44 @@
         font-size: 13px;
         margin: 0;
         padding: 12px;
-        width: 320px;
+        width: 300px;
       }
       h1 {
         font-size: 13px;
         font-weight: 600;
-        margin: 0 0 8px;
+        margin: 0 0 10px;
+        letter-spacing: 0.02em;
       }
       .row {
-        margin: 8px 0;
+        margin: 10px 0;
       }
       label {
         display: block;
         font-size: 11px;
         color: #666;
-        margin-bottom: 2px;
-      }
-      input[type="text"] {
-        width: 100%;
-        box-sizing: border-box;
-        padding: 4px 6px;
-        font-size: 12px;
+        margin-bottom: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
       }
       button {
         font-size: 12px;
-        padding: 4px 8px;
+        padding: 5px 10px;
         margin-right: 6px;
         cursor: pointer;
+        border: 1px solid #ccc;
+        background: #f7f7f7;
+        border-radius: 4px;
+      }
+      button:hover {
+        background: #efefef;
       }
       .status {
-        font-size: 11px;
-        padding: 4px 6px;
+        font-size: 12px;
+        padding: 8px 10px;
         border-radius: 4px;
         background: #f3f3f3;
         margin: 6px 0;
+        line-height: 1.35;
       }
       .status.ok {
         background: #e6f7e6;
@@ -62,40 +66,36 @@
       .muted {
         color: #888;
         font-size: 11px;
+        line-height: 1.4;
       }
-      code {
+      .origin {
         font-size: 11px;
-        background: #eee;
-        padding: 1px 4px;
-        border-radius: 3px;
+        color: #666;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
     </style>
   </head>
   <body>
     <h1>Amaso Driver</h1>
 
-    <div id="status" class="status">…</div>
+    <div id="status" class="status">checking...</div>
+    <div class="origin" id="origin-line">connected to: ...</div>
 
     <div class="row">
-      <label for="origin">Dashboard URL</label>
-      <input id="origin" type="text" placeholder="https://dashboard.amaso.nl" />
-      <div style="margin-top: 4px">
-        <button id="save-origin">Save & connect</button>
-        <button id="reconnect">Reconnect</button>
-      </div>
+      <button id="reconnect">Reconnect</button>
     </div>
 
     <div class="row">
       <label>Driver tab</label>
-      <div id="tab-info" class="muted">…</div>
-      <div style="margin-top: 4px">
+      <div id="tab-info" class="muted">...</div>
+      <div style="margin-top: 6px">
         <button id="use-current">Use this tab</button>
       </div>
     </div>
 
     <div class="muted">
-      Make sure you're logged in to the dashboard in this browser — the
-      driver authenticates with the same cookie as the dashboard tab.
+      The driver authenticates with the same session cookie as the dashboard
+      tab. If the connection fails, log in to the dashboard in this browser.
     </div>
 
     <script src="popup.js"></script>
