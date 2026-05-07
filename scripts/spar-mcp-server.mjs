@@ -997,6 +997,89 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "register_browser_job",
+    description:
+      "Register a long-running browser-automation task as a visible row in the workers panel. Call this BEFORE starting browser_* actions for any task that takes more than a single click (filling forms, setting up accounts, navigating multi-step flows). Returns a job id you'll pass to update_browser_job and complete_browser_job. The panel surfaces the name, status, elapsed time, and latest progress so the operator can see what's happening at a glance without opening the chat.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Human-readable label, max 200 chars. Examples: 'Setting up Stripe API key', 'Filling Apollo signup', 'Searching woonklasse design refs'.",
+        },
+        goal: {
+          type: "string",
+          description:
+            "What 'done' looks like in plain prose. The check-back phase compares against this to decide whether the job has completed or is still running. Max 2000 chars.",
+        },
+        check_interval_ms: {
+          type: "integer",
+          description:
+            "How often you intend to check back (purely advisory metadata, the registry doesn't enforce it). Default 120000 (2 min). Minimum 5000.",
+        },
+      },
+      required: ["name", "goal"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "update_browser_job",
+    description:
+      "Update an existing browser job's status and / or progress. Call this every time you check back on the task: take a screenshot, evaluate against the goal, then write a one-line summary into progress so the workers panel shows what just happened. Status moves: 'running' (still working), 'checking' (mid-screenshot evaluation), 'stalled' (no progress for 3 consecutive checks). Use complete_browser_job for terminal 'done' / 'failed' states.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Job id from register_browser_job." },
+        status: {
+          type: "string",
+          enum: ["running", "checking", "done", "failed", "stalled"],
+          description:
+            "Optional new status. Omit to leave it; the progress text alone is enough to re-arm the lastCheckedAt clock.",
+        },
+        progress: {
+          type: "string",
+          description:
+            "One-line summary of what's happening right now. Shown in the workers panel under the job name. Max 2000 chars.",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "complete_browser_job",
+    description:
+      "Mark a browser job as done or failed. Done = the goal is confirmed met. Failed = the task can't be completed (the user needs to step in, the site is blocking us, etc); pass failed:true and a short reason. Either way the job moves to a terminal state and the workers panel fades the row out over the next 5 minutes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Job id." },
+        failed: {
+          type: "boolean",
+          description: "True to mark failed. Default false (= done).",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Optional short reason. Stored as the final progress line; especially useful when failed:true.",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_browser_jobs",
+    description:
+      "List the currently-active browser jobs for this user. Use to recover after a worker recycle (you came back, what was I doing?) or to surface a quick 'what's pending' summary to the operator. Returns the same fields the workers panel reads.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function callTool(name, args, _attempt = 1) {

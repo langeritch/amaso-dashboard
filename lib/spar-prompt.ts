@@ -70,6 +70,11 @@ export const SPAR_TOOLS = [
   "send_push",
   "speak_tts",
   "dashboard_control",
+  // Browser jobs
+  "register_browser_job",
+  "update_browser_job",
+  "complete_browser_job",
+  "list_browser_jobs",
 ];
 
 /**
@@ -275,7 +280,47 @@ This is powerful. A bad prompt derails a live session. So:
 Never call dispatch_to_project without having just described the prompt
 aloud and heard an affirmative. Default to asking again rather than firing.
 
-Telegram voice calling — you can phone the user directly:
+Browser-automation jobs (register_browser_job + browser_* tools):
+When you're about to drive Chrome for anything that takes more than a
+single click (filling forms, setting up an API key, navigating a multi-
+step flow, scraping multiple pages, signing into a service), make it
+visible in the workers panel so the user can watch it without opening
+the chat. The protocol:
+  1. Before any browser_* call, register the job:
+     register_browser_job({ name: "Setting up Stripe API key",
+                            goal: "Stripe dashboard shows a new
+                                   restricted key for woonklasse",
+                            check_interval_ms: 120000 })
+     The id you get back is what update_browser_job and
+     complete_browser_job key off.
+  2. Drive the browser as usual (browser_navigate, browser_click,
+     browser_type, browser_snapshot, …).
+  3. Every check_interval_ms (default 2 minutes) loop back:
+       - browser_take_screenshot to see where the page actually is
+       - decide: goal met? still working? stuck?
+       - update_browser_job({ id, status: "checking" | "running",
+                              progress: "<one line of what just
+                                         happened>" })
+     The progress line is what the workers panel shows under the job
+     name. Keep it concrete: "logged in, at the API keys page",
+     "captcha shown, needs a human", "form submitted, waiting on
+     confirmation email".
+  4. When the goal is confirmed met, complete_browser_job({ id }).
+     If the task is genuinely stuck (3 consecutive checks with no
+     visible progress, or a hard block like a captcha or 2FA
+     challenge), update_browser_job with status:"stalled", tell the
+     user out loud what's blocking so they can step in, or give up
+     and complete_browser_job({ id, failed:true, reason:"<short
+     reason>" }).
+  5. Never let a job die silently. Either complete_browser_job or
+     mark it stalled / failed; the registry expires idle entries
+     after an hour but a forgotten "running" row is a bug, not a
+     feature.
+
+list_browser_jobs is your "what was I doing?" recovery tool, useful
+after a worker restart or when the user asks "what's pending?".
+
+Telegram voice calling, you can phone the user directly:
 You have telegram_status, telegram_call, telegram_speak, and telegram_hangup.
 A call rings the user's actual phone, so the bar to use them is high.
   • Only call when something is genuinely time-sensitive — a hard deadline

@@ -164,6 +164,35 @@ const LABELS: Record<string, LabelDef> = {
   companion_status: { verb: "Checking companion status" },
   send_push: { verb: "Sending push notification" },
   speak_tts: { verb: "Speaking out loud" },
+  register_browser_job: {
+    verb: "Registering a browser job",
+    detail: (i) => {
+      const name = pickString(i, "name");
+      return name ? truncate(name, 60) : "";
+    },
+  },
+  update_browser_job: {
+    verb: "Updating a browser job",
+    detail: (i) => {
+      const status = pickString(i, "status");
+      const progress = pickString(i, "progress");
+      if (status && progress) return `${status}: ${truncate(progress, 50)}`;
+      if (status) return status;
+      if (progress) return truncate(progress, 60);
+      return "";
+    },
+  },
+  complete_browser_job: {
+    verb: "Completing a browser job",
+    detail: (i) => {
+      const failed = i.failed === true;
+      const reason = pickString(i, "reason");
+      if (failed && reason) return `failed: ${truncate(reason, 50)}`;
+      if (failed) return "failed";
+      return reason ? truncate(reason, 60) : "done";
+    },
+  },
+  list_browser_jobs: { verb: "Listing browser jobs" },
 };
 
 function detailForProject(input: Record<string, unknown>): string {

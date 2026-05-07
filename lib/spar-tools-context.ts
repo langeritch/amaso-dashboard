@@ -78,6 +78,15 @@ import { commitAndPush } from "./git";
 import { isCompanionConnected } from "./companion-ws";
 import { pushToUsers } from "./push";
 import { getKokoroPort } from "./kokoro";
+import {
+  registerJob as registerBrowserJob,
+  updateJob as updateBrowserJob,
+  completeJob as completeBrowserJob,
+  failJob as failBrowserJob,
+  getActiveJobs as getActiveBrowserJobs,
+  getJob as getBrowserJob,
+  type BrowserJobStatus,
+} from "./browser-jobs";
 
 const MAX_SCROLLBACK_TAIL = 262_144; // 256 KB — enough for any session the PTY ring holds
 const DEFAULT_SCROLLBACK_TAIL = 16_000;
@@ -2097,6 +2106,119 @@ async function dashboardControlTool(
   return { ok: true, action, id: wsPayload.id };
 }
 
+// ---- Browser Jobs --------------------------------------------------------
+// The agent registers a browser-automation task as a Browser Job so the
+// workers panel can render it next to the terminal sessions, then loops
+// back via update_browser_job and complete_browser_job. See lib/browser-
+// jobs.ts for the per-user in-memory registry.
+
+const ALLOWED_JOB_STATUSES: BrowserJobStatus[] = [
+  "running",
+  "checking",
+  "done",
+  "failed",
+  "stalled",
+];
+
+export function registerBrowserJobTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const name = getStr(args, "name").trim();
+  const goal = getStr(args, "goal").trim();
+  if (!name) throw new Error("name must not be empty");
+  if (!goal) throw new Error("goal must not be empty");
+  const checkIntervalMs = getOptNum(args, "check_interval_ms");
+  const job = registerBrowserJob({
+    userId: ctx.user.id,
+    name,
+    goal,
+    checkIntervalMs,
+  });
+  return {
+    id: job.id,
+    name: job.name,
+    goal: job.goal,
+    status: job.status,
+    startedAt: job.startedAt,
+    checkIntervalMs: job.checkIntervalMs,
+  };
+}
+
+export function updateBrowserJobTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const statusRaw =
+    typeof args.status === "string" ? args.status.trim() : undefined;
+  if (statusRaw && !(ALLOWED_JOB_STATUSES as string[]).includes(statusRaw)) {
+    throw new Error(
+      `status must be one of: ${ALLOWED_JOB_STATUSES.join(", ")}`,
+    );
+  }
+  const progress =
+    typeof args.progress === "string" ? args.progress : undefined;
+  if (!statusRaw && progress === undefined) {
+    throw new Error("at least one of status or progress is required");
+  }
+  if (!getBrowserJob(ctx.user.id, id)) {
+    throw new Error(`unknown browser job: ${id}`);
+  }
+  const job = updateBrowserJob(ctx.user.id, id, {
+    status: statusRaw as BrowserJobStatus | undefined,
+    progress,
+  });
+  if (!job) throw new Error(`unknown browser job: ${id}`);
+  return {
+    id: job.id,
+    status: job.status,
+    progress: job.progress,
+    lastCheckedAt: job.lastCheckedAt,
+    completedAt: job.completedAt,
+  };
+}
+
+export function completeBrowserJobTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const failed = args.failed === true;
+  const reason =
+    typeof args.reason === "string" ? args.reason : undefined;
+  if (!getBrowserJob(ctx.user.id, id)) {
+    throw new Error(`unknown browser job: ${id}`);
+  }
+  const job = failed
+    ? failBrowserJob(ctx.user.id, id, reason)
+    : completeBrowserJob(ctx.user.id, id);
+  if (!job) throw new Error(`unknown browser job: ${id}`);
+  return {
+    id: job.id,
+    status: job.status,
+    completedAt: job.completedAt,
+  };
+}
+
+export function listBrowserJobsTool(ctx: SparContext) {
+  return {
+    jobs: getActiveBrowserJobs(ctx.user.id).map((job) => ({
+      id: job.id,
+      name: job.name,
+      goal: job.goal,
+      status: job.status,
+      progress: job.progress,
+      startedAt: job.startedAt,
+      lastCheckedAt: job.lastCheckedAt,
+      completedAt: job.completedAt,
+      checkIntervalMs: job.checkIntervalMs,
+    })),
+  };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -2169,4 +2291,10 @@ export const TOOL_HANDLERS: Record<
   speak_tts: (ctx, a) => speakTtsTool(ctx, a),
   // Remote dashboard control — drive UI state from the spar agent.
   dashboard_control: (ctx, a) => dashboardControlTool(ctx, a),
+  // Browser jobs: long-running browser-automation tasks the agent
+  // registers as visible workers-panel rows.
+  register_browser_job: (ctx, a) => registerBrowserJobTool(ctx, a),
+  update_browser_job: (ctx, a) => updateBrowserJobTool(ctx, a),
+  complete_browser_job: (ctx, a) => completeBrowserJobTool(ctx, a),
+  list_browser_jobs: (ctx) => listBrowserJobsTool(ctx),
 };

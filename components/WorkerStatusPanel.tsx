@@ -237,6 +237,205 @@ function partitionWorkers(workers: WorkerStatus[]) {
   return { busy: b, ready: r };
 }
 
+// ----- Browser Jobs -----------------------------------------------------
+// Long-running browser-automation tasks the sparring partner registers
+// via register_browser_job. Lives in the same panel as the terminal
+// workers so the operator can see "Spar is filling out X" alongside
+// "Project Y is thinking" without a second surface to glance at.
+
+interface BrowserJobView {
+  id: string;
+  name: string;
+  goal: string;
+  status: "running" | "checking" | "done" | "failed" | "stalled";
+  progress: string;
+  startedAt: number;
+  lastCheckedAt: number;
+  completedAt: number | null;
+  checkIntervalMs: number;
+}
+
+const BROWSER_JOB_POLL_MS = 10_000;
+const BROWSER_JOB_FADE_AFTER_MS = 5 * 60 * 1000;
+
+function useBrowserJobsPoll(): {
+  jobs: BrowserJobView[] | null;
+  refresh: () => void;
+} {
+  const [jobs, setJobs] = useState<BrowserJobView[] | null>(null);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const refresh = useCallback(() => setRefreshToken((t) => t + 1), []);
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const res = await fetch("/api/browser-jobs", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { jobs?: BrowserJobView[] };
+        if (cancelled) return;
+        setJobs(Array.isArray(body.jobs) ? body.jobs : []);
+      } catch {
+        /* swallow, next tick will retry */
+      }
+    }
+    void tick();
+    const id = window.setInterval(tick, BROWSER_JOB_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [refreshToken]);
+  return { jobs, refresh };
+}
+
+function browserJobBadge(status: BrowserJobView["status"]): {
+  dotClass: string;
+  pillClass: string;
+  label: string;
+} {
+  switch (status) {
+    case "running":
+      return {
+        dotClass: "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.85)]",
+        pillClass: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
+        label: "running",
+      };
+    case "checking":
+      return {
+        dotClass: "bg-amber-300 shadow-[0_0_6px_rgba(252,211,77,0.85)]",
+        pillClass: "border-amber-500/40 bg-amber-500/10 text-amber-200",
+        label: "checking",
+      };
+    case "stalled":
+      return {
+        dotClass: "bg-orange-400 shadow-[0_0_6px_rgba(251,146,60,0.85)]",
+        pillClass: "border-orange-500/40 bg-orange-500/10 text-orange-200",
+        label: "stalled",
+      };
+    case "failed":
+      return {
+        dotClass: "bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.85)]",
+        pillClass: "border-red-500/40 bg-red-500/10 text-red-200",
+        label: "failed",
+      };
+    case "done":
+    default:
+      return {
+        dotClass: "bg-neutral-500",
+        pillClass: "border-neutral-700 bg-neutral-900 text-neutral-400",
+        label: "done",
+      };
+  }
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.round((ms % 3_600_000) / 60_000);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function BrowserJobRow({ j }: { j: BrowserJobView }) {
+  const visual = browserJobBadge(j.status);
+  // Re-render once a minute so the elapsed-time string stays fresh
+  // even when the job hasn't been touched. Skipping this would freeze
+  // "12s" on screen for as long as the panel stays open.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = formatElapsed(now - j.startedAt);
+  // Fade-out for terminal-state rows. completedAt is set the moment
+  // the agent flipped the status; we cross-fade to 0 opacity over the
+  // last 60s of the 5-minute window. Server side already drops the
+  // job at the same boundary so the row disappears cleanly.
+  let opacity = 1;
+  if (j.completedAt != null) {
+    const age = now - j.completedAt;
+    const fadeStart = BROWSER_JOB_FADE_AFTER_MS - 60_000;
+    if (age >= BROWSER_JOB_FADE_AFTER_MS) opacity = 0;
+    else if (age > fadeStart) {
+      opacity = Math.max(0, 1 - (age - fadeStart) / 60_000);
+    }
+  }
+  const goalLine = j.progress || j.goal;
+  return (
+    <li
+      className="flex items-start gap-3 px-3 py-2.5 transition-opacity duration-500"
+      style={{ opacity }}
+      title={j.goal}
+    >
+      <span
+        aria-hidden
+        className={`mt-1 h-2 w-2 flex-shrink-0 rounded-full ${visual.dotClass}`}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-neutral-200">
+            {j.name}
+          </div>
+          <span
+            className={`flex-shrink-0 rounded-full border px-1.5 py-[1px] text-[9px] font-semibold uppercase tracking-[0.14em] ${visual.pillClass}`}
+          >
+            {visual.label}
+          </span>
+        </div>
+        <div className="mt-0.5 flex items-baseline gap-1.5 text-[10.5px] text-neutral-500">
+          <span className="font-mono text-neutral-600">{elapsed}</span>
+          {goalLine && (
+            <>
+              <span className="text-neutral-700">·</span>
+              <span className="min-w-0 flex-1 truncate text-neutral-400">
+                {goalLine}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+/** Just the rows. Returns null when there are no jobs so the caller
+ *  can omit the header / divider entirely. */
+export function BrowserJobsList() {
+  const { jobs } = useBrowserJobsPoll();
+  if (!jobs || jobs.length === 0) return null;
+  return (
+    <ul className="divide-y divide-neutral-800/70">
+      {jobs.map((j) => (
+        <BrowserJobRow key={j.id} j={j} />
+      ))}
+    </ul>
+  );
+}
+
+/** Section header + body for the Browser Jobs subsystem. Used by
+ *  WorkerList and the default panel below; keeps the chrome consistent
+ *  across both surfaces. Renders nothing when no jobs are active. */
+function BrowserJobsSection({ embedded }: { embedded?: boolean }) {
+  const { jobs } = useBrowserJobsPoll();
+  if (!jobs || jobs.length === 0) return null;
+  return (
+    <div className={embedded ? "border-t border-neutral-800/70" : ""}>
+      <div className="flex items-center gap-2 px-3 pt-2.5 pb-1 text-[9.5px] uppercase tracking-[0.18em] text-neutral-600">
+        <span>Browser jobs</span>
+        <span className="text-neutral-700">·</span>
+        <span className="font-mono normal-case tracking-normal text-neutral-500">
+          {jobs.length}
+        </span>
+      </div>
+      <ul className="divide-y divide-neutral-800/70">
+        {jobs.map((j) => (
+          <BrowserJobRow key={j.id} j={j} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
  * Headless, chrome-free worker list. Renders one row per session
  * straight from the worker-status API — no card, no collapse pill,
@@ -281,25 +480,28 @@ export function WorkerList() {
   }
   const readyGroups = groupReady(ready);
   return (
-    <ul className="divide-y divide-neutral-800/70">
-      {busy.map((w) => (
-        <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-      ))}
-      {readyGroups
-        ? readyGroups.map((g) => (
-            <li key={g.name} className="py-0">
-              <GroupHeader name={g.name} />
-              <ul className="divide-y divide-neutral-800/70">
-                {g.workers.map((w) => (
-                  <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-                ))}
-              </ul>
-            </li>
-          ))
-        : ready.map((w) => (
-            <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-          ))}
-    </ul>
+    <>
+      <ul className="divide-y divide-neutral-800/70">
+        {busy.map((w) => (
+          <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+        ))}
+        {readyGroups
+          ? readyGroups.map((g) => (
+              <li key={g.name} className="py-0">
+                <GroupHeader name={g.name} />
+                <ul className="divide-y divide-neutral-800/70">
+                  {g.workers.map((w) => (
+                    <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                  ))}
+                </ul>
+              </li>
+            ))
+          : ready.map((w) => (
+              <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+            ))}
+      </ul>
+      <BrowserJobsSection embedded />
+    </>
   );
 }
 
@@ -375,25 +577,28 @@ export default function WorkerStatusPanel() {
         {!collapsed && (() => {
           const readyGroups = groupReady(ready);
           return (
-            <ul className="max-h-[28vh] divide-y divide-neutral-800/70 overflow-y-auto border-t border-neutral-800/70">
-              {busy.map((w) => (
-                <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-              ))}
-              {readyGroups
-                ? readyGroups.map((g) => (
-                    <li key={g.name} className="py-0">
-                      <GroupHeader name={g.name} />
-                      <ul className="divide-y divide-neutral-800/70">
-                        {g.workers.map((w) => (
-                          <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-                        ))}
-                      </ul>
-                    </li>
-                  ))
-                : ready.map((w) => (
-                    <WorkerRow key={w.id} w={w} onRefresh={refresh} />
-                  ))}
-            </ul>
+            <div className="max-h-[28vh] overflow-y-auto border-t border-neutral-800/70">
+              <ul className="divide-y divide-neutral-800/70">
+                {busy.map((w) => (
+                  <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                ))}
+                {readyGroups
+                  ? readyGroups.map((g) => (
+                      <li key={g.name} className="py-0">
+                        <GroupHeader name={g.name} />
+                        <ul className="divide-y divide-neutral-800/70">
+                          {g.workers.map((w) => (
+                            <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                          ))}
+                        </ul>
+                      </li>
+                    ))
+                  : ready.map((w) => (
+                      <WorkerRow key={w.id} w={w} onRefresh={refresh} />
+                    ))}
+              </ul>
+              <BrowserJobsSection embedded />
+            </div>
           );
         })()}
       </div>
