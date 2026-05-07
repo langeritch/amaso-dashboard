@@ -87,6 +87,114 @@ function startAutoReportCooldown(userId: number, projectId: string) {
   );
 }
 
+// Server-side nudge batching. When many terminals finish within a short
+// window (blast test, parallel dispatches), collect completions per
+// user and flush as ONE merged spar message instead of N individual
+// ones. Each new arrival resets the timer so a steady drip during the
+// window still merges; flush only fires once the user goes quiet for
+// NUDGE_BATCH_MS. The per-project cooldown above continues to gate
+// the loop case independently — the batch keys cooldown START off the
+// flush, not the queue, so a project that arrives mid-window is still
+// added to its merged turn before its own cooldown latches.
+const NUDGE_BATCH_MS = 5_000;
+
+interface PendingNudge {
+  projectId: string;
+  sessionId: string;
+  completedDispatchId: string;
+  sessionLabel: string;
+}
+
+const pendingNudgesByUser = new Map<number, PendingNudge[]>();
+const nudgeBatchTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+function queueNudge(userId: number, nudge: PendingNudge) {
+  let queue = pendingNudgesByUser.get(userId);
+  if (!queue) {
+    queue = [];
+    pendingNudgesByUser.set(userId, queue);
+  }
+  queue.push(nudge);
+  // (Re)start the batch timer so late arrivals extend the window —
+  // a 5 s drip with one completion per second still produces one
+  // merged message at the end, not five separate ones.
+  const existing = nudgeBatchTimers.get(userId);
+  if (existing) clearTimeout(existing);
+  nudgeBatchTimers.set(
+    userId,
+    setTimeout(() => flushNudgeBatch(userId), NUDGE_BATCH_MS),
+  );
+}
+
+function flushNudgeBatch(userId: number) {
+  nudgeBatchTimers.delete(userId);
+  const nudges = pendingNudgesByUser.get(userId);
+  pendingNudgesByUser.delete(userId);
+  if (!nudges || nudges.length === 0) return;
+
+  const labels = nudges.map((n) => n.sessionLabel);
+  const nudge =
+    labels.length === 1
+      ? `check output of terminal for ${labels[0]}`
+      : `check output of terminals for ${labels.join(", ")}`;
+
+  const toolCalls =
+    nudges.length === 1
+      ? {
+          kind: "auto_report" as const,
+          projectId: nudges[0].projectId,
+          sessionId: nudges[0].sessionId,
+          completedDispatchId: nudges[0].completedDispatchId,
+        }
+      : {
+          kind: "auto_report" as const,
+          projects: nudges.map((n) => ({
+            projectId: n.projectId,
+            sessionId: n.sessionId,
+            completedDispatchId: n.completedDispatchId,
+          })),
+        };
+
+  try {
+    let conversationId = latestConversationId(userId);
+    if (conversationId == null) {
+      conversationId = createConversation(userId, null).id;
+    }
+    const row = appendMessage({
+      conversationId,
+      userId,
+      role: "user",
+      content: nudge,
+      toolCalls,
+    });
+    if (row) {
+      // Cooldown latches per project once the merged message lands —
+      // queue-time would race a same-project completion against its
+      // own batch entry. Flush time is the right boundary: every
+      // project that made it into this merged turn now blocks
+      // descendants for AUTO_REPORT_COOLDOWN_MS.
+      for (const n of nudges) {
+        startAutoReportCooldown(userId, n.projectId);
+      }
+      broadcastSparMessage(userId, {
+        conversationId: row.conversationId,
+        message: {
+          id: row.id,
+          role: row.role,
+          content: row.content,
+          toolCalls: row.toolCalls,
+          createdAt: row.createdAt,
+        },
+      });
+    }
+  } catch (err) {
+    console.warn(
+      `[idle] merged nudge append failed for ${nudges.length} projects:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 interface IdleState {
   /** Project this session belongs to. */
   projectId: string;
@@ -460,55 +568,19 @@ function fireIdle(sessionId: string): void {
     return;
   }
 
-  // Drop a synthetic user message into the latest spar conversation.
-  // Reads exactly like Santi typed it, so the spar model picks it up
-  // and uses read_terminal_scrollback itself when he next interacts.
-  // No server-side AI summary, no Haiku call.
+  // Hand off to the per-user batch buffer. The actual spar message
+  // (and its WS broadcast) lands when flushNudgeBatch fires after
+  // NUDGE_BATCH_MS of quiet — a 12-terminal blast becomes one
+  // merged "check output of terminals for A, B, …, L" row instead
+  // of twelve separate ones in the chat.
   const sessionLabel =
     projectSessionCount > 1 && sessionOrdinal > 0
       ? `${projectId} session #${sessionOrdinal}`
       : projectId;
-  const nudge = `check output of terminal for ${sessionLabel}`;
-  try {
-    let conversationId = latestConversationId(userId);
-    if (conversationId == null) {
-      conversationId = createConversation(userId, null).id;
-    }
-    const row = appendMessage({
-      conversationId,
-      userId,
-      role: "user",
-      content: nudge,
-      // Tag so the client-side auto-responder can recognise this is a
-      // synthetic nudge to react to (single-fire, read-only) rather than
-      // a real user turn. SparProvider hydrates it on WS broadcast and
-      // conversation reload.
-      toolCalls: {
-        kind: "auto_report",
-        projectId,
-        sessionId,
-        completedDispatchId,
-      },
-    });
-    if (row) {
-      // Start the cooldown only AFTER a successful append — a failed
-      // write shouldn't shut the door on the next attempt.
-      startAutoReportCooldown(userId, projectId);
-      broadcastSparMessage(userId, {
-        conversationId: row.conversationId,
-        message: {
-          id: row.id,
-          role: row.role,
-          content: row.content,
-          toolCalls: row.toolCalls,
-          createdAt: row.createdAt,
-        },
-      });
-    }
-  } catch (err) {
-    console.warn(
-      `[idle] nudge append failed for project=${projectId} session=${sessionId}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  queueNudge(userId, {
+    projectId,
+    sessionId,
+    completedDispatchId,
+    sessionLabel,
+  });
 }
