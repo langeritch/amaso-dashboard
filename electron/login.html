@@ -104,6 +104,13 @@
       }
       .toggle-row .label-stack { display: flex; flex-direction: column; gap: 1px; }
       .toggle-row .label-stack .hint { font-size: 10px; color: #6b7280; }
+      .field-row {
+        display: flex; flex-direction: column; gap: 4px;
+        padding: 4px 0; font-size: 12px; color: #d4d4d4;
+      }
+      .field-row .label-stack { display: flex; flex-direction: column; gap: 1px; }
+      .field-row .label-stack .hint { font-size: 10px; color: #6b7280; }
+      .field-row input { padding: 5px 8px; font-size: 12px; }
       /* Custom switch — native <input type=checkbox> looks wrong inside a
          dark frameless popover. This keeps it small and consistent. */
       .switch {
@@ -266,6 +273,10 @@
         // the visual treatment we want for a tiny popover.
         const settings = h("div", { className: "settings" });
         settings.append(
+          deviceNameRow({
+            value: snapshot.deviceName || "",
+            onChange: (next) => window.companion.setDeviceName(next),
+          }),
           toggleRow({
             label: "Launch at login",
             hint: "Companion starts automatically",
@@ -300,6 +311,55 @@
           ),
           actions,
           settings,
+        );
+      }
+
+      function deviceNameRow({ value, onChange }) {
+        const input = h("input", {
+          type: "text",
+          maxlength: "64",
+          spellcheck: "false",
+          autocapitalize: "off",
+          autocomplete: "off",
+          placeholder: "Device name",
+        });
+        input.value = value;
+        // Commit on blur and on Enter. Skipping per-keystroke saves
+        // means the dashboard's device list does not flicker while
+        // the user is mid-typing. The IPC reply echoes back the
+        // server's idea of the name (after trimming and length cap),
+        // so we sync the input to that to keep the UI honest.
+        let committing = false;
+        const commit = async () => {
+          if (committing) return;
+          if (input.value === value) return;
+          committing = true;
+          try {
+            const res = await onChange(input.value);
+            if (res && typeof res.deviceName === "string") {
+              input.value = res.deviceName;
+              value = res.deviceName;
+            }
+          } finally {
+            committing = false;
+          }
+        };
+        input.addEventListener("blur", commit);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            input.blur();
+          } else if (e.key === "Escape") {
+            input.value = value;
+            input.blur();
+          }
+        });
+        return h("div", { className: "field-row" },
+          h("div", { className: "label-stack" },
+            h("span", {}, "Device name"),
+            h("span", { className: "hint" }, "Shown in your dashboard's device list"),
+          ),
+          input,
         );
       }
 

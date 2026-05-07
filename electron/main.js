@@ -34,6 +34,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
+const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { autoUpdater } = require("electron-updater");
 const { duckOthers, restoreOthers } = require("./audio-duck");
@@ -51,6 +52,12 @@ let duckingEnabled = true; // persisted across launches via settings.json
 let vadStatus = "idle"; // "idle" | "listening" | "denied" | "error"
 let trayIcons = null; // { disconnected, connected, thinking } nativeImages
 let thinkingCount = 0; // commands currently in-flight — drives the tray badge
+// Stable identity for this companion install. Generated once on first launch
+// and persisted in settings.json so the dashboard can recognize the same
+// machine across reboots and reconnects. The deviceName is the user-visible
+// label shown in the dashboard's device list and is editable from the popover.
+let deviceId = null;
+let deviceName = null;
 
 // ---- App lifecycle -------------------------------------------------------
 
@@ -68,6 +75,8 @@ app.whenReady().then(() => {
   if (process.platform === "darwin") app.dock?.hide();
 
   duckingEnabled = loadSetting("duckingEnabled", true);
+  deviceId = loadOrCreateDeviceId();
+  deviceName = loadDeviceName();
   // Launch-at-login defaults to true — the companion's whole job is to be
   // reachable from the dashboard without the user having to remember to
   // open it. Persisted in settings.json so the user's choice survives an
@@ -363,6 +372,10 @@ function buildStatusSnapshot() {
     duckingEnabled,
     launchAtLogin: getLaunchAtLogin(),
     thinking: thinkingCount > 0,
+    deviceId,
+    deviceName,
+    platform: process.platform,
+    arch: process.arch,
   };
 }
 
@@ -403,6 +416,11 @@ ipcMain.handle("amaso:setLaunchAtLogin", (_evt, next) => {
 ipcMain.handle("amaso:setDucking", (_evt, next) => {
   toggleDucking(!!next);
   return { ok: true, duckingEnabled };
+});
+
+ipcMain.handle("amaso:setDeviceName", (_evt, next) => {
+  setDeviceName(next);
+  return { ok: true, deviceName };
 });
 
 // Push status to the popover renderer whenever something changes
@@ -529,6 +547,11 @@ function connectToCloud() {
     refreshTrayMenu();
     pushPopoverStatus();
     armSilenceTimer();
+    // Identify this companion install before anything else so the
+    // dashboard knows which device the upcoming acks and events
+    // belong to. Sent on every reconnect, not just first launch, so
+    // the dashboard's device list survives server restarts.
+    sendRegister(ws);
     // Drain the outbox immediately so any acks/events from
     // pre-disconnect work land before the dashboard re-flushes its
     // own offline queue back at us. Order matters: dashboard expects
@@ -659,6 +682,26 @@ function disconnectFromCloud() {
   }
   socket = null;
   wsStatus = "disconnected";
+}
+
+// Announce this companion to the dashboard. Sent right after the WS
+// open handshake and again whenever the user renames the device, so
+// the dashboard's device list always reflects the current label
+// without round-trips. The dashboard keys devices on deviceId; the
+// other fields are display only.
+function sendRegister(ws) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({
+      type: "register",
+      deviceId,
+      deviceName,
+      platform: process.platform,
+      arch: process.arch,
+    }));
+  } catch {
+    /* connection raced with send; the next reconnect re-registers */
+  }
 }
 
 function sendEvent(name, data) {
@@ -988,6 +1031,50 @@ function saveSetting(key, value) {
   } catch {
     /* best-effort */
   }
+}
+
+// ---- Device identity ----------------------------------------------------
+//
+// The companion advertises itself to the dashboard as a stable device with
+// a uuid and a human label. The id is generated on first launch and never
+// rotates; the label defaults to the OS hostname so the dashboard's device
+// list reads naturally without any setup, and the user can rename it from
+// the popover.
+
+function loadOrCreateDeviceId() {
+  const stored = loadSetting("deviceId", null);
+  if (typeof stored === "string" && /^[0-9a-f-]{36}$/i.test(stored)) return stored;
+  const fresh = crypto.randomUUID();
+  saveSetting("deviceId", fresh);
+  return fresh;
+}
+
+function defaultDeviceName() {
+  // os.hostname() returns things like "Santis-MacBook.local"; strip the
+  // mDNS suffix so the default reads as a friendly machine name.
+  const raw = os.hostname() || "";
+  const cleaned = raw.replace(/\.local$/i, "").trim();
+  return cleaned.length > 0 ? cleaned : "Mac";
+}
+
+function loadDeviceName() {
+  const stored = loadSetting("deviceName", null);
+  if (typeof stored === "string" && stored.trim().length > 0) return stored.trim();
+  const fallback = defaultDeviceName();
+  saveSetting("deviceName", fallback);
+  return fallback;
+}
+
+function setDeviceName(next) {
+  const trimmed = String(next == null ? "" : next).trim().slice(0, 64);
+  const finalName = trimmed.length > 0 ? trimmed : defaultDeviceName();
+  if (finalName === deviceName) return;
+  deviceName = finalName;
+  saveSetting("deviceName", deviceName);
+  // Re-announce so the dashboard's device list reflects the new label
+  // without waiting for the next reconnect.
+  if (socket && socket.readyState === WebSocket.OPEN) sendRegister(socket);
+  pushPopoverStatus();
 }
 
 // ---- Session persistence ------------------------------------------------

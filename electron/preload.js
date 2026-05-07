@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("companion", {
   // items unsupported on a given platform).
   setLaunchAtLogin: (next) => ipcRenderer.invoke("amaso:setLaunchAtLogin", next),
   setDucking: (next) => ipcRenderer.invoke("amaso:setDucking", next),
+  setDeviceName: (next) => ipcRenderer.invoke("amaso:setDeviceName", next),
   // Live status push. Main fires `amaso:status:update` with the same
   // shape `status()` returns whenever WS / VAD / settings transition.
   // Returns the unsubscribe function — the renderer wires it on mount
