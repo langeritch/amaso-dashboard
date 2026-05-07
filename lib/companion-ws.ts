@@ -46,10 +46,17 @@ import {
 } from "./companion-queue";
 import { recordActivity } from "./presence";
 import {
+  getDevice as getCompanionDevice,
   markDisconnected as markDeviceDisconnected,
   registerDevice,
   touchDevice,
 } from "./companion-devices";
+import {
+  completeTask as completeCompanionTask,
+  failTask as failCompanionTask,
+  registerTask as registerCompanionTask,
+  summariseAckResult,
+} from "./companion-tasks";
 
 export type CompanionCommand =
   | { type: "audio.duck"; level?: number }
@@ -615,6 +622,22 @@ function buildCompanionWs() {
       }
       const id = crypto.randomBytes(8).toString("base64url");
       logCommandDispatch(userId, id, command, { queued: false });
+      // Register the task in the workers-panel registry so the
+      // operator can see what the agent is asking the companion to
+      // do in real time. resolvedDeviceId may be null when the
+      // dispatch fell through to a legacy unregistered socket; the
+      // registry handles that cleanly.
+      const resolvedDeviceId = target.deviceId ?? deviceId ?? null;
+      const deviceName = resolvedDeviceId
+        ? getCompanionDevice(userId, resolvedDeviceId)?.deviceName ??
+          "Unnamed device"
+        : "Unnamed device";
+      const task = registerCompanionTask({
+        userId,
+        deviceId: resolvedDeviceId,
+        deviceName,
+        command,
+      });
       const effectiveTimeout = timeoutMs ?? COMMAND_TIMEOUT_MS;
       // registerCommandFlight uses the module-level COMMAND_TIMEOUT_MS
       // for its built-in timeout. For tools that legitimately need
@@ -622,18 +645,30 @@ function buildCompanionWs() {
       // returned promise resolves on the first of: real ack, native
       // timer, our extended deadline.
       const flightAck = registerCommandFlight(target, id, command);
-      if (effectiveTimeout <= COMMAND_TIMEOUT_MS) return flightAck;
-      let raceTimer: NodeJS.Timeout | null = null;
-      const racingTimeout = new Promise<CompanionAck>((resolve) => {
-        raceTimer = setTimeout(() => {
-          resolve({ id, ok: false, error: `timeout after ${effectiveTimeout}ms` });
-        }, effectiveTimeout);
-      });
-      try {
-        return await Promise.race([flightAck, racingTimeout]);
-      } finally {
-        if (raceTimer) clearTimeout(raceTimer);
+      const finalAck = await (async (): Promise<CompanionAck> => {
+        if (effectiveTimeout <= COMMAND_TIMEOUT_MS) return flightAck;
+        let raceTimer: NodeJS.Timeout | null = null;
+        const racingTimeout = new Promise<CompanionAck>((resolve) => {
+          raceTimer = setTimeout(() => {
+            resolve({ id, ok: false, error: `timeout after ${effectiveTimeout}ms` });
+          }, effectiveTimeout);
+        });
+        try {
+          return await Promise.race([flightAck, racingTimeout]);
+        } finally {
+          if (raceTimer) clearTimeout(raceTimer);
+        }
+      })();
+      if (finalAck.ok) {
+        completeCompanionTask(
+          userId,
+          task.id,
+          summariseAckResult(command, finalAck.result),
+        );
+      } else {
+        failCompanionTask(userId, task.id, finalAck.error);
       }
+      return finalAck;
     },
   };
 }

@@ -436,6 +436,188 @@ function BrowserJobsSection({ embedded }: { embedded?: boolean }) {
   );
 }
 
+// ----- Companion tasks --------------------------------------------------
+// Every in-flight companion command (shell.exec, fs.read, screenshot,
+// input.click, etc.) registered by lib/companion-tasks.ts surfaces here
+// so the operator can watch what the agent is asking the menu-bar app
+// to do. Same chrome as the Browser Jobs section so the panel reads as
+// one consistent surface.
+
+interface CompanionTaskView {
+  id: string;
+  deviceId: string | null;
+  deviceName: string;
+  commandType: string;
+  description: string;
+  status: "running" | "completed" | "failed";
+  startedAt: number;
+  completedAt: number | null;
+  resultSummary: string;
+}
+
+const COMPANION_TASK_POLL_MS = 10_000;
+const COMPANION_TASK_FADE_AFTER_MS = 5 * 60 * 1000;
+// Pop the elapsed-time count to a louder colour once a task has been
+// running this long; matches the spec's "show elapsed time prominently
+// after 30s" guidance.
+const COMPANION_TASK_LONG_RUN_MS = 30_000;
+
+function useCompanionTasksPoll(): { tasks: CompanionTaskView[] | null } {
+  const [tasks, setTasks] = useState<CompanionTaskView[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const res = await fetch("/api/companion/tasks", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { tasks?: CompanionTaskView[] };
+        if (cancelled) return;
+        setTasks(Array.isArray(body.tasks) ? body.tasks : []);
+      } catch {
+        /* swallow, next tick will retry */
+      }
+    }
+    void tick();
+    const id = window.setInterval(tick, COMPANION_TASK_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+  return { tasks };
+}
+
+function companionTaskBadge(status: CompanionTaskView["status"]): {
+  dotClass: string;
+  pillClass: string;
+  label: string;
+} {
+  switch (status) {
+    case "running":
+      return {
+        dotClass: "bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.85)]",
+        pillClass: "border-sky-500/40 bg-sky-500/10 text-sky-200",
+        label: "thinking",
+      };
+    case "failed":
+      return {
+        dotClass: "bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.85)]",
+        pillClass: "border-red-500/40 bg-red-500/10 text-red-200",
+        label: "failed",
+      };
+    case "completed":
+    default:
+      return {
+        dotClass: "bg-neutral-500",
+        pillClass: "border-neutral-700 bg-neutral-900 text-neutral-400",
+        label: "done",
+      };
+  }
+}
+
+function CompanionTaskRow({ t }: { t: CompanionTaskView }) {
+  const visual = companionTaskBadge(t.status);
+  // Tick once per second when a task is mid-flight so the elapsed
+  // counter feels alive; once a minute is fine for terminal-state
+  // rows since they only need to feed the fade-out math.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const interval = t.status === "running" ? 1000 : 30_000;
+    const id = window.setInterval(() => setNow(Date.now()), interval);
+    return () => window.clearInterval(id);
+  }, [t.status]);
+  const elapsedMs = now - t.startedAt;
+  const elapsedLabel = formatTaskElapsed(elapsedMs);
+  const longRunning =
+    t.status === "running" && elapsedMs >= COMPANION_TASK_LONG_RUN_MS;
+  let opacity = 1;
+  if (t.completedAt != null) {
+    const age = now - t.completedAt;
+    const fadeStart = COMPANION_TASK_FADE_AFTER_MS - 60_000;
+    if (age >= COMPANION_TASK_FADE_AFTER_MS) opacity = 0;
+    else if (age > fadeStart) {
+      opacity = Math.max(0, 1 - (age - fadeStart) / 60_000);
+    }
+  }
+  const subline = t.resultSummary || `${t.commandType} on ${t.deviceName}`;
+  return (
+    <li
+      className="flex items-start gap-3 px-3 py-2.5 transition-opacity duration-500"
+      style={{ opacity }}
+      title={t.description}
+    >
+      <span
+        aria-hidden
+        className={`mt-1 h-2 w-2 flex-shrink-0 rounded-full ${visual.dotClass}`}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-neutral-200">
+            {t.description}
+          </div>
+          <span
+            className={`flex-shrink-0 rounded-full border px-1.5 py-[1px] text-[9px] font-semibold uppercase tracking-[0.14em] ${visual.pillClass}`}
+          >
+            {visual.label}
+          </span>
+        </div>
+        <div className="mt-0.5 flex items-baseline gap-1.5 text-[10.5px] text-neutral-500">
+          <span
+            className={`font-mono ${
+              longRunning ? "text-amber-300" : "text-neutral-600"
+            }`}
+          >
+            {elapsedLabel}
+          </span>
+          {subline && (
+            <>
+              <span className="text-neutral-700">·</span>
+              <span className="min-w-0 flex-1 truncate text-neutral-400">
+                {subline}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function formatTaskElapsed(ms: number): string {
+  if (ms < 1000) return "<1s";
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) {
+    const m = Math.floor(ms / 60_000);
+    const s = Math.round((ms % 60_000) / 1000);
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.round((ms % 3_600_000) / 60_000);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function CompanionTasksSection({ embedded }: { embedded?: boolean }) {
+  const { tasks } = useCompanionTasksPoll();
+  if (!tasks || tasks.length === 0) return null;
+  const running = tasks.filter((t) => t.status === "running").length;
+  return (
+    <div className={embedded ? "border-t border-neutral-800/70" : ""}>
+      <div className="flex items-center gap-2 px-3 pt-2.5 pb-1 text-[9.5px] uppercase tracking-[0.18em] text-neutral-600">
+        <span>Companion tasks</span>
+        <span className="text-neutral-700">·</span>
+        <span className="font-mono normal-case tracking-normal text-neutral-500">
+          {running > 0 ? `${running} thinking` : `${tasks.length}`}
+        </span>
+      </div>
+      <ul className="divide-y divide-neutral-800/70">
+        {tasks.map((t) => (
+          <CompanionTaskRow key={t.id} t={t} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
  * Headless, chrome-free worker list. Renders one row per session
  * straight from the worker-status API — no card, no collapse pill,
@@ -501,6 +683,7 @@ export function WorkerList() {
             ))}
       </ul>
       <BrowserJobsSection embedded />
+      <CompanionTasksSection embedded />
     </>
   );
 }
@@ -598,6 +781,7 @@ export default function WorkerStatusPanel() {
                     ))}
               </ul>
               <BrowserJobsSection embedded />
+              <CompanionTasksSection embedded />
             </div>
           );
         })()}
