@@ -1835,10 +1835,10 @@ export default function SparProvider({
          *  another row for it. */
         skipPersistLastUser?: boolean;
       },
-    ) => {
+    ): Promise<boolean> => {
       const text = raw.trim();
-      if (!opts?.kickoff && !opts?.skipUserBubble && !text && !pendingAttachmentsRef.current.length) return;
-      if (busyRef.current) return;
+      if (!opts?.kickoff && !opts?.skipUserBubble && !text && !pendingAttachmentsRef.current.length) return false;
+      if (busyRef.current) return false;
       ttsCancel();
       spokenCharsRef.current = 0;
       setBusy(true);
@@ -2202,6 +2202,7 @@ export default function SparProvider({
         // the bumped updated_at re-sort the threads. Fire-and-forget.
         void refreshConversations();
       }
+      return true;
     },
     [playMessageSentChime, refreshConversations],
   );
@@ -2789,7 +2790,8 @@ export default function SparProvider({
     if (busyRef.current) {
       // Try again shortly — the queue is persisted, so even a hard
       // reload couldn't lose it. We just wait for the user's current
-      // turn to finish.
+      // turn to finish. Multiple nudges that pile up here will all
+      // drain together as ONE merged turn when busy clears.
       autoReportFlushTimerRef.current = window.setTimeout(() => {
         autoReportFlushTimerRef.current = null;
         flushAutoReportQueue();
@@ -2798,30 +2800,68 @@ export default function SparProvider({
     }
     const q = autoReportQueueRef.current;
     if (q.length === 0) return;
-    const next = q[0];
-    void respondToAutoReport(next.messageId, next.conversationId);
+    void respondToAutoReportBatch(q.slice());
   }
 
-  const respondToAutoReport = useCallback(
-    async (messageId: number, conversationId: number) => {
-      if (processedAutoReportsRef.current.has(messageId)) {
-        dequeueAutoReport(messageId);
-        return;
-      }
-      if (busyRef.current) {
-        // Already mid-turn. Leave in queue; flushAutoReportQueue retries.
-        return;
-      }
-      // Only the tab that has this conversation active answers — keeps
-      // priorHistory honest and lets the other tabs sit out without
-      // needing to reach into the DB.
-      if (activeConversationIdRef.current !== conversationId) return;
-
-      const target = messagesRef.current.find(
-        (m) => m.persistedId === messageId,
+  /**
+   * Build the merged user-message text for one or more queued
+   * auto-report nudges. Single nudge → "check output of terminal for
+   * X" (verbatim). Multiple nudges → "check output of terminals for
+   * X, Y, Z" so the model gets one combined prompt instead of N
+   * back-to-back identical-shaped turns.
+   */
+  function buildMergedAutoReportContent(items: AutoReportEntry[]): string {
+    const labels: string[] = [];
+    for (const it of items) {
+      const m = messagesRef.current.find(
+        (msg) => msg.persistedId === it.messageId,
       );
-      if (!target) {
-        // Broadcast hasn't been applied to local state yet. Re-arm.
+      if (!m) continue;
+      // Strip the leading "check output of terminal for " prefix so
+      // we can re-emit a clean comma-joined list. Falls back to the
+      // raw content for any nudge whose shape differs from the
+      // expected pattern (older server build, manual injection).
+      const raw = m.content.trim();
+      const match = raw.match(
+        /^check output of terminal[s]? for (.+)$/i,
+      );
+      const label = match ? match[1].trim() : raw;
+      if (label && !labels.includes(label)) labels.push(label);
+    }
+    if (labels.length === 0) return "";
+    if (labels.length === 1) return `check output of terminal for ${labels[0]}`;
+    return `check output of terminals for ${labels.join(", ")}`;
+  }
+
+  const respondToAutoReportBatch = useCallback(
+    async (items: AutoReportEntry[]) => {
+      if (items.length === 0) return;
+      // Filter out anything already processed (e.g. localStorage
+      // hydrated with a stale id) — drains those without firing.
+      const fresh = items.filter(
+        (it) => !processedAutoReportsRef.current.has(it.messageId),
+      );
+      if (fresh.length === 0) {
+        for (const it of items) dequeueAutoReport(it.messageId);
+        return;
+      }
+      if (busyRef.current) return;
+      // Only the tab on this conversation answers — keeps priorHistory
+      // honest. If multiple conversations are mixed in the queue, take
+      // the first item's conversation as the active turn and leave
+      // the others to be picked up when the user switches.
+      const activeConv = activeConversationIdRef.current;
+      if (activeConv === null) return;
+      const onActive = fresh.filter((it) => it.conversationId === activeConv);
+      if (onActive.length === 0) return;
+
+      // Make sure every targeted message is in messagesRef (the WS
+      // broadcast may not have fully applied to local state yet).
+      // If any is missing, defer — the next 200 ms tick will retry.
+      const allPresent = onActive.every((it) =>
+        messagesRef.current.some((m) => m.persistedId === it.messageId),
+      );
+      if (!allPresent) {
         autoReportFlushTimerRef.current = window.setTimeout(() => {
           autoReportFlushTimerRef.current = null;
           flushAutoReportQueue();
@@ -2829,53 +2869,72 @@ export default function SparProvider({
         return;
       }
 
-      // Already answered? Only if the very next message is an assistant
-      // reply. If a regular user message sits in between, any assistant
-      // response after that is answering the user, not the auto-report.
-      const idx = messagesRef.current.indexOf(target);
-      const nextMsg = messagesRef.current[idx + 1];
-      const hasFollowup =
-        !!nextMsg &&
-        nextMsg.role === "assistant" &&
-        (nextMsg.content?.trim().length ?? 0) > 0;
-      if (hasFollowup) {
-        processedAutoReportsRef.current.add(messageId);
-        persistProcessedAutoReports();
-        dequeueAutoReport(messageId);
+      // Cross-tab race protection. Claim every messageId we're about
+      // to handle; if any one of them is already claimed, bail and
+      // let the other tab finish — its WS broadcast of the assistant
+      // reply will surface here, and the processed set covers re-fires.
+      const claimed: number[] = [];
+      let lostRace = false;
+      for (const it of onActive) {
+        if (tryClaimAutoReport(it.messageId)) {
+          claimed.push(it.messageId);
+        } else {
+          lostRace = true;
+          break;
+        }
+      }
+      if (lostRace) {
+        for (const id of claimed) releaseAutoReportClaim(id);
         return;
       }
 
-      // Cross-tab race protection. If another tab claimed first, bail
-      // — they'll write the assistant reply, the WS broadcast will
-      // surface it here, and our hasFollowup check stops the next
-      // attempt. Fall through means we own this nudge.
-      if (!tryClaimAutoReport(messageId)) return;
+      const merged = buildMergedAutoReportContent(onActive);
+      if (!merged) {
+        // Nothing renderable — skip and clear so we don't loop.
+        for (const it of onActive) {
+          processedAutoReportsRef.current.add(it.messageId);
+          dequeueAutoReport(it.messageId);
+          releaseAutoReportClaim(it.messageId);
+        }
+        persistProcessedAutoReports();
+        return;
+      }
 
       // EXACT same path as a typed message — sendMessage handles the
       // optimistic assistant bubble, the POST, the streaming retry
       // loop, the spoken-text TTS, and the busy state. The two opts
-      // tell it: the user-role turn is already in messagesRef (server
-      // broadcast it via WS, fireIdle persisted it), so don't insert a
-      // duplicate bubble or trigger a duplicate DB write. Everything
-      // else — autopilot flag, system prompt, allowed tools, model —
-      // is identical to a turn Santi typed himself.
+      // tell it: the user-role turns are already in messagesRef
+      // (server broadcasts via WS, fireIdle persisted them), so
+      // don't insert a duplicate bubble or write another DB row.
+      // Returns false when sendMessage's pre-checks bailed (busy,
+      // empty, etc.) — in that case we DON'T mark processed, so the
+      // next flush retry can try again instead of permanently
+      // dropping the nudge.
+      let ran = false;
       try {
-        await sendMessage(target.content, {
+        ran = await sendMessage(merged, {
           skipUserBubble: true,
           skipPersistLastUser: true,
         });
-      } finally {
-        // ALWAYS mark processed, even on failure — a stuck nudge
-        // shouldn't loop forever. Santi can ask manually if the
-        // initial attempt produced nothing useful.
-        processedAutoReportsRef.current.add(messageId);
-        persistProcessedAutoReports();
-        dequeueAutoReport(messageId);
-        releaseAutoReportClaim(messageId);
-        // Drain any other pending nudges that piled up while busy.
-        if (autoReportQueueRef.current.length > 0) {
-          scheduleAutoReportFlush();
+      } catch (err) {
+        console.warn(
+          "[auto-report] sendMessage threw:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      if (ran) {
+        for (const it of onActive) {
+          processedAutoReportsRef.current.add(it.messageId);
+          dequeueAutoReport(it.messageId);
+          releaseAutoReportClaim(it.messageId);
         }
+        persistProcessedAutoReports();
+      } else {
+        // Release claims so a retry can re-claim. Leave in queue.
+        for (const id of claimed) releaseAutoReportClaim(id);
+      }
+      if (autoReportQueueRef.current.length > 0) {
+        scheduleAutoReportFlush();
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps

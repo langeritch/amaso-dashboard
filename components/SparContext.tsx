@@ -288,7 +288,14 @@ export type SparContextValue = {
   addAttachments: (files: File[]) => void;
   removeAttachment: (id: string) => void;
   clearAttachments: () => void;
-  sendMessage: (raw: string, opts?: { kickoff?: boolean }) => Promise<void>;
+  sendMessage: (
+    raw: string,
+    opts?: {
+      kickoff?: boolean;
+      skipUserBubble?: boolean;
+      skipPersistLastUser?: boolean;
+    },
+  ) => Promise<boolean>;
   saveHeartbeat: () => Promise<void>;
   loadHeartbeatFor: (userId: number) => Promise<void>;
   clearTranscript: () => void;
