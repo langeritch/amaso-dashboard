@@ -75,7 +75,14 @@ import {
   getAutomationStats,
 } from "./automations";
 import { commitAndPush } from "./git";
-import { isCompanionConnected } from "./companion-ws";
+import {
+  isCompanionConnected,
+  sendCompanionCommandToDevice,
+} from "./companion-ws";
+import {
+  getAllDevices as getAllCompanionDevices,
+  getConnectedDevices as getConnectedCompanionDevices,
+} from "./companion-devices";
 import { pushToUsers } from "./push";
 import { getKokoroPort } from "./kokoro";
 import {
@@ -2219,6 +2226,100 @@ export function listBrowserJobsTool(ctx: SparContext) {
   };
 }
 
+// ---- Companion devices ---------------------------------------------------
+// MCP-facing tools for the menu-bar companion devices the user has paired
+// with the dashboard. Exec / read are tunnelled over the existing
+// companion-ws (shell.exec / fs.read), addressed by deviceId so a user
+// with both a MacBook and an office Mac can pick the right one.
+
+const COMPANION_DEFAULT_TIMEOUT_MS = 30_000;
+
+export function companionListDevicesTool(ctx: SparContext) {
+  const all = getAllCompanionDevices(ctx.user.id);
+  return {
+    devices: all.map((d) => ({
+      deviceId: d.deviceId,
+      deviceName: d.deviceName,
+      platform: d.platform,
+      arch: d.arch,
+      connected: d.disconnectedAt == null,
+      connectedAt: d.connectedAt,
+      lastSeenAt: d.lastSeenAt,
+      disconnectedAt: d.disconnectedAt,
+    })),
+  };
+}
+
+function resolveDeviceId(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+): string | null {
+  const explicit =
+    typeof args.device_id === "string" ? args.device_id.trim() : "";
+  if (explicit) return explicit;
+  const connected = getConnectedCompanionDevices(ctx.user.id);
+  return connected.length > 0 ? connected[0].deviceId : null;
+}
+
+export async function companionExecTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const command = getStr(args, "command").trim();
+  if (!command) throw new Error("command must not be empty");
+  if (command.length > 8_000) {
+    throw new Error("command too long (>8000 chars)");
+  }
+  const cwd = typeof args.cwd === "string" ? args.cwd : undefined;
+  const deviceId = resolveDeviceId(ctx, args);
+  if (!deviceId && !isCompanionConnected(ctx.user.id)) {
+    throw new Error(
+      "no companion device connected. Open the Amaso menu-bar app on the target machine.",
+    );
+  }
+  const ack = await sendCompanionCommandToDevice(
+    ctx.user.id,
+    { type: "shell.exec", cmd: command, cwd },
+    deviceId,
+    COMPANION_DEFAULT_TIMEOUT_MS,
+  );
+  if (!ack.ok) {
+    throw new Error(ack.error || "shell.exec failed");
+  }
+  return {
+    deviceId,
+    ...((ack.result as Record<string, unknown> | null) ?? {}),
+  };
+}
+
+export async function companionReadFileTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const filePath = getStr(args, "path").trim();
+  if (!filePath) throw new Error("path must not be empty");
+  const deviceId = resolveDeviceId(ctx, args);
+  if (!deviceId && !isCompanionConnected(ctx.user.id)) {
+    throw new Error(
+      "no companion device connected. Open the Amaso menu-bar app on the target machine.",
+    );
+  }
+  const ack = await sendCompanionCommandToDevice(
+    ctx.user.id,
+    { type: "fs.read", path: filePath },
+    deviceId,
+    COMPANION_DEFAULT_TIMEOUT_MS,
+  );
+  if (!ack.ok) {
+    throw new Error(ack.error || "fs.read failed");
+  }
+  return {
+    deviceId,
+    path: filePath,
+    ...((ack.result as Record<string, unknown> | null) ?? {}),
+  };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -2297,4 +2398,9 @@ export const TOOL_HANDLERS: Record<
   update_browser_job: (ctx, a) => updateBrowserJobTool(ctx, a),
   complete_browser_job: (ctx, a) => completeBrowserJobTool(ctx, a),
   list_browser_jobs: (ctx) => listBrowserJobsTool(ctx),
+  // Companion devices: shell.exec / fs.read tunnelled to a specific
+  // paired companion (MacBook, office Mac, etc).
+  companion_list_devices: (ctx) => companionListDevicesTool(ctx),
+  companion_exec: (ctx, a) => companionExecTool(ctx, a),
+  companion_read_file: (ctx, a) => companionReadFileTool(ctx, a),
 };

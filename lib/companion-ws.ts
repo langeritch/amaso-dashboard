@@ -45,6 +45,11 @@ import {
   type QueuedCommand,
 } from "./companion-queue";
 import { recordActivity } from "./presence";
+import {
+  markDisconnected as markDeviceDisconnected,
+  registerDevice,
+  touchDevice,
+} from "./companion-devices";
 
 export type CompanionCommand =
   | { type: "audio.duck"; level?: number }
@@ -72,7 +77,15 @@ type ServerMessage =
 type ClientMessage =
   | { type: "pong"; ts: number }
   | ({ type: "ack" } & CompanionAck)
-  | ({ type: "event" } & CompanionEvent);
+  | ({ type: "command.result" } & CompanionAck)
+  | ({ type: "event" } & CompanionEvent)
+  | {
+      type: "device.register";
+      deviceId: string;
+      deviceName?: string;
+      platform?: string;
+      arch?: string;
+    };
 
 interface PendingCommand {
   resolve: (ack: CompanionAck) => void;
@@ -98,6 +111,11 @@ interface ClientState {
   pending: Map<string, PendingCommand>;
   lastPong: number;
   listeners: Set<(evt: CompanionEvent) => void>;
+  /** Set after the companion sends its `device.register` message.
+   *  Stays null on legacy companions that never identify themselves;
+   *  per-device dispatch ignores those sockets. The fan-out
+   *  sendCommand keeps including them for backward compat. */
+  deviceId: string | null;
 }
 
 // Multiple sockets per user are allowed (user could reinstall, open two
@@ -272,6 +290,7 @@ function buildCompanionWs() {
       pending: new Map(),
       lastPong: Date.now(),
       listeners: new Set(),
+      deviceId: null,
     };
     let clientsForUser = byUser.get(user.id);
     if (!clientsForUser) {
@@ -336,18 +355,49 @@ function buildCompanionWs() {
       } catch {
         return;
       }
+      // Every inbound message bumps the device's lastSeenAt so the
+      // settings panel doesn't show "stale" for a quiet but live
+      // socket. No-op until the companion has registered itself.
+      if (state.deviceId) touchDevice(state.deviceId);
       if (msg.type === "pong") {
         state.lastPong = Date.now();
         return;
       }
-      if (msg.type === "ack") {
+      if (msg.type === "device.register") {
+        // Companion identifies itself shortly after connect. We trust
+        // the deviceId verbatim (it's a UUID the companion persists
+        // locally), and fall back to placeholders for missing fields
+        // so partially-broken builds still register a row.
+        const deviceId = String(msg.deviceId).trim();
+        if (!deviceId) return;
+        state.deviceId = deviceId;
+        registerDevice({
+          userId: user.id,
+          deviceId,
+          deviceName:
+            (typeof msg.deviceName === "string" && msg.deviceName.trim()) ||
+            "Unnamed device",
+          platform:
+            (typeof msg.platform === "string" && msg.platform) || "unknown",
+          arch: (typeof msg.arch === "string" && msg.arch) || "unknown",
+        });
+        console.log(
+          `[companion-ws] device.register user=${user.id} deviceId=${deviceId} platform=${msg.platform ?? "?"} arch=${msg.arch ?? "?"}`,
+        );
+        return;
+      }
+      // ack and command.result are wire-equivalent: both deliver a
+      // CompanionAck shape. The new companion build emits
+      // command.result for shell.exec / fs.read replies; older builds
+      // still use ack. Either resolves the same pending entry.
+      if (msg.type === "ack" || msg.type === "command.result") {
         const pending = state.pending.get(msg.id);
         if (pending) {
           clearTimeout(pending.timer);
           state.pending.delete(msg.id);
           const ack: CompanionAck = {
             id: msg.id,
-            ok: msg.ok,
+            ok: msg.ok ?? !msg.error,
             error: msg.error,
             result: msg.result,
           };
@@ -379,7 +429,10 @@ function buildCompanionWs() {
         set.delete(state);
         if (set.size === 0) byUser.delete(user.id);
       }
-      console.log(`[companion-ws] disconnected user=${user.id}`);
+      if (state.deviceId) markDeviceDisconnected(state.deviceId);
+      console.log(
+        `[companion-ws] disconnected user=${user.id} deviceId=${state.deviceId ?? "<unregistered>"}`,
+      );
     });
   });
 
@@ -472,6 +525,77 @@ function buildCompanionWs() {
       const clients = byUser.get(userId);
       return !!clients && clients.size > 0;
     },
+
+    /**
+     * Targeted dispatch. Sends `command` to the specific device
+     * identified by deviceId. Returns one ack (vs sendCommand's
+     * fan-out array) so MCP tools can await a single result without
+     * unwrapping. Used by the companion_exec / companion_read_file
+     * tools and by any future per-device automation.
+     *
+     * If deviceId is omitted, picks the first connected device for
+     * the user. Returns ok:false / error:"device_not_connected" when
+     * no matching socket is live (we deliberately don't queue, since
+     * a tool call awaiting a 30 s timeout shouldn't silently land an
+     * hour later when the laptop wakes).
+     */
+    async sendCommandToDevice(
+      userId: number,
+      command: CompanionCommand,
+      deviceId: string | null,
+      timeoutMs?: number,
+    ): Promise<CompanionAck> {
+      const clients = byUser.get(userId);
+      if (!clients || clients.size === 0) {
+        return { id: "", ok: false, error: "device_not_connected" };
+      }
+      let target: ClientState | null = null;
+      if (deviceId) {
+        for (const state of clients) {
+          if (state.deviceId === deviceId) {
+            target = state;
+            break;
+          }
+        }
+      } else {
+        // No deviceId specified: pick the first device-aware client.
+        // Falls through to ANY client (legacy unregistered) if none of
+        // them registered themselves.
+        for (const state of clients) {
+          if (state.deviceId) {
+            target = state;
+            break;
+          }
+        }
+        if (!target) {
+          target = clients.values().next().value as ClientState;
+        }
+      }
+      if (!target) {
+        return { id: "", ok: false, error: "device_not_connected" };
+      }
+      const id = crypto.randomBytes(8).toString("base64url");
+      logCommandDispatch(userId, id, command, { queued: false });
+      const effectiveTimeout = timeoutMs ?? COMMAND_TIMEOUT_MS;
+      // registerCommandFlight uses the module-level COMMAND_TIMEOUT_MS
+      // for its built-in timeout. For tools that legitimately need
+      // longer (a 30 s shell.exec, say) we layer an outer race so the
+      // returned promise resolves on the first of: real ack, native
+      // timer, our extended deadline.
+      const flightAck = registerCommandFlight(target, id, command);
+      if (effectiveTimeout <= COMMAND_TIMEOUT_MS) return flightAck;
+      let raceTimer: NodeJS.Timeout | null = null;
+      const racingTimeout = new Promise<CompanionAck>((resolve) => {
+        raceTimer = setTimeout(() => {
+          resolve({ id, ok: false, error: `timeout after ${effectiveTimeout}ms` });
+        }, effectiveTimeout);
+      });
+      try {
+        return await Promise.race([flightAck, racingTimeout]);
+      } finally {
+        if (raceTimer) clearTimeout(raceTimer);
+      }
+    },
   };
 }
 
@@ -521,6 +645,27 @@ export async function sendCompanionCommand(
   command: CompanionCommand,
 ): Promise<CompanionAck[]> {
   return globalThis.__amasoCompanionWs?.sendCommand(userId, command) ?? [];
+}
+
+/** Targeted send used by MCP tools that need a single device's reply
+ *  with a tunable timeout. deviceId=null picks the first connected
+ *  device. Returns a synthetic device_not_connected ack when nothing
+ *  is online (no queueing, unlike the fan-out). */
+export async function sendCompanionCommandToDevice(
+  userId: number,
+  command: CompanionCommand,
+  deviceId: string | null,
+  timeoutMs?: number,
+): Promise<CompanionAck> {
+  return (
+    globalThis.__amasoCompanionWs?.sendCommandToDevice(
+      userId,
+      command,
+      deviceId,
+      timeoutMs,
+    ) ??
+    Promise.resolve({ id: "", ok: false, error: "ws_not_initialised" })
+  );
 }
 
 export function isCompanionConnected(userId: number): boolean {

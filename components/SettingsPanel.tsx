@@ -18,6 +18,7 @@ import {
 import type { User } from "@/lib/db";
 import ClaudeAccountsSection from "./ClaudeAccountsSection";
 import PushToggle from "./PushToggle";
+import CompanionDevicesSection from "./CompanionDevicesSection";
 
 type Theme = "dark" | "light";
 const THEME_KEY = "amaso:theme";
@@ -92,6 +93,8 @@ export default function SettingsPanel({ user }: { user: User }) {
       <Section title="Notifications">
         <PushToggle variant="row" />
       </Section>
+
+      <CompanionDevicesSection />
 
       {user.role === "admin" && (
         <Section title="Admin">

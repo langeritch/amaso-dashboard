@@ -193,6 +193,21 @@ const LABELS: Record<string, LabelDef> = {
     },
   },
   list_browser_jobs: { verb: "Listing browser jobs" },
+  companion_list_devices: { verb: "Listing companion devices" },
+  companion_exec: {
+    verb: "Running a shell command on the companion",
+    detail: (i) => {
+      const cmd = pickString(i, "command");
+      return cmd ? truncate(cmd, 60) : "";
+    },
+  },
+  companion_read_file: {
+    verb: "Reading a file from the companion",
+    detail: (i) => {
+      const p = pickString(i, "path");
+      return p ? truncate(p, 60) : "";
+    },
+  },
 };
 
 function detailForProject(input: Record<string, unknown>): string {

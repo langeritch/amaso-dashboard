@@ -1080,6 +1080,65 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "companion_list_devices",
+    description:
+      "List the user's paired companion devices (Macs, office machines, etc) along with their current online state. Returns one entry per device with deviceId, deviceName, platform, arch, connected (true/false), connectedAt, and lastSeenAt. Use this when the user asks 'what's online' or before companion_exec / companion_read_file when the right deviceId isn't obvious.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "companion_exec",
+    description:
+      "Run a shell command on a paired companion device. Returns the device's stdout, stderr, and exitCode. 30 second timeout. Examples: 'ls -la ~/Documents', 'git status', 'sw_vers'. Default device is the first connected one (typically the user's primary MacBook); pass device_id to target a specific machine listed by companion_list_devices.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description:
+            "The shell command to run on the device. The companion executes via /bin/sh on macOS / Linux and cmd.exe on Windows; quote arguments accordingly. Max 8000 chars.",
+        },
+        device_id: {
+          type: "string",
+          description:
+            "Optional. The deviceId of the target machine (from companion_list_devices). Omit to default to the first connected device.",
+        },
+        cwd: {
+          type: "string",
+          description:
+            "Optional working directory for the command. Defaults to the companion's home directory.",
+        },
+      },
+      required: ["command"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "companion_read_file",
+    description:
+      "Read the contents of a file on a paired companion device. Returns the file's text content (or a base64 hint if it isn't text). 30 second timeout. Use when the user asks for the contents of something on their laptop (configs, scripts, notes). Omit device_id to default to the first connected device.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Absolute path to the file on the companion device. Tilde expansion (~/foo) works on macOS / Linux companions.",
+        },
+        device_id: {
+          type: "string",
+          description:
+            "Optional. The deviceId of the target machine. Omit to default to the first connected device.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function callTool(name, args, _attempt = 1) {

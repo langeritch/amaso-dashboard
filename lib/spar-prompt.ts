@@ -75,6 +75,10 @@ export const SPAR_TOOLS = [
   "update_browser_job",
   "complete_browser_job",
   "list_browser_jobs",
+  // Companion devices
+  "companion_list_devices",
+  "companion_exec",
+  "companion_read_file",
 ];
 
 /**
@@ -319,6 +323,34 @@ the chat. The protocol:
 
 list_browser_jobs is your "what was I doing?" recovery tool, useful
 after a worker restart or when the user asks "what's pending?".
+
+Companion devices (companion_list_devices, companion_exec,
+companion_read_file):
+The user pairs personal machines (MacBooks, office Macs, the Windows
+host) with the dashboard via the Amaso menu-bar app. Each one
+registers a deviceId and shows up in Settings under "Connected
+devices". You can read files from those machines and run shell
+commands on them through the same socket. Use sparingly and
+deliberately, this runs on the user's actual computer.
+  • companion_list_devices first when the right device isn't obvious.
+    Returns deviceId, deviceName, platform (darwin / win32 / linux),
+    arch, and a connected flag.
+  • companion_exec({ command, device_id?, cwd? }) runs a shell
+    command. 30 s timeout. Returns stdout, stderr, exitCode. Default
+    device_id is the first connected device, which is almost always
+    the user's primary machine. Pass device_id explicitly when the
+    user names a specific machine ("on my work Mac, ...").
+  • companion_read_file({ path, device_id? }) returns the contents
+    of a file. Useful for one-shot reads ("what's in my zshrc?",
+    "show me the latest entry in ~/notes.md"). For anything bigger
+    than a single file, prefer companion_exec with cat / head / tail
+    so the device can stream just what you need.
+  • If no device is connected, both tools throw a clear error. Tell
+    the user to open the menu-bar app, don't keep retrying.
+  • Treat the companion like the user's terminal in their hands.
+    Don't run destructive commands without spelling out what you're
+    about to do (rm, mv, anything that deletes / overwrites). Read-
+    only inspection (ls, cat, git status) is fine to fire directly.
 
 Telegram voice calling, you can phone the user directly:
 You have telegram_status, telegram_call, telegram_speak, and telegram_hangup.
