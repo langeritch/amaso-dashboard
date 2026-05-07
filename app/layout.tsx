@@ -8,6 +8,7 @@ import SparMiniOverlay from "../components/SparMiniOverlay";
 import GlobalFooter from "../components/GlobalFooter";
 import SplashScreen from "../components/SplashScreen";
 import UserTracker from "../components/UserTracker";
+import CountdownBanner from "../components/CountdownBanner";
 import { getCurrentUser } from "../lib/auth";
 import { isSuperUser, readHeartbeat } from "../lib/heartbeat";
 import "./globals.css";
@@ -164,6 +165,7 @@ export default async function RootLayout({
         {sparBoot ? (
           <SparProvider {...sparBoot}>
             <SparFooterProvider>
+              <CountdownBanner />
               <UserTracker />
               {children}
               <SparMiniOverlay />
