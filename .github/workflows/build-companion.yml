@@ -55,6 +55,18 @@ jobs:
         working-directory: electron
         run: npm install --no-audit --no-fund
 
+      - name: Read companion version
+        id: version
+        working-directory: electron
+        # Pulled from electron/package.json so the synthetic tag
+        # used for non-tag pushes (companion-v<version>-build<run>)
+        # follows whatever the canonical version is on the branch.
+        # Bumping the version is a one-line edit; pushes cut a release
+        # against the new version automatically.
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Generate tray icons if missing
         # `scripts/generate-tray-icons.mjs` produces all six PNGs
         # (1x + @2x for three states). Pure Node, no deps. Run
@@ -130,30 +142,34 @@ jobs:
           retention-days: 30
 
       - name: Attach to GitHub Release
-        # Two trigger paths:
-        #   1. A tag push matching companion-v* — the canonical "ship a
-        #      version" path. Tag name is used verbatim as the release
-        #      tag and title.
-        #   2. A manual workflow_dispatch with `release: true` — fallback
-        #      for one-off builds without a tag. (Boolean inputs surface
-        #      as strings in GitHub expressions.)
-        # Normal pushes to main keep producing only run-artifacts.
+        # Three trigger paths:
+        #   1. Tag push matching companion-v*: canonical "ship a
+        #      version" path. The tag name is used verbatim as the
+        #      release tag and title.
+        #   2. Push to main that touched electron/** (or this
+        #      workflow file): auto-release as
+        #      companion-v<pkg.version>-build<run_number> so the
+        #      install page picks up every merged change without a
+        #      manual tag step.
+        #   3. Manual workflow_dispatch with `release: true`: same
+        #      synthetic naming as path 2. Useful for one-off rebuilds
+        #      from a stale main without re-tagging.
+        # The dashboard's latest-release endpoint sorts releases by
+        # published_at and filters on the companion-v prefix, so build
+        # tags supersede each other in the order they ship even though
+        # semver pre-release suffixes would otherwise sort lower.
         if: |
-          startsWith(github.ref, 'refs/tags/companion-v') ||
+          github.event_name == 'push' ||
           (github.event_name == 'workflow_dispatch' && inputs.release == 'true')
         uses: softprops/action-gh-release@v2
         with:
-          # Reuse the tag verbatim when triggered by tag push so the URL
-          # `releases/latest/download/<asset>` keeps resolving against
-          # the right release. On manual dispatch we don't have a tag,
-          # so fall back to a synthetic build number.
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/companion-v') && github.ref_name || format('companion-{0}', github.run_number) }}
-          name: ${{ startsWith(github.ref, 'refs/tags/companion-v') && format('Amaso Companion {0}', github.ref_name) || format('Amaso Companion (build {0})', github.run_number) }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/companion-v') && github.ref_name || format('companion-v{0}-build{1}', steps.version.outputs.version, github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/companion-v') && format('Amaso Companion {0}', github.ref_name) || format('Amaso Companion v{0} (build {1})', steps.version.outputs.version, github.run_number) }}
           body: |
             Internal-use Mac companion DMG build.
 
             Commit: ${{ github.sha }}
-            Unsigned — first launch requires right-click → Open to bypass Gatekeeper.
+            Unsigned. First launch requires right-click then Open to bypass Gatekeeper.
           files: |
             electron/dist/*.dmg
             electron/dist/*.zip
