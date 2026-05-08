@@ -23,6 +23,7 @@
     "appId": "nl.amaso.companion",
     "productName": "Amaso Companion",
     "asar": true,
+    "afterPack": "./scripts/afterPack-adhoc-sign.js",
     "mac": {
       "category": "public.app-category.utilities",
       "target": [

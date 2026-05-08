@@ -86,18 +86,17 @@ jobs:
           # GH_TOKEN; we publish manually in a separate step so force
           # --publish=never here.
           GH_TOKEN: ""
-        # mac.identity=- forces electron-builder to ad-hoc sign the
-        # outer .app on Apple Silicon. Without this, when
-        # CSC_IDENTITY_AUTO_DISCOVERY is off, electron-builder
-        # skips signing entirely and the bundle keeps the inherited
-        # Electron framework signature, which macOS Gatekeeper
-        # rejects as "damaged" because the bundle id no longer
-        # matches the signature. ad-hoc signing produces a fresh
-        # signature for nl.amaso.companion and the right-click +
-        # Open path works for end users.
+        # CSC_IDENTITY_AUTO_DISCOVERY=false makes electron-builder
+        # skip its own sign step entirely, even with -c.mac.identity=-,
+        # so we re-sign ad-hoc ourselves via the afterPack hook
+        # configured in package.json (./scripts/afterPack-adhoc-sign.js).
+        # The hook runs between pack and DMG-build, replacing the
+        # inherited Electron framework signature with one keyed on
+        # nl.amaso.companion that the user's Gatekeeper accepts after
+        # the standard right-click + Open dance.
         # The mac.target config in package.json pins both arm64 and
         # x64, so --mac alone produces both slices.
-        run: npx electron-builder --mac --publish=never -c.mac.identity=-
+        run: npx electron-builder --mac --publish=never
 
       - name: Build DMG + ZIP (signed + notarized)
         if: inputs.sign == true
