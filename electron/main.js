@@ -417,8 +417,11 @@ function getOrCreateSparWindow() {
     y,
     frame: false,
     transparent: true,
-    vibrancy: "under-window",
-    visualEffectState: "active",
+    // No system vibrancy: it renders as a light frosted panel on a
+    // light desktop, which is the "white background" the user
+    // wanted gone in voice mode. Chat mode now relies on the body's
+    // own rgba(11,13,16,0.78) backdrop for legibility, voice mode
+    // goes fully transparent so the orb floats on bare wallpaper.
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
