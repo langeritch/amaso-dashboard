@@ -15,7 +15,7 @@ const composer = document.getElementById("composer");
 const textInput = document.getElementById("text");
 const micBtn = document.getElementById("micBtn");
 const modeBtn = document.getElementById("modeBtn");
-const orb = document.getElementById("orb");
+const orbCanvas = document.getElementById("orbCanvas");
 const convPill = document.getElementById("convPill");
 const convLabel = document.getElementById("convLabel");
 const convMenu = document.getElementById("convMenu");
@@ -196,8 +196,8 @@ function toggleMic() {
 }
 
 micBtn.addEventListener("click", toggleMic);
-orb.addEventListener("click", toggleMic);
-orb.addEventListener("keydown", (e) => {
+orbCanvas.addEventListener("click", toggleMic);
+orbCanvas.addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " ") {
     e.preventDefault();
     toggleMic();
@@ -247,10 +247,25 @@ function bufferToBase64(ab) {
 // each chunk to an AudioBuffer and schedule it at the previous
 // chunk's end time so chunks queue gaplessly.
 
+// Holds the AnalyserNode the visualizer reads from. Same ref-object
+// pattern the dashboard component uses, so the draw loop sees the
+// latest analyser without restarting when one is created lazily on
+// the first audio chunk.
+const analyserRef = { current: null };
+
 function ensurePlaybackCtx() {
   if (!playbackCtx) {
     playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
     playbackHead = 0;
+    // Build the analyser once per AudioContext and route every
+    // playback source through it: source -> analyser -> destination.
+    // fftSize 256 gives 128 frequency bins, which is exactly what
+    // the dashboard visualizer reads (data = new Uint8Array(128)).
+    const an = playbackCtx.createAnalyser();
+    an.fftSize = 256;
+    an.smoothingTimeConstant = 0.7;
+    an.connect(playbackCtx.destination);
+    analyserRef.current = an;
   }
   return playbackCtx;
 }
@@ -268,7 +283,10 @@ async function enqueueAudio(b64) {
   const startAt = Math.max(ctx.currentTime, playbackHead);
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(ctx.destination);
+  // Route through the shared analyser so the visualizer reacts to
+  // the assistant's TTS. analyserRef.current is guaranteed to be
+  // non-null after ensurePlaybackCtx().
+  src.connect(analyserRef.current);
   src.start(startAt);
   playbackHead = startAt + buf.duration;
 }
@@ -280,14 +298,189 @@ function base64ToArrayBuffer(b64) {
   return out.buffer;
 }
 
-// ---- Orb state ----------------------------------------------------------
+// ---- Orb state + canvas visualizer --------------------------------------
+//
+// 96-bar radial canvas, ported verbatim from the dashboard's
+// SparAudioVisualizer.tsx. The draw loop reads the latest flags
+// from flagsRef on every frame, so state transitions take effect
+// without restarting the loop, and reads the analyser node from
+// analyserRef so a lazily-created playback analyser slots in
+// transparently. Bar colors and shadow rules match the dashboard
+// 1:1, which is the whole point of the port.
+
+const flagsRef = {
+  current: {
+    inCall: false,
+    listening: false,
+    speaking: false,
+    thinking: false,
+    autopilot: false,
+  },
+};
 
 function setOrbState(state) {
   if (state !== "idle" && state !== "listening" && state !== "thinking" && state !== "speaking") {
     return;
   }
-  orb.dataset.state = state;
+  // The dashboard's visualizer treats inCall as the master "voice
+  // session active" flag and gates the others off it. The companion
+  // is always in a voice session whenever the orb is on screen, so
+  // we keep inCall true and toggle the per-state flags off it.
+  flagsRef.current = {
+    inCall: true,
+    listening: state === "listening",
+    speaking: state === "speaking",
+    thinking: state === "thinking",
+    autopilot: false,
+  };
 }
+
+function startOrbVisualizer() {
+  const canvas = orbCanvas;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const NUM_BARS = 96;
+  const TWO_PI = Math.PI * 2;
+
+  const heights = new Float32Array(NUM_BARS);
+  const data = new Uint8Array(128);
+
+  let lastW = 0;
+  let lastH = 0;
+  const dpr = window.devicePixelRatio || 1;
+  let idleSeed = 0;
+
+  const draw = () => {
+    requestAnimationFrame(draw);
+    const f = flagsRef.current;
+
+    const rect = canvas.getBoundingClientRect();
+    const W = Math.max(1, Math.round(rect.width));
+    const H = Math.max(1, Math.round(rect.height));
+    if (W !== lastW || H !== lastH) {
+      canvas.width = W * dpr;
+      canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      lastW = W;
+      lastH = H;
+    }
+    // Wipe + force the context back to a known pristine state every
+    // frame; mirrors the dashboard's belt-and-braces reset so a
+    // future tweak that leaves a shadow / gradient / composite mode
+    // hanging can't bleed into the next frame.
+    ctx.clearRect(0, 0, W, H);
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "rgba(0,0,0,0)";
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.filter = "none";
+
+    const CENTER_X = W / 2;
+    const CENTER_Y = H / 2;
+    const SHORT = Math.min(W, H);
+    const INNER_R = SHORT * 0.28;
+    const BASE_BAR = 2;
+    const MAX_BAR = SHORT * 0.48 - INNER_R;
+
+    const analyser = analyserRef.current;
+    const haveAudio = analyser != null && f.speaking;
+    if (haveAudio) {
+      analyser.getByteFrequencyData(data);
+    }
+
+    idleSeed += 1;
+
+    if (f.autopilot) {
+      let audioEnergy = 0;
+      if (haveAudio) {
+        let sum = 0;
+        const lim = Math.min(32, data.length);
+        for (let k = 0; k < lim; k += 1) sum += data[k];
+        audioEnergy = Math.min(1, sum / (lim * 180));
+      }
+      const breath = 0.5 + 0.5 * Math.sin(idleSeed * 0.055);
+      const shadowBlur = 8 + 10 * breath + 16 * audioEnergy;
+      const shadowAlpha = Math.min(
+        0.9,
+        0.4 + 0.2 * breath + 0.3 * audioEnergy,
+      );
+      ctx.shadowBlur = shadowBlur;
+      ctx.shadowColor = `rgba(74,222,128,${shadowAlpha})`;
+    } else {
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = "rgba(0,0,0,0)";
+    }
+
+    for (let i = 0; i < NUM_BARS; i += 1) {
+      const half = NUM_BARS / 2;
+      const mirror = i < half ? i : NUM_BARS - 1 - i;
+      const binIdx = Math.min(
+        data.length - 1,
+        2 + Math.floor((mirror / half) * (data.length * 0.55)),
+      );
+      let target;
+      if (haveAudio) {
+        target = Math.min(1.25, Math.pow(data[binIdx] / 200, 0.75));
+      } else if (f.thinking) {
+        target = 0.12 + 0.08 * Math.sin(idleSeed * 0.06 + i * 0.12);
+      } else if (f.listening) {
+        target = 0.06 + 0.04 * Math.sin(idleSeed * 0.1 + i * 0.3);
+      } else if (f.inCall) {
+        target = 0.04 + 0.02 * Math.sin(idleSeed * 0.04 + i * 0.2);
+      } else {
+        target = 0.02;
+      }
+      const cur = heights[i];
+      const k = target > cur ? 0.62 : 0.14;
+      heights[i] = cur + (target - cur) * k;
+
+      const mag = heights[i];
+      const len = BASE_BAR + mag * MAX_BAR;
+      const angle = (i / NUM_BARS) * TWO_PI - Math.PI / 2;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const x1 = CENTER_X + cos * INNER_R;
+      const y1 = CENTER_Y + sin * INNER_R;
+      const x2 = CENTER_X + cos * (INNER_R + len);
+      const y2 = CENTER_Y + sin * (INNER_R + len);
+
+      let r;
+      let g;
+      let b;
+      if (f.speaking) {
+        r = 52; g = 211; b = 153;
+      } else if (f.thinking) {
+        r = 251; g = 191; b = 36;
+      } else if (f.listening) {
+        r = 248; g = 113; b = 113;
+      } else {
+        r = 16; g = 185; b = 129;
+      }
+      const alpha = 0.3 + Math.min(1, mag) * 0.65;
+
+      ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+      ctx.lineWidth = 2 + Math.min(1, mag) * 1.6;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "rgba(0,0,0,0)";
+  };
+  requestAnimationFrame(draw);
+}
+
+// Seed flags so the canvas paints a soft inCall pulse from the
+// first frame, then start the loop immediately. The loop runs for
+// the lifetime of the renderer; CSS handles hide/show via the
+// voice-pane display rule.
+setOrbState("idle");
+startOrbVisualizer();
 
 // ---- Conversation picker -------------------------------------------------
 //

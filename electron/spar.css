@@ -212,54 +212,14 @@ body.mode-voice .chat-pane { display: none; }
 }
 body.mode-voice .voice-pane { display: flex; }
 
-.orb {
-  width: 132px; height: 132px;
-  border-radius: 50%;
+.orb-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
   cursor: pointer;
-  background: radial-gradient(circle at 35% 30%, #5a78a8 0%, #28385c 55%, #0c1426 100%);
-  box-shadow: 0 0 22px rgba(90, 130, 200, 0.18);
-  transition: box-shadow 0.4s ease, background 0.4s ease;
-  animation: orb-breathe 4s ease-in-out infinite;
   outline: none;
+  border-radius: 50%;
 }
-.orb:focus-visible {
-  box-shadow: 0 0 0 2px rgba(255,255,255,0.25), 0 0 22px rgba(90,130,200,0.18);
-}
-
-.orb[data-state="idle"] {
-  animation: orb-breathe 4s ease-in-out infinite;
-}
-.orb[data-state="listening"] {
-  background: radial-gradient(circle at 35% 30%, #6cc5ff 0%, #1f6bb0 55%, #0a2640 100%);
-  box-shadow: 0 0 36px rgba(108, 197, 255, 0.45);
-  animation: orb-pulse 1.4s ease-in-out infinite;
-}
-.orb[data-state="thinking"] {
-  background:
-    radial-gradient(circle at 50% 50%, rgba(255,255,255,0.05) 0%, transparent 60%),
-    conic-gradient(from 0deg, #f59e0b, #fbbf24, #f59e0b, #c2410c, #f59e0b);
-  box-shadow: 0 0 32px rgba(245, 158, 11, 0.42);
-  animation: orb-spin 2.6s linear infinite;
-}
-.orb[data-state="speaking"] {
-  background: radial-gradient(circle at 35% 30%, #5eead4 0%, #0f766e 55%, #042f2e 100%);
-  box-shadow: 0 0 40px rgba(94, 234, 212, 0.55);
-  animation: orb-ripple 1.4s ease-out infinite;
-}
-
-@keyframes orb-breathe {
-  0%, 100% { transform: scale(1);    box-shadow: 0 0 22px rgba(90,130,200,0.18); }
-  50%      { transform: scale(1.04); box-shadow: 0 0 32px rgba(90,130,200,0.30); }
-}
-@keyframes orb-pulse {
-  0%, 100% { transform: scale(1); }
-  50%      { transform: scale(1.08); }
-}
-@keyframes orb-spin {
-  to { transform: rotate(360deg); }
-}
-@keyframes orb-ripple {
-  0%   { transform: scale(1);    box-shadow: 0 0 24px rgba(94,234,212,0.35); }
-  50%  { transform: scale(1.06); box-shadow: 0 0 50px rgba(94,234,212,0.6); }
-  100% { transform: scale(1);    box-shadow: 0 0 24px rgba(94,234,212,0.35); }
+.orb-canvas:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.25);
 }
