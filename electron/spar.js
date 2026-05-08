@@ -503,6 +503,12 @@ window.spar.onMessage((msg) => {
 
 window.spar.onFocusChange((focused) => {
   body.classList.toggle("unfocused", !focused);
+  // Clicks in another app don't dispatch a mousedown to this
+  // renderer, so the in-document outside-click handler can't see
+  // them. Hooking the OS-level blur is the only reliable way to
+  // close the menu when the user goes back to whatever they were
+  // doing.
+  if (!focused) closeConvMenu();
 });
 
 // Fetch state on first load and again every time the window
