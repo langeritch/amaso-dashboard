@@ -50,21 +50,32 @@ let streamingDiv = null;
 
 // ---- Mode toggle ---------------------------------------------------------
 
-function setMode(next) {
+// Apply a mode change locally (body class + cached var). Pure DOM
+// update with no IPC, used by both the user-click path and the
+// inbound spar:mode broadcast from main so the same code keeps the
+// CSS in sync regardless of who initiated the change.
+function applyMode(next) {
   if (next !== "chat" && next !== "voice") return;
   if (next === mode) return;
   mode = next;
   body.classList.toggle("mode-chat", next === "chat");
   body.classList.toggle("mode-voice", next === "voice");
-  // Tell main to resize the window. The renderer does the content
-  // swap immediately; the OS-animated resize lands a beat later and
-  // the layout is already correct under it.
+}
+
+function requestMode(next) {
+  if (next !== "chat" && next !== "voice") return;
+  if (next === mode) return;
+  // Optimistic so the UI doesn't lag the click; main will echo
+  // back via spar:mode and applyMode is idempotent.
+  applyMode(next);
   window.spar.setMode(next).catch(() => {});
 }
 
 modeBtn.addEventListener("click", () => {
-  setMode(mode === "chat" ? "voice" : "chat");
+  requestMode(mode === "chat" ? "voice" : "chat");
 });
+
+window.spar.onMode((next) => applyMode(next));
 
 // ---- Chat thread ---------------------------------------------------------
 

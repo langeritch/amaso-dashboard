@@ -23,9 +23,18 @@ html, body {
 
 body {
   display: flex; flex-direction: column;
+  transition: opacity 0.25s ease;
+}
+/* Background is scoped per-mode: chat mode keeps the dark frosted
+   panel for legible text, voice mode goes fully transparent so the
+   orb appears to float on the desktop with no visible window
+   chrome around it. */
+body.mode-chat {
   background: var(--bg);
   border-radius: 14px;
-  transition: opacity 0.25s ease;
+}
+body.mode-voice {
+  background: transparent;
 }
 body.unfocused { opacity: 0.72; }
 
@@ -34,6 +43,11 @@ body.unfocused { opacity: 0.72; }
   height: 22px;
   flex-shrink: 0;
 }
+/* Voice mode hides the drag-strip and lets the voice-pane itself
+   cover the whole window. The pane carries the drag region in
+   voice mode (see .voice-pane below) so the user can still pick up
+   and move the window by clicking anywhere outside the orb. */
+body.mode-voice .drag-strip { display: none; }
 .no-drag, .no-drag * { -webkit-app-region: no-drag; }
 
 .mode-toggle {
@@ -209,6 +223,7 @@ body.mode-voice .chat-pane { display: none; }
   flex: 1 1 auto;
   align-items: center; justify-content: center;
   position: relative;
+  -webkit-app-region: drag;
 }
 body.mode-voice .voice-pane { display: flex; }
 
@@ -219,6 +234,7 @@ body.mode-voice .voice-pane { display: flex; }
   cursor: pointer;
   outline: none;
   border-radius: 50%;
+  -webkit-app-region: no-drag;
 }
 .orb-canvas:focus-visible {
   box-shadow: 0 0 0 2px rgba(255,255,255,0.25);

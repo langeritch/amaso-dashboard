@@ -242,6 +242,24 @@ function buildContextMenu() {
       accelerator: "CmdOrCtrl+Shift+S",
       click: () => showSparWindow(),
     },
+    {
+      label: "Chat mode",
+      type: "radio",
+      checked: sparMode === "chat",
+      click: () => {
+        showSparWindow();
+        setSparMode("chat");
+      },
+    },
+    {
+      label: "Voice mode",
+      type: "radio",
+      checked: sparMode === "voice",
+      click: () => {
+        showSparWindow();
+        setSparMode("voice");
+      },
+    },
     { type: "separator" },
     {
       label: "Open dashboard",
@@ -472,23 +490,49 @@ function toggleSparWindow() {
 function setSparMode(next) {
   if (next !== "chat" && next !== "voice") return;
   if (!sparWindow || sparWindow.isDestroyed()) return;
-  if (next === sparMode) return;
+  if (next === sparMode) {
+    // Idempotent: still echo to the renderer so a stale body
+    // class catches up if it ever drifts.
+    try { sparWindow.webContents.send("spar:mode", sparMode); } catch {}
+    return;
+  }
   const target = next === "voice" ? SPAR_VOICE_SIZE : SPAR_CHAT_SIZE;
   const cur = sparWindow.getBounds();
   // Anchor the resize to the bottom-right corner so the window
   // stays under the cursor's mental model of "where the orb lives"
   // rather than springing back to the top-left of its previous
-  // bounds.
-  const newBounds = {
-    x: cur.x + cur.width - target.width,
-    y: cur.y + cur.height - target.height,
-    width: target.width,
-    height: target.height,
-  };
+  // bounds. Then clamp to the work area so the smaller voice
+  // window can never end up partly offscreen because of where
+  // the user dragged the chat window.
+  let x = cur.x + cur.width - target.width;
+  let y = cur.y + cur.height - target.height;
+  const display = screen.getDisplayMatching(cur);
+  const wa = display.workArea;
+  const margin = 8;
+  if (x + target.width > wa.x + wa.width - margin) {
+    x = wa.x + wa.width - target.width - margin;
+  }
+  if (x < wa.x + margin) x = wa.x + margin;
+  if (y + target.height > wa.y + wa.height - margin) {
+    y = wa.y + wa.height - target.height - margin;
+  }
+  if (y < wa.y + margin) y = wa.y + margin;
+  const newBounds = { x, y, width: target.width, height: target.height };
   // The animate flag is a no-op outside macOS; on macOS it gives the
   // mode transition the system's smooth window-resize animation.
   sparWindow.setBounds(newBounds, true);
   sparMode = next;
+  // Tell the renderer to flip body class + cached mode var. Sent
+  // unconditionally so menu-driven changes apply even when the
+  // renderer didn't initiate them.
+  try {
+    sparWindow.webContents.send("spar:mode", sparMode);
+  } catch {
+    /* webContents may be destroying */
+  }
+  // Tray menu has radio items keyed off sparMode; rebuild so the
+  // checkmark follows.
+  refreshTrayMenu();
 }
 
 // ---- IPC from the sparring partner --------------------------------------

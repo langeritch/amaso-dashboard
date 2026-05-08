@@ -27,4 +27,12 @@ contextBridge.exposeInMainWorld("spar", {
     ipcRenderer.on("spar:visible", handler);
     return () => ipcRenderer.removeListener("spar:visible", handler);
   },
+  // Fired by main whenever sparMode flips, including out-of-band
+  // changes triggered from the tray menu. Renderer reflects the
+  // body class without echoing back.
+  onMode: (cb) => {
+    const handler = (_evt, mode) => cb(mode);
+    ipcRenderer.on("spar:mode", handler);
+    return () => ipcRenderer.removeListener("spar:mode", handler);
+  },
 });
