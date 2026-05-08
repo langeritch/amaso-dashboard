@@ -29,6 +29,7 @@ const {
   session: electronSession,
   shell,
   systemPreferences,
+  globalShortcut,
 } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -58,6 +59,15 @@ let thinkingCount = 0; // commands currently in-flight — drives the tray badge
 // label shown in the dashboard's device list and is editable from the popover.
 let deviceId = null;
 let deviceName = null;
+
+// Sparring Partner window. Frameless, always-on-top, two-mode (chat
+// and voice) overlay that brokers spar.* messages to the same
+// WebSocket the rest of the companion uses.
+let sparWindow = null;
+let sparMode = "chat";
+const SPAR_CHAT_SIZE = { width: 380, height: 500 };
+const SPAR_VOICE_SIZE = { width: 200, height: 200 };
+const SPAR_SHORTCUT = "CommandOrControl+Shift+S";
 
 // ---- App lifecycle -------------------------------------------------------
 
@@ -97,6 +107,22 @@ app.whenReady().then(() => {
   if (duckingEnabled) startVad();
   session = loadStoredSession();
   if (session) connectToCloud();
+
+  // Global hotkey to summon the sparring partner from any app.
+  // Failures here are non-fatal: the tray menu entry remains a
+  // working fallback even if the OS refuses the shortcut.
+  try {
+    const ok = globalShortcut.register(SPAR_SHORTCUT, () => toggleSparWindow());
+    if (!ok) {
+      console.warn(`[amaso-companion] global shortcut ${SPAR_SHORTCUT} could not be registered`);
+    }
+  } catch (err) {
+    console.warn("[amaso-companion] globalShortcut.register threw:", err?.message || err);
+  }
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
 });
 
 function applyLaunchAtLoginSetting() {
@@ -143,6 +169,9 @@ app.on("before-quit", () => {
   // Best-effort restore so we don't leave other apps turned down if we
   // crash mid-duck.
   restoreOthers().catch(() => {});
+  // Flag so the spar window's `close` handler knows to actually
+  // close instead of preventing the close and hiding.
+  app.isQuitting = true;
 });
 
 // ---- Tray ---------------------------------------------------------------
@@ -206,6 +235,12 @@ function buildContextMenu() {
     {
       label: vadLabel(),
       enabled: false,
+    },
+    { type: "separator" },
+    {
+      label: "Show Sparring Partner",
+      accelerator: "CmdOrCtrl+Shift+S",
+      click: () => showSparWindow(),
     },
     { type: "separator" },
     {
@@ -334,6 +369,152 @@ function positionPopover() {
   const y = Math.round(trayBounds.y + trayBounds.height + 4);
   popover.setPosition(x, y, false);
 }
+
+// ---- Sparring Partner window --------------------------------------------
+//
+// A second frameless BrowserWindow that the user summons via a
+// global shortcut or the tray menu. Two modes (chat / voice) are
+// just different sizes plus a CSS body class on the renderer side;
+// the renderer brokers all spar.* WebSocket traffic through the
+// IPC handlers below so the existing companion-ws auth and CSWSH
+// guard stay intact.
+
+function getOrCreateSparWindow() {
+  if (sparWindow && !sparWindow.isDestroyed()) return sparWindow;
+
+  // Default to docking the window at the bottom-right of the
+  // primary display's work area; the user can drag it anywhere
+  // afterwards. Window position is not persisted on purpose,
+  // matching the popover's "always reposition near tray" behavior.
+  const display = screen.getPrimaryDisplay();
+  const wa = display.workArea;
+  const initSize = SPAR_CHAT_SIZE;
+  const x = wa.x + wa.width - initSize.width - 24;
+  const y = wa.y + wa.height - initSize.height - 24;
+
+  sparWindow = new BrowserWindow({
+    width: initSize.width,
+    height: initSize.height,
+    x,
+    y,
+    frame: false,
+    transparent: true,
+    vibrancy: "under-window",
+    visualEffectState: "active",
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    fullscreenable: false,
+    minimizable: false,
+    maximizable: false,
+    show: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(__dirname, "spar-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  sparWindow.setWindowButtonVisibility?.(false);
+  // Survive Mission Control / fullscreen apps so the user can call
+  // the sparring partner up over anything.
+  try {
+    sparWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } catch {
+    /* older Electron / Linux: best-effort */
+  }
+
+  sparWindow.on("focus", () => {
+    if (!sparWindow || sparWindow.isDestroyed()) return;
+    sparWindow.webContents.send("spar:focus", true);
+  });
+  sparWindow.on("blur", () => {
+    if (!sparWindow || sparWindow.isDestroyed()) return;
+    sparWindow.webContents.send("spar:focus", false);
+  });
+  // OS-level close (Cmd+W, etc.) hides instead of destroying so the
+  // next toggle reopens instantly with the chat thread intact.
+  sparWindow.on("close", (e) => {
+    if (app.isQuitting) return;
+    e.preventDefault();
+    sparWindow.hide();
+  });
+
+  sparWindow.loadFile(path.join(__dirname, "spar.html"));
+  sparMode = "chat";
+  return sparWindow;
+}
+
+function showSparWindow() {
+  const w = getOrCreateSparWindow();
+  if (!w.isVisible()) w.show();
+  w.focus();
+}
+
+function toggleSparWindow() {
+  if (sparWindow && !sparWindow.isDestroyed() && sparWindow.isVisible()) {
+    sparWindow.hide();
+    return;
+  }
+  showSparWindow();
+}
+
+function setSparMode(next) {
+  if (next !== "chat" && next !== "voice") return;
+  if (!sparWindow || sparWindow.isDestroyed()) return;
+  if (next === sparMode) return;
+  const target = next === "voice" ? SPAR_VOICE_SIZE : SPAR_CHAT_SIZE;
+  const cur = sparWindow.getBounds();
+  // Anchor the resize to the bottom-right corner so the window
+  // stays under the cursor's mental model of "where the orb lives"
+  // rather than springing back to the top-left of its previous
+  // bounds.
+  const newBounds = {
+    x: cur.x + cur.width - target.width,
+    y: cur.y + cur.height - target.height,
+    width: target.width,
+    height: target.height,
+  };
+  // The animate flag is a no-op outside macOS; on macOS it gives the
+  // mode transition the system's smooth window-resize animation.
+  sparWindow.setBounds(newBounds, true);
+  sparMode = next;
+}
+
+// ---- IPC from the sparring partner --------------------------------------
+
+ipcMain.handle("spar:send", (_evt, msg) => {
+  // Whitelist: only spar.* messages may travel through this handler.
+  // Anything else is a renderer bug or a tampering attempt; either
+  // way refuse rather than letting the spar window send arbitrary
+  // companion-ws traffic.
+  if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("spar.")) {
+    return { ok: false, error: "invalid spar message" };
+  }
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify(msg));
+      return { ok: true };
+    } catch (err) {
+      // Send raced with close; fall through to outbox for control
+      // messages, drop for audio chunks (stale samples are useless).
+    }
+  }
+  if (msg.type !== "spar.audio.chunk") outboxPush(msg);
+  return { ok: false, error: "ws_not_open" };
+});
+
+ipcMain.handle("spar:setMode", (_evt, mode) => {
+  setSparMode(mode);
+  return { ok: true, mode: sparMode };
+});
+
+ipcMain.handle("spar:hide", () => {
+  if (sparWindow && !sparWindow.isDestroyed()) sparWindow.hide();
+  return { ok: true };
+});
 
 // ---- IPC from the login popover -----------------------------------------
 
@@ -582,6 +763,23 @@ function connectToCloud() {
       // Seed the dashboard with current VAD status so its UI reflects
       // the companion's state without waiting for the first transition.
       sendEvent("status", { vadEnabled: duckingEnabled, vadStatus });
+      return;
+    }
+    // Sparring partner traffic. The dashboard pushes spar.state /
+    // spar.text.response / spar.audio.response / spar.transcript /
+    // spar.audio.response.end; we forward verbatim to the spar
+    // renderer (if open) and drop on the floor otherwise. The
+    // renderer is responsible for ignoring unknown subtypes so a
+    // dashboard that ships new spar.* subtypes doesn't require a
+    // companion update.
+    if (typeof msg.type === "string" && msg.type.startsWith("spar.")) {
+      if (sparWindow && !sparWindow.isDestroyed()) {
+        try {
+          sparWindow.webContents.send("spar:message", msg);
+        } catch {
+          /* webContents may be destroying */
+        }
+      }
       return;
     }
     if (msg.type === "command" && msg.id) {

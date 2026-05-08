@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' blob:; connect-src 'self';" />
+    <link rel="stylesheet" href="spar.css" />
+    <title>Amaso Spar</title>
+  </head>
+  <body class="mode-chat">
+    <!-- Top strip is the drag handle. The mode toggle floats above
+         it with -webkit-app-region: no-drag so clicks register. -->
+    <div class="drag-strip" aria-hidden="true"></div>
+    <div class="mode-toggle no-drag">
+      <button id="modeBtn" class="ghost-icon" type="button"
+        title="Switch mode" aria-label="Switch mode"></button>
+    </div>
+
+    <section class="chat-pane" aria-label="Chat">
+      <div class="messages" id="messages" aria-live="polite"></div>
+      <form class="composer no-drag" id="composer" autocomplete="off">
+        <button id="micBtn" type="button" class="mic-btn"
+          title="Toggle mic" aria-label="Toggle mic"></button>
+        <input id="text" type="text" placeholder="Spar with me…" autocomplete="off" />
+        <button id="sendBtn" type="submit" class="send-btn"
+          title="Send" aria-label="Send">→</button>
+      </form>
+    </section>
+
+    <section class="voice-pane no-drag" aria-label="Voice">
+      <div class="orb" id="orb" data-state="idle" role="button"
+        tabindex="0" aria-label="Toggle listening"></div>
+    </section>
+
+    <script src="spar.js"></script>
+  </body>
+</html>

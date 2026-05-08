@@ -65,6 +65,10 @@
       "vad.html",
       "audio-duck.js",
       "login.html",
+      "spar.html",
+      "spar.css",
+      "spar.js",
+      "spar-preload.js",
       "assets/**",
       "entitlements.mac.plist",
       "package.json"
