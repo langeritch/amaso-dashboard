@@ -44,6 +44,11 @@
           return;
         }
 
+        // Tell main we're ready. tick() only emits on speech edges, so
+        // without this the popover sits on "Starting mic…" forever
+        // when the user happens to be silent at boot.
+        window.amasoVad.sendState({ speaking: false, rms: 0 });
+
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const src = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
