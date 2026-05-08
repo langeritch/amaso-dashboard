@@ -48,6 +48,11 @@ import { broadcastSparMessage } from "./ws";
 import { SPAR_MODEL, buildSparSystemPrompt } from "./spar-prompt";
 import { transcribePcm } from "./whisper-bridge";
 import { getKokoroPort } from "./kokoro";
+import { visibleProjects, canAccessProject } from "./access";
+import { listSessionsForProject } from "./terminal-backend";
+import { detectWorkerState, STATE_TAIL_BYTES } from "./terminal-state";
+import { recentDispatches } from "./spar-dispatch";
+import { getDb } from "./db";
 import type { User } from "./db";
 
 const RELAY_HISTORY_LIMIT = 30;
@@ -84,7 +89,16 @@ export type CompanionToSparMessage =
       conversationId?: unknown;
       limit?: unknown;
     }
-  | { type: "spar.conversations.list" };
+  | { type: "spar.conversations.list" }
+  | { type: "spar.workers.request" }
+  | { type: "spar.workers.subscribe" }
+  | {
+      type: "spar.tasks.request";
+      resolved?: unknown;
+      tag?: unknown;
+      limit?: unknown;
+    }
+  | { type: "spar.tasks.subscribe" };
 
 export interface CompanionHistoryMessage {
   role: "user" | "assistant";
@@ -101,6 +115,23 @@ export interface CompanionConversationSummary {
   messageCount: number;
 }
 
+export interface CompanionWorkerSummary {
+  projectId: string;
+  name: string;
+  status: "idle" | "working" | "done" | "error";
+  lastActivity?: string;
+  lastDispatch?: string;
+}
+
+export interface CompanionTaskSummary {
+  id: string;
+  text: string;
+  tag?: string;
+  resolved: boolean;
+  projectId?: string;
+  createdAt: string;
+}
+
 export type SparToCompanionMessage =
   | { type: "spar.state"; state: SparRelayState }
   | { type: "spar.transcript"; text: string }
@@ -115,7 +146,11 @@ export type SparToCompanionMessage =
   | {
       type: "spar.conversations.response";
       conversations: CompanionConversationSummary[];
-    };
+    }
+  | { type: "spar.workers.response"; workers: CompanionWorkerSummary[] }
+  | { type: "spar.workers.update"; worker: CompanionWorkerSummary }
+  | { type: "spar.tasks.response"; tasks: CompanionTaskSummary[] }
+  | { type: "spar.tasks.update"; task: CompanionTaskSummary };
 
 const HISTORY_DEFAULT_LIMIT = 50;
 const HISTORY_MAX_LIMIT = 500;
@@ -134,6 +169,16 @@ export interface CompanionSparState {
   /** True while a turn is mid-flight (transcribe or LLM or TTS). Used
    *  to drop accidental double-sends. */
   busy: boolean;
+  /** Workers subscription. When non-null, a poll timer is running and
+   *  diffing snapshots; resetSparState clears the timer on close. */
+  workersTimer: NodeJS.Timeout | null;
+  /** Last serialised worker payload per projectId, used to suppress
+   *  spar.workers.update emissions when nothing actually changed
+   *  between polls. */
+  workersLastSent: Map<string, string>;
+  /** Tasks subscription. The unsubscribe handle returned by
+   *  registerTaskListener; cleared on close. */
+  tasksUnsub: (() => void) | null;
 }
 
 export function newCompanionSparState(): CompanionSparState {
@@ -143,6 +188,9 @@ export function newCompanionSparState(): CompanionSparState {
     audioBytes: 0,
     audioStartedAt: null,
     busy: false,
+    workersTimer: null,
+    workersLastSent: new Map(),
+    tasksUnsub: null,
   };
 }
 
@@ -222,6 +270,22 @@ export async function handleSparMessage(
       handleConversationsList(ctx);
       return;
     }
+    case "spar.workers.request": {
+      handleWorkersRequest(ctx);
+      return;
+    }
+    case "spar.workers.subscribe": {
+      handleWorkersSubscribe(ctx);
+      return;
+    }
+    case "spar.tasks.request": {
+      handleTasksRequest(ctx, msg);
+      return;
+    }
+    case "spar.tasks.subscribe": {
+      handleTasksSubscribe(ctx, msg);
+      return;
+    }
     case "spar.text": {
       const text = typeof msg.text === "string" ? msg.text.trim() : "";
       if (!text) return;
@@ -272,13 +336,28 @@ export async function handleSparMessage(
 
 /** Drop any buffered audio + reset the relay state. Called on socket
  *  close so a half-buffered turn doesn't survive into the next
- *  reconnect of the same device. */
+ *  reconnect of the same device. Also cancels any active workers /
+ *  tasks subscriptions so the per-process registries don't leak
+ *  callbacks targeting a dead socket. */
 export function resetSparState(state: CompanionSparState): void {
   state.audioChunks = [];
   state.audioBytes = 0;
   state.audioStartedAt = null;
   state.busy = false;
   state.state = "idle";
+  if (state.workersTimer) {
+    clearInterval(state.workersTimer);
+    state.workersTimer = null;
+  }
+  state.workersLastSent.clear();
+  if (state.tasksUnsub) {
+    try {
+      state.tasksUnsub();
+    } catch {
+      /* ignore */
+    }
+    state.tasksUnsub = null;
+  }
 }
 
 async function processAudioStop(
@@ -512,6 +591,329 @@ function handleConversationsList(ctx: HandleContext): void {
     type: "spar.conversations.response",
     conversations,
   });
+}
+
+// ----- Workers --------------------------------------------------------
+
+const WORKERS_POLL_MS = 5_000;
+
+function buildWorkerSummaries(user: User): CompanionWorkerSummary[] {
+  let projects: ReturnType<typeof visibleProjects>;
+  try {
+    projects = visibleProjects(user);
+  } catch {
+    return [];
+  }
+  // Cache the user's recent dispatches once per snapshot pass; the
+  // ring is bounded to MAX_LOG_PER_USER (20) so this is cheap.
+  let dispatches: ReturnType<typeof recentDispatches> = [];
+  try {
+    dispatches = recentDispatches(user.id);
+  } catch {
+    /* dispatch log read failures are non-fatal; workers still render */
+  }
+  const out: CompanionWorkerSummary[] = [];
+  for (const project of projects) {
+    let sessions: ReturnType<typeof listSessionsForProject> = [];
+    try {
+      sessions = listSessionsForProject(project.id);
+    } catch {
+      /* terminal-backend not ready, treat as no sessions */
+    }
+    let status: CompanionWorkerSummary["status"];
+    let lastActivityMs: number | null = null;
+    if (sessions.length === 0) {
+      status = "idle";
+    } else {
+      // Aggregate across multiple sessions: any "working" beats
+      // "done"; the panel renders one row per project, not per
+      // session, so we collapse here.
+      let anyWorking = false;
+      let anyDone = false;
+      for (const s of sessions) {
+        const tail = s.scrollback.slice(-STATE_TAIL_BYTES);
+        const detection = detectWorkerState(tail, s.sessionId, s.startedAt);
+        if (
+          detection.state === "thinking" ||
+          detection.state === "permission_gate" ||
+          detection.state === "awaiting_input"
+        ) {
+          anyWorking = true;
+        } else {
+          anyDone = true;
+        }
+        if (s.startedAt && (lastActivityMs == null || s.startedAt > lastActivityMs)) {
+          lastActivityMs = s.startedAt;
+        }
+      }
+      status = anyWorking ? "working" : anyDone ? "done" : "idle";
+    }
+    // The most recent dispatch for this project is a strong activity
+    // proxy too; bump lastActivity if it's more recent than the
+    // session start.
+    let lastDispatchPrompt: string | undefined;
+    for (const d of dispatches) {
+      if (d.projectId !== project.id) continue;
+      lastDispatchPrompt = d.prompt;
+      const stamp = d.completedAt ?? d.confirmedAt;
+      if (stamp && (lastActivityMs == null || stamp > lastActivityMs)) {
+        lastActivityMs = stamp;
+      }
+      break;
+    }
+    out.push({
+      projectId: project.id,
+      name: project.name,
+      status,
+      lastActivity:
+        lastActivityMs != null
+          ? new Date(lastActivityMs).toISOString()
+          : undefined,
+      lastDispatch: lastDispatchPrompt,
+    });
+  }
+  return out;
+}
+
+function workerSignature(w: CompanionWorkerSummary): string {
+  // Stable serialisation for the dedupe map. Field order matters; keep
+  // it identical between subscribe-time snapshot and poll-tick diff.
+  return JSON.stringify([w.status, w.lastActivity ?? "", w.lastDispatch ?? ""]);
+}
+
+function handleWorkersRequest(ctx: HandleContext): void {
+  const workers = buildWorkerSummaries(ctx.user);
+  ctx.send({ type: "spar.workers.response", workers });
+}
+
+function handleWorkersSubscribe(ctx: HandleContext): void {
+  // Initial snapshot immediately so the companion has data to render
+  // before the first poll tick fires.
+  const initial = buildWorkerSummaries(ctx.user);
+  ctx.send({ type: "spar.workers.response", workers: initial });
+  ctx.state.workersLastSent.clear();
+  for (const w of initial) {
+    ctx.state.workersLastSent.set(w.projectId, workerSignature(w));
+  }
+  // Replace any prior timer so re-subscribing is idempotent. The
+  // resetSparState call on close clears whichever timer is current.
+  if (ctx.state.workersTimer) clearInterval(ctx.state.workersTimer);
+  ctx.state.workersTimer = setInterval(() => {
+    let snap: CompanionWorkerSummary[] = [];
+    try {
+      snap = buildWorkerSummaries(ctx.user);
+    } catch (err) {
+      console.warn(
+        "[companion-spar] worker poll failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+      return;
+    }
+    for (const w of snap) {
+      const sig = workerSignature(w);
+      if (ctx.state.workersLastSent.get(w.projectId) === sig) continue;
+      ctx.state.workersLastSent.set(w.projectId, sig);
+      try {
+        ctx.send({ type: "spar.workers.update", worker: w });
+      } catch {
+        /* socket gone; close handler will sweep */
+      }
+    }
+  }, WORKERS_POLL_MS);
+}
+
+// ----- Tasks (remarks) ------------------------------------------------
+
+interface RemarkRowMin {
+  id: number;
+  user_id: number;
+  project_id: string;
+  body: string;
+  created_at: number;
+  resolved_at: number | null;
+  tags: string | null;
+}
+
+const TASKS_DEFAULT_LIMIT = 50;
+const TASKS_MAX_LIMIT = 200;
+
+function parseTagsField(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((x): x is string => typeof x === "string");
+  } catch {
+    return [];
+  }
+}
+
+function remarkRowToTaskSummary(r: RemarkRowMin): CompanionTaskSummary {
+  const tags = parseTagsField(r.tags);
+  return {
+    id: String(r.id),
+    text: r.body,
+    tag: tags.length > 0 ? tags[0] : undefined,
+    resolved: r.resolved_at != null,
+    projectId: r.project_id || undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+  };
+}
+
+function loadRemarkById(remarkId: number): RemarkRowMin | null {
+  return (
+    (getDb()
+      .prepare(
+        "SELECT id, user_id, project_id, body, created_at, resolved_at, tags FROM remarks WHERE id = ?",
+      )
+      .get(remarkId) as RemarkRowMin | undefined) ?? null
+  );
+}
+
+function fetchTasks(
+  user: User,
+  opts: { resolved?: boolean; tag?: string; limit?: number },
+): CompanionTaskSummary[] {
+  const limit = Math.max(
+    1,
+    Math.min(TASKS_MAX_LIMIT, Math.floor(opts.limit ?? TASKS_DEFAULT_LIMIT)),
+  );
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (opts.resolved === true) where.push("resolved_at IS NOT NULL");
+  if (opts.resolved === false) where.push("resolved_at IS NULL");
+  // Over-fetch when filtering by tag because tags are stored as JSON
+  // and SQLite's JSON1 isn't guaranteed across builds.
+  const fetchLimit = opts.tag ? Math.max(limit * 4, 100) : limit;
+  const sql = `
+    SELECT id, user_id, project_id, body, created_at, resolved_at, tags
+      FROM remarks
+     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+     ORDER BY created_at DESC
+     LIMIT ?
+  `;
+  const rows = getDb()
+    .prepare(sql)
+    .all(...params, fetchLimit) as RemarkRowMin[];
+  const tagFilter = opts.tag ? opts.tag.trim().toLowerCase() : "";
+  const visible = rows.filter((r) => canAccessProject(user, r.project_id));
+  let summaries = visible.map(remarkRowToTaskSummary);
+  if (tagFilter) {
+    summaries = summaries.filter((s) => {
+      const tags = parseTagsField(
+        // remarkRowToTaskSummary already collapsed to a single tag,
+        // but tagFilter should match ANY tag. Re-parse from the
+        // matching row to scan the full list.
+        rows.find((r) => String(r.id) === s.id)?.tags ?? null,
+      );
+      return tags.some((t) => t.toLowerCase() === tagFilter);
+    });
+  }
+  return summaries.slice(0, limit);
+}
+
+function handleTasksRequest(
+  ctx: HandleContext,
+  msg: Extract<CompanionToSparMessage, { type: "spar.tasks.request" }>,
+): void {
+  const resolved =
+    typeof msg.resolved === "boolean"
+      ? msg.resolved
+      : // Default per spec: unresolved only.
+        false;
+  const tag =
+    typeof msg.tag === "string" && msg.tag.trim().length > 0
+      ? msg.tag.trim()
+      : undefined;
+  const limit =
+    typeof msg.limit === "number" && Number.isFinite(msg.limit)
+      ? msg.limit
+      : undefined;
+  const tasks = fetchTasks(ctx.user, { resolved, tag, limit });
+  ctx.send({ type: "spar.tasks.response", tasks });
+}
+
+function handleTasksSubscribe(
+  ctx: HandleContext,
+  msg: Extract<CompanionToSparMessage, { type: "spar.tasks.subscribe" }>,
+): void {
+  // Initial snapshot. Default filter (unresolved, no tag, default
+  // limit) so the subscription mirrors what the request handler
+  // returns when called with no args. The companion can always send
+  // a tasks.request with custom filters for a one-off pull.
+  const tasks = fetchTasks(ctx.user, { resolved: false });
+  ctx.send({ type: "spar.tasks.response", tasks });
+
+  // Replace any prior subscription so re-subscribing is idempotent.
+  if (ctx.state.tasksUnsub) {
+    try {
+      ctx.state.tasksUnsub();
+    } catch {
+      /* ignore */
+    }
+  }
+  ctx.state.tasksUnsub = registerTaskListener((projectId, remarkId, action) => {
+    if (action === "deleted") {
+      // The wire protocol doesn't differentiate deletes; the companion
+      // will see the row vanish on the next tasks.request. Skipping
+      // here keeps the update stream additive-only.
+      return;
+    }
+    if (!canAccessProject(ctx.user, projectId)) return;
+    const row = loadRemarkById(remarkId);
+    if (!row) return;
+    try {
+      ctx.send({
+        type: "spar.tasks.update",
+        task: remarkRowToTaskSummary(row),
+      });
+    } catch {
+      /* socket gone; close handler will sweep */
+    }
+  });
+  // Touch msg so the no-unused-args lint stays quiet on a handler
+  // that intentionally takes the message for future filter args.
+  void msg;
+}
+
+// ----- Remark change subscribers --------------------------------------
+//
+// lib/ws.ts:broadcastRemark calls notifyRemarkChange after every
+// remark mutation that goes through the spar tools. We keep a
+// per-process listener registry here so each subscribed companion
+// socket gets a per-action callback without needing to poll the
+// remarks table itself.
+
+type RemarkChangeListener = (
+  projectId: string,
+  remarkId: number,
+  action: "added" | "deleted",
+) => void;
+
+const remarkListeners = new Set<RemarkChangeListener>();
+
+export function registerTaskListener(listener: RemarkChangeListener): () => void {
+  remarkListeners.add(listener);
+  return () => {
+    remarkListeners.delete(listener);
+  };
+}
+
+export function notifyRemarkChange(
+  projectId: string,
+  remarkId: number,
+  action: "added" | "deleted",
+): void {
+  for (const listener of remarkListeners) {
+    try {
+      listener(projectId, remarkId, action);
+    } catch (err) {
+      console.warn(
+        "[companion-spar] remark listener threw:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
 }
 
 async function streamTtsToCompanion(

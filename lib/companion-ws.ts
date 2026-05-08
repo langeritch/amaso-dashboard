@@ -150,7 +150,16 @@ type ClientMessage =
       conversationId?: unknown;
       limit?: unknown;
     }
-  | { type: "spar.conversations.list" };
+  | { type: "spar.conversations.list" }
+  | { type: "spar.workers.request" }
+  | { type: "spar.workers.subscribe" }
+  | {
+      type: "spar.tasks.request";
+      resolved?: unknown;
+      tag?: unknown;
+      limit?: unknown;
+    }
+  | { type: "spar.tasks.subscribe" };
 
 const SPAR_RELAY_TYPES = new Set<string>([
   "spar.text",
@@ -160,6 +169,10 @@ const SPAR_RELAY_TYPES = new Set<string>([
   "spar.state.request",
   "spar.history.request",
   "spar.conversations.list",
+  "spar.workers.request",
+  "spar.workers.subscribe",
+  "spar.tasks.request",
+  "spar.tasks.subscribe",
 ]);
 
 interface PendingCommand {

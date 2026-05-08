@@ -463,6 +463,16 @@ export function broadcastRemark(
   action: "added" | "deleted",
 ) {
   globalThis.__amasoWs?.broadcastRemark(projectId, filePath, remarkId, action);
+  // Also notify any companion-spar subscribers. Imported lazily to
+  // dodge the cycle (companion-spar-relay -> ws -> companion-spar-relay)
+  // and so this module stays usable from places the relay isn't.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const relay = require("./companion-spar-relay") as typeof import("./companion-spar-relay");
+    relay.notifyRemarkChange?.(projectId, remarkId, action);
+  } catch {
+    /* relay not loaded yet, fine */
+  }
 }
 
 export function broadcastChatMessage(channelId: number, message: MessageView) {
