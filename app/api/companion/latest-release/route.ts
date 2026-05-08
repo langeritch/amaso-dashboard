@@ -102,12 +102,12 @@ async function fetchLatestRelease(): Promise<CompanionReleaseInfo | null> {
 }
 
 export async function GET(): Promise<NextResponse> {
-  // Auth-gate: the install page is admin-only (see /admin/install). No
-  // reason to expose this endpoint anonymously, and it spends our
-  // GitHub-API budget. apiRequireUser is enough — we don't need to
-  // duplicate the admin check here, the page itself already gates the
-  // UI; any signed-in user hitting this directly would just see the
-  // same DMG URL the GitHub release page already serves publicly.
+  // Auth-gate: any signed-in user can see /install (the page renders
+  // the Claude Code prompt + a fallback DMG link for advanced users
+  // without Claude Code). No reason to expose this endpoint
+  // anonymously, and it spends our GitHub-API budget. apiRequireUser
+  // is enough — anyone hitting this directly would just see the same
+  // DMG URL the GitHub release page already serves publicly.
   const auth = await apiRequireUser();
   if (!auth.ok) return auth.res;
 

@@ -96,18 +96,21 @@ export default function SettingsPanel({ user }: { user: User }) {
 
       <CompanionDevicesSection />
 
+      <Section title="Install">
+        <Link
+          href="/install"
+          className="amaso-fx flex min-h-[48px] items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
+        >
+          <MonitorDown className="h-5 w-5" />
+          <span>Install Amaso Companion</span>
+        </Link>
+      </Section>
+
       {user.role === "admin" && (
         <Section title="Admin">
           <Link
-            href="/admin/install"
-            className="amaso-fx flex min-h-[48px] items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
-          >
-            <MonitorDown className="h-5 w-5" />
-            <span>Install app</span>
-          </Link>
-          <Link
             href="/admin/users"
-            className="amaso-fx flex min-h-[48px] items-center gap-3 border-t border-neutral-800/70 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
+            className="amaso-fx flex min-h-[48px] items-center gap-3 px-4 text-base text-neutral-300 hover:bg-neutral-900/70 hover:text-neutral-100"
           >
             <Shield className="h-5 w-5" />
             <span>Users</span>
