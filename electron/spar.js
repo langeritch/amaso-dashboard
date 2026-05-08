@@ -300,10 +300,30 @@ function activeConversation() {
   return conversations.find((c) => c && c.id === activeConversationId) || null;
 }
 
+// Dashboard sends `title`; older builds may have used `label`. Read
+// title first, fall back to label, then "Untitled" so a row that
+// somehow ships without either still renders.
+function conversationTitle(c) {
+  if (!c) return "";
+  if (typeof c.title === "string" && c.title) return c.title;
+  if (typeof c.label === "string" && c.label) return c.label;
+  return "";
+}
+
+// Dashboard sends `lastMessageAt`; older builds may have used
+// `updatedAt`. Same dual-read pattern.
+function conversationTimestamp(c) {
+  if (!c) return "";
+  if (typeof c.lastMessageAt === "string" && c.lastMessageAt) return c.lastMessageAt;
+  if (typeof c.updatedAt === "string" && c.updatedAt) return c.updatedAt;
+  return "";
+}
+
 function renderConvLabel() {
   const active = activeConversation();
-  convLabel.textContent = active && active.label
-    ? active.label
+  const title = conversationTitle(active);
+  convLabel.textContent = title
+    ? title
     : conversations.length === 0
       ? "Sparring"
       : "Untitled";
@@ -342,11 +362,11 @@ function renderConvMenu() {
 
     const name = document.createElement("div");
     name.className = "conv-name";
-    name.textContent = c.label || "Untitled";
+    name.textContent = conversationTitle(c) || "Untitled";
 
     const meta = document.createElement("div");
     meta.className = "conv-meta";
-    const ts = relativeTime(c.updatedAt);
+    const ts = relativeTime(conversationTimestamp(c));
     const last = typeof c.lastMessage === "string" ? c.lastMessage : "";
     meta.textContent = ts && last ? `${ts} · ${last}` : ts || last;
 
@@ -355,16 +375,17 @@ function renderConvMenu() {
       closeConvMenu();
       if (c.id === activeConversationId) return;
       // Optimistic switch so subsequent outbound messages tag the
-      // new conversation. The dashboard's spar.history reply will
-      // confirm and replace the thread; we clear locally first to
-      // avoid showing the previous conversation's tail underneath
-      // a not-yet-arrived history.
+      // new conversation. Dashboard has no dedicated switch message;
+      // re-issuing spar.history.request with the new id is how we
+      // pull the thread for the picked conversation. Clear the
+      // existing thread first so the previous conversation's tail
+      // doesn't bleed underneath the new one.
       activeConversationId = c.id;
       renderConvLabel();
       messagesEl.replaceChildren();
       streamingDiv = null;
       window.spar
-        .send({ type: "spar.conversation.switch", conversationId: c.id })
+        .send({ type: "spar.history.request", conversationId: c.id })
         .catch(() => {});
     });
     convMenu.append(item);
@@ -381,12 +402,15 @@ function renderConvMenu() {
   newItem.textContent = "+ New conversation";
   newItem.addEventListener("click", () => {
     closeConvMenu();
-    // Clear locally so the user sees a fresh thread immediately;
-    // server will reply with spar.conversation.created (containing
-    // the new id) and a fresh empty spar.history.
+    // Dashboard has no dedicated "new" message: a fresh
+    // conversation materializes server-side the first time the
+    // companion sends spar.text without a conversationId. Clear
+    // local state so subsequent outbound messages omit the id and
+    // the user sees an empty thread immediately.
+    activeConversationId = null;
+    renderConvLabel();
     messagesEl.replaceChildren();
     streamingDiv = null;
-    window.spar.send({ type: "spar.conversation.new" }).catch(() => {});
   });
   convMenu.append(newItem);
 }
@@ -442,7 +466,11 @@ function loadHistory(messages) {
 }
 
 function requestConversationState() {
-  window.spar.send({ type: "spar.conversations.request" }).catch(() => {});
+  window.spar.send({ type: "spar.conversations.list" }).catch(() => {});
+  // Omit conversationId so the dashboard returns the latest
+  // conversation's history (or an empty payload pinned to id "0"
+  // if the user has none yet). The history.response that comes
+  // back carries the canonical conversationId we treat as active.
   window.spar.send({ type: "spar.history.request" }).catch(() => {});
 }
 
@@ -470,30 +498,30 @@ window.spar.onMessage((msg) => {
       // chasing a stale playbackHead.
       playbackHead = playbackCtx ? playbackCtx.currentTime : 0;
       break;
-    case "spar.history":
+    case "spar.history.response":
       loadHistory(msg.messages);
-      if (typeof msg.conversationId === "string") {
+      if (typeof msg.conversationId === "string" && msg.conversationId !== "0") {
+        // The dashboard pins the empty-state response to id "0";
+        // ignore that so the renderer's activeConversationId stays
+        // null and the next outbound text creates a real one.
         activeConversationId = msg.conversationId;
         renderConvLabel();
       }
       break;
-    case "spar.conversations":
+    case "spar.conversations.response":
       if (Array.isArray(msg.conversations)) {
         conversations = msg.conversations;
-      }
-      if (typeof msg.activeId === "string") {
-        activeConversationId = msg.activeId;
-      }
-      renderConvLabel();
-      break;
-    case "spar.conversation.created":
-      if (typeof msg.conversationId === "string") {
-        activeConversationId = msg.conversationId;
+        // No activeId is sent; if our local pointer no longer
+        // exists in the list (e.g. the conversation was deleted
+        // out from under us), drop it so the next history request
+        // falls back to the latest conversation.
+        if (
+          activeConversationId &&
+          !conversations.some((c) => c && c.id === activeConversationId)
+        ) {
+          activeConversationId = null;
+        }
         renderConvLabel();
-        // Pull a fresh conversations list so the new entry appears
-        // in the picker. The dashboard will also push spar.history
-        // (likely empty) for the new id, which loadHistory handles.
-        window.spar.send({ type: "spar.conversations.request" }).catch(() => {});
       }
       break;
     default:
