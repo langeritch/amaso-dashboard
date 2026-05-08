@@ -41,8 +41,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
+
+import numpy as np
+import soxr
 
 from pyrogram import Client
 from pytgcalls import PyTgCalls, filters as tgfilters
@@ -60,7 +63,7 @@ import httpx
 
 import kokoro_bridge
 from filler_manager import FillerManager
-from stt_bridge import Utterance, WhisperSTT
+from stt_bridge import Utterance, WhisperSTT, WHISPER_SAMPLE_RATE
 
 
 HERE = Path(__file__).resolve().parent
@@ -274,6 +277,59 @@ async def get_status() -> dict[str, Any]:
     if _service is None:
         return {"state": "starting"}
     return _status_payload(_service.status)
+
+
+@app.post("/transcribe", dependencies=[Depends(_require_token)])
+async def post_transcribe(request: Request) -> dict[str, Any]:
+    """
+    One-shot Whisper transcription for arbitrary audio. Used by the
+    dashboard's companion sparring relay: the menu-bar app records
+    mic audio, sends raw 16 kHz mono s16le PCM bytes here, and we
+    return the recognised text. Reuses the same WhisperModel the
+    Telegram call path loads at startup; no new model load on call.
+
+    Body: raw bytes. Content-Type doesn't matter; we treat the body
+    as a contiguous mono s16le PCM buffer at the rate given in the
+    `X-Sample-Rate` header (defaults to 16000 if missing). Empty or
+    sub-100ms buffers return text:"" without invoking Whisper.
+    """
+    svc = _require_service()
+    raw = await request.body()
+    if not raw:
+        return {"text": "", "ms": 0, "skipped": "empty_body"}
+    sample_rate_hdr = request.headers.get("X-Sample-Rate", "").strip()
+    try:
+        sample_rate = int(sample_rate_hdr) if sample_rate_hdr else WHISPER_SAMPLE_RATE
+    except ValueError:
+        sample_rate = WHISPER_SAMPLE_RATE
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if samples.size == 0:
+        return {"text": "", "ms": 0, "skipped": "no_samples"}
+    duration_ms = int(samples.size * 1000 / max(1, sample_rate))
+    if duration_ms < 100:
+        return {"text": "", "ms": duration_ms, "skipped": "too_short"}
+    # Whisper wants float32 in [-1, 1] at 16 kHz. Resample if the
+    # incoming PCM is at a different rate (the companion may send 48
+    # kHz from a default mic config).
+    if sample_rate != WHISPER_SAMPLE_RATE:
+        floats = soxr.resample(
+            samples.astype(np.float32) / 32768.0, sample_rate, WHISPER_SAMPLE_RATE
+        ).astype(np.float32)
+    else:
+        floats = (samples.astype(np.float32) / 32768.0).astype(np.float32)
+
+    def _run() -> str:
+        segments, _info = svc.stt._model.transcribe(  # noqa: SLF001
+            floats,
+            language=os.environ.get("WHISPER_LANGUAGE") or None,
+            beam_size=1,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
+        return " ".join(seg.text.strip() for seg in segments).strip()
+
+    text = await asyncio.to_thread(_run)
+    return {"text": text, "ms": duration_ms}
 
 
 @app.post("/call", dependencies=[Depends(_require_token)])

@@ -57,6 +57,14 @@ import {
   registerTask as registerCompanionTask,
   summariseAckResult,
 } from "./companion-tasks";
+import {
+  handleSparMessage,
+  newCompanionSparState,
+  resetSparState,
+  type CompanionSparState,
+  type CompanionToSparMessage,
+  type SparToCompanionMessage,
+} from "./companion-spar-relay";
 
 export type CompanionCommand =
   | { type: "audio.duck"; level?: number }
@@ -131,7 +139,20 @@ type ClientMessage =
       deviceName?: string;
       platform?: string;
       arch?: string;
-    };
+    }
+  | { type: "spar.text"; text?: unknown }
+  | { type: "spar.audio.start" }
+  | { type: "spar.audio.chunk"; data?: unknown }
+  | { type: "spar.audio.stop" }
+  | { type: "spar.state.request" };
+
+const SPAR_RELAY_TYPES = new Set<string>([
+  "spar.text",
+  "spar.audio.start",
+  "spar.audio.chunk",
+  "spar.audio.stop",
+  "spar.state.request",
+]);
 
 interface PendingCommand {
   resolve: (ack: CompanionAck) => void;
@@ -162,6 +183,11 @@ interface ClientState {
    *  per-device dispatch ignores those sockets. The fan-out
    *  sendCommand keeps including them for backward compat. */
   deviceId: string | null;
+  /** Per-socket sparring relay state (audio buffer + UI state). The
+   *  spar.* protocol is bidirectional and stateful, so we keep this
+   *  on the socket rather than on the device record (a single device
+   *  might briefly have two open sockets across a reconnect). */
+  spar: CompanionSparState;
 }
 
 // Multiple sockets per user are allowed (user could reinstall, open two
@@ -173,6 +199,13 @@ const PONG_GRACE_MS = 45_000;
 const COMMAND_TIMEOUT_MS = 10_000;
 
 function send(ws: WebSocket, msg: ServerMessage): void {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+/** Sparring-relay sender. The relay messages live outside the
+ *  ServerMessage union (they're a parallel protocol with their own
+ *  lifecycle) so they get their own send shim. */
+function sendSparBack(ws: WebSocket, msg: SparToCompanionMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
@@ -337,6 +370,7 @@ function buildCompanionWs() {
       lastPong: Date.now(),
       listeners: new Set(),
       deviceId: null,
+      spar: newCompanionSparState(),
     };
     let clientsForUser = byUser.get(user.id);
     if (!clientsForUser) {
@@ -460,6 +494,29 @@ function buildCompanionWs() {
             console.error("[companion-ws] listener threw", err);
           }
         }
+        return;
+      }
+      // Sparring-partner relay. These messages are NOT registered as
+      // companion tasks (they're conversational input/output, not
+      // tool dispatches the operator wants surfaced in the workers
+      // panel). The relay owns audio buffering, transcription, the
+      // LLM call, and TTS streaming back; this site is just the
+      // routing layer.
+      if (typeof msg.type === "string" && SPAR_RELAY_TYPES.has(msg.type)) {
+        const sender = (out: SparToCompanionMessage) => sendSparBack(ws, out);
+        // Fire-and-forget: handleSparMessage handles its own error
+        // reporting (state transitions back to idle on any failure).
+        // Awaiting here would serialise audio.chunk processing, which
+        // would defeat the chunk-as-it-arrives buffering.
+        void handleSparMessage(
+          { user, state: state.spar, send: sender },
+          msg as CompanionToSparMessage,
+        ).catch((err) => {
+          console.warn(
+            `[companion-ws] spar relay threw user=${user.id} type=${msg.type}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        });
       }
     });
 
@@ -470,6 +527,9 @@ function buildCompanionWs() {
         pending.resolve({ id: "", ok: false, error: "socket closed" });
       }
       state.pending.clear();
+      // Drop any half-buffered audio + reset relay state so a future
+      // reconnect of the same device starts clean.
+      resetSparState(state.spar);
       const set = byUser.get(user.id);
       if (set) {
         set.delete(state);
