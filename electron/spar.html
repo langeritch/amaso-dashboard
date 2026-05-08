@@ -24,6 +24,14 @@
       <button id="modeBtn" class="ghost-icon" type="button"
         title="Switch mode" aria-label="Switch mode"></button>
     </div>
+    <!-- Audio-priority indicator. Shows whether the dashboard has
+         routed the active audio destination to this companion (green)
+         or yielded to another destination (amber). Hidden when idle
+         so chat mode doesn't carry visual noise. The dot is the only
+         place this state surfaces; tooltip names the holder when
+         spar.audio.routing tells us who took over. -->
+    <div id="audioIndicator" class="audio-indicator idle no-drag"
+      title="Audio: idle" aria-label="Audio: idle"></div>
 
     <section class="chat-pane" aria-label="Chat">
       <div class="messages" id="messages" aria-live="polite"></div>

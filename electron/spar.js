@@ -19,6 +19,7 @@ const orbCanvas = document.getElementById("orbCanvas");
 const convPill = document.getElementById("convPill");
 const convLabel = document.getElementById("convLabel");
 const convMenu = document.getElementById("convMenu");
+const audioIndicator = document.getElementById("audioIndicator");
 const body = document.body;
 
 const MAX_MESSAGES = 20;
@@ -27,6 +28,21 @@ const CHUNK_MS = 250;
 const CHUNK_SAMPLES = (TARGET_SAMPLE_RATE * CHUNK_MS) / 1000; // 4000
 
 let mode = "chat";
+
+// Audio-routing state. The dashboard arbitrates priority across
+// Telegram, the dashboard's own voice tab, and this companion; we
+// only track the locally-relevant view of that arbitration here:
+//   "idle"     — companion is not currently a destination
+//   "acquired" — companion is the active destination (mic + TTS run)
+//   "yielded"  — another destination took over (mic + TTS suspended)
+// Routing only kicks in for voice mode; chat mode mic remains a
+// manual push-to-talk transcription utility independent of priority.
+let audioPriority = "idle";
+let audioRouting = null; // last spar.audio.routing payload, for tooltip
+// True if mic was running when we got yielded — drives the
+// auto-resume on the next acquired so the user doesn't have to
+// re-click the orb every time Telegram releases the mic.
+let pausedByYield = false;
 
 // Conversation state. activeConversationId is included on every
 // outbound spar.text and spar.audio.* message so the dashboard can
@@ -54,12 +70,28 @@ let streamingDiv = null;
 // update with no IPC, used by both the user-click path and the
 // inbound spar:mode broadcast from main so the same code keeps the
 // CSS in sync regardless of who initiated the change.
+//
+// Voice mode entry/exit also gates the dashboard's audio router:
+// spar.voice.start tells the server to allocate this companion as a
+// destination, spar.voice.stop relinquishes it. Chat mode never
+// claims a destination — its mic is local-only.
 function applyMode(next) {
   if (next !== "chat" && next !== "voice") return;
   if (next === mode) return;
+  const prev = mode;
   mode = next;
   body.classList.toggle("mode-chat", next === "chat");
   body.classList.toggle("mode-voice", next === "voice");
+  if (next === "voice") {
+    window.spar.send({ type: "spar.voice.start" }).catch(() => {});
+  } else if (prev === "voice") {
+    window.spar.send({ type: "spar.voice.stop" }).catch(() => {});
+    if (micActive) stopMic();
+    pausedByYield = false;
+    audioPriority = "idle";
+    audioRouting = null;
+    updatePriorityIndicator();
+  }
 }
 
 function requestMode(next) {
@@ -126,6 +158,11 @@ composer.addEventListener("submit", (e) => {
 
 async function startMic() {
   if (micActive) return;
+  // In voice mode the dashboard's audio router decides who owns the
+  // mic. If we've been yielded to another destination, eat the click
+  // — the indicator already tells the user why nothing happens.
+  // Chat mode is unaffected: its mic is a local transcription tool.
+  if (mode === "voice" && audioPriority === "yielded") return;
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -282,6 +319,11 @@ function ensurePlaybackCtx() {
 }
 
 async function enqueueAudio(b64) {
+  // The server shouldn't push audio to a yielded destination, but
+  // race a routing flip against an in-flight chunk and a stale
+  // sample could still arrive — drop it rather than playing over
+  // whatever destination just took priority.
+  if (audioPriority === "yielded") return;
   const ctx = ensurePlaybackCtx();
   let buf;
   try {
@@ -328,6 +370,78 @@ const flagsRef = {
     autopilot: false,
   },
 };
+
+// ---- Audio priority -----------------------------------------------------
+
+function applyAudioPriority(next) {
+  if (next !== "acquired" && next !== "yielded" && next !== "idle") return;
+  if (next === audioPriority) return;
+  audioPriority = next;
+  updatePriorityIndicator();
+  if (next === "yielded") {
+    // Stop mic immediately and remember it was running so the next
+    // acquired auto-restarts capture. Tear the playback context down
+    // so any in-flight TTS buffers are dropped — re-creating it on
+    // the next chunk after re-acquire is cheaper than trying to
+    // dovetail buffers across a routing flip.
+    if (micActive) {
+      pausedByYield = true;
+      stopMic();
+    }
+    if (playbackCtx) {
+      try { playbackCtx.close(); } catch {}
+      playbackCtx = null;
+      playbackHead = 0;
+      analyserRef.current = null;
+    }
+  } else if (next === "acquired") {
+    if (pausedByYield && mode === "voice") {
+      pausedByYield = false;
+      // Best-effort resume; if the mic permission has since been
+      // revoked, startMic will surface the failure on its own.
+      startMic();
+    } else {
+      pausedByYield = false;
+    }
+  } else {
+    // idle — voice mode left or destination released entirely.
+    pausedByYield = false;
+  }
+}
+
+// Pull the human-readable holder name out of whatever shape the
+// dashboard ships for spar.audio.routing. We try a few common field
+// names so an evolving server protocol doesn't require a companion
+// update just to keep the tooltip readable.
+function routingHolderLabel() {
+  const r = audioRouting;
+  if (!r || typeof r !== "object") return "";
+  const candidates = [r.activeDestination, r.active, r.destination, r.holder, r.priority];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+    if (c && typeof c === "object" && typeof c.name === "string" && c.name.trim()) {
+      return c.name.trim();
+    }
+  }
+  return "";
+}
+
+function updatePriorityIndicator() {
+  if (!audioIndicator) return;
+  audioIndicator.classList.remove("idle", "acquired", "yielded");
+  audioIndicator.classList.add(audioPriority);
+  let title;
+  if (audioPriority === "acquired") {
+    title = "Audio active on this companion";
+  } else if (audioPriority === "yielded") {
+    const who = routingHolderLabel();
+    title = who ? `Audio yielded to ${who}` : "Audio yielded to another destination";
+  } else {
+    title = "Audio idle";
+  }
+  audioIndicator.title = title;
+  audioIndicator.setAttribute("aria-label", title);
+}
 
 function setOrbState(state) {
   if (state !== "idle" && state !== "listening" && state !== "thinking" && state !== "speaking") {
@@ -711,6 +825,16 @@ window.spar.onMessage((msg) => {
         activeConversationId = msg.conversationId;
         renderConvLabel();
       }
+      break;
+    case "spar.audio.acquired":
+      applyAudioPriority("acquired");
+      break;
+    case "spar.audio.yielded":
+      applyAudioPriority("yielded");
+      break;
+    case "spar.audio.routing":
+      audioRouting = msg;
+      updatePriorityIndicator();
       break;
     case "spar.conversations.response":
       if (Array.isArray(msg.conversations)) {
