@@ -29,6 +29,34 @@ const CHUNK_SAMPLES = (TARGET_SAMPLE_RATE * CHUNK_MS) / 1000; // 4000
 
 let mode = "chat";
 
+// Voice-mode call state. Voice mode's orb is a continuous "call":
+// click once to open the call (mic stays open, VAD auto-segments
+// turns), click again to hang up. Chat mode keeps push-to-talk.
+let callMode = false;
+let serverBusy = false; // true while spar.state is thinking or speaking
+
+// VAD tuning for the call-mode auto-segmenter. Conservative enough to
+// avoid splitting on within-utterance pauses, tight enough that the
+// user doesn't have to wait forever after a sentence to see the
+// transcript come back.
+const VAD_THRESHOLD = 0.012;
+const VAD_MIN_SPEECH_MS = 180;
+const VAD_HANGOVER_MS = 700;
+const VAD_PREROLL_MS = 240;
+const VAD_PREROLL_CHUNKS = Math.max(1, Math.ceil(VAD_PREROLL_MS / CHUNK_MS));
+
+let vadSpeaking = false;
+let vadSpeechCandidateAt = 0;
+let vadLastLoudAt = 0;
+let vadPreroll = []; // ring buffer of recent base64 chunks for word-onset capture
+
+function vadReset() {
+  vadSpeaking = false;
+  vadSpeechCandidateAt = 0;
+  vadLastLoudAt = 0;
+  vadPreroll = [];
+}
+
 // Audio-routing state. The dashboard arbitrates priority across
 // Telegram, the dashboard's own voice tab, and this companion; we
 // only track the locally-relevant view of that arbitration here:
@@ -86,10 +114,12 @@ function applyMode(next) {
     window.spar.send({ type: "spar.voice.start" }).catch(() => {});
   } else if (prev === "voice") {
     window.spar.send({ type: "spar.voice.stop" }).catch(() => {});
-    if (micActive) stopMic();
+    if (callMode) endCall();
+    else if (micActive) stopMic();
     pausedByYield = false;
     audioPriority = "idle";
     audioRouting = null;
+    serverBusy = false;
     updatePriorityIndicator();
   }
 }
@@ -156,13 +186,14 @@ composer.addEventListener("submit", (e) => {
 // accumulates 250 ms windows, converts Float32 → Int16 little-endian
 // PCM, base64s, ships via spar.audio.chunk.
 
-async function startMic() {
+async function startMic(opts = {}) {
   if (micActive) return;
   // In voice mode the dashboard's audio router decides who owns the
   // mic. If we've been yielded to another destination, eat the click
   // — the indicator already tells the user why nothing happens.
   // Chat mode is unaffected: its mic is a local transcription tool.
   if (mode === "voice" && audioPriority === "yielded") return;
+  const skipStart = !!opts.skipStart;
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -197,7 +228,69 @@ async function startMic() {
         micAccumLen = tail.length;
         const i16 = floatToInt16(head);
         const b64 = bufferToBase64(i16.buffer);
-        window.spar.send(withConversation({ type: "spar.audio.chunk", data: b64 })).catch(() => {});
+
+        if (callMode) {
+          // VAD-gated send: only ship audio while the user is
+          // actually speaking, and frame each utterance with its own
+          // start/stop so whisper transcribes one turn at a time.
+          let sum = 0;
+          for (let i = 0; i < head.length; i += 1) sum += head[i] * head[i];
+          const rms = Math.sqrt(sum / head.length);
+          const now = performance.now();
+          const loud = rms > VAD_THRESHOLD;
+          if (loud) vadLastLoudAt = now;
+
+          if (vadSpeaking) {
+            window.spar
+              .send(withConversation({ type: "spar.audio.chunk", data: b64 }))
+              .catch(() => {});
+            if (now - vadLastLoudAt > VAD_HANGOVER_MS) {
+              // End of utterance — close the turn so the dashboard
+              // runs whisper on what we've buffered. State falls
+              // back to "thinking" via the dashboard's spar.state.
+              vadSpeaking = false;
+              vadSpeechCandidateAt = 0;
+              window.spar
+                .send(withConversation({ type: "spar.audio.stop" }))
+                .catch(() => {});
+            }
+          } else if (loud && !serverBusy) {
+            if (!vadSpeechCandidateAt) vadSpeechCandidateAt = now;
+            if (now - vadSpeechCandidateAt >= VAD_MIN_SPEECH_MS) {
+              // Speech onset confirmed. Open the turn, flush the
+              // pre-roll so whisper sees the leading consonant, and
+              // ship the current chunk in the same flush.
+              vadSpeaking = true;
+              vadSpeechCandidateAt = 0;
+              window.spar
+                .send(withConversation({ type: "spar.audio.start" }))
+                .catch(() => {});
+              for (const p of vadPreroll) {
+                window.spar
+                  .send(withConversation({ type: "spar.audio.chunk", data: p }))
+                  .catch(() => {});
+              }
+              vadPreroll = [];
+              window.spar
+                .send(withConversation({ type: "spar.audio.chunk", data: b64 }))
+                .catch(() => {});
+            } else {
+              vadPreroll.push(b64);
+              if (vadPreroll.length > VAD_PREROLL_CHUNKS) vadPreroll.shift();
+            }
+          } else {
+            // Silent (or assistant is busy) — buffer for pre-roll
+            // but don't send; reset any half-formed onset candidate.
+            vadSpeechCandidateAt = 0;
+            vadPreroll.push(b64);
+            if (vadPreroll.length > VAD_PREROLL_CHUNKS) vadPreroll.shift();
+          }
+        } else {
+          // Push-to-talk path — ship every chunk while mic is open.
+          window.spar
+            .send(withConversation({ type: "spar.audio.chunk", data: b64 }))
+            .catch(() => {});
+        }
       }
     };
 
@@ -211,7 +304,9 @@ async function startMic() {
     micActive = true;
     micBtn.classList.add("active");
     setOrbState("listening");
-    window.spar.send(withConversation({ type: "spar.audio.start" })).catch(() => {});
+    if (!skipStart) {
+      window.spar.send(withConversation({ type: "spar.audio.start" })).catch(() => {});
+    }
   } catch (err) {
     console.warn("[spar] mic start failed:", (err && err.message) || err);
     micActive = false;
@@ -220,8 +315,9 @@ async function startMic() {
   }
 }
 
-function stopMic() {
+function stopMic(opts = {}) {
   if (!micActive) return;
+  const skipStop = !!opts.skipStop;
   try { micProc && micProc.disconnect(); } catch {}
   try { micSource && micSource.disconnect(); } catch {}
   try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch {}
@@ -234,7 +330,9 @@ function stopMic() {
   micAccumLen = 0;
   micActive = false;
   micBtn.classList.remove("active");
-  window.spar.send(withConversation({ type: "spar.audio.stop" })).catch(() => {});
+  if (!skipStop) {
+    window.spar.send(withConversation({ type: "spar.audio.stop" })).catch(() => {});
+  }
   setOrbState("idle");
 }
 
@@ -243,12 +341,44 @@ function toggleMic() {
   else startMic();
 }
 
+// Voice-mode call lifecycle. Click the orb to open a continuous call;
+// VAD inside onaudioprocess auto-segments each utterance. Click again
+// to hang up, which flushes any in-progress turn so the user's last
+// sentence still gets transcribed.
+function startCall() {
+  if (callMode) return;
+  callMode = true;
+  vadReset();
+  startMic({ skipStart: true });
+}
+
+function endCall() {
+  if (!callMode) return;
+  if (vadSpeaking) {
+    window.spar.send(withConversation({ type: "spar.audio.stop" })).catch(() => {});
+  }
+  callMode = false;
+  vadReset();
+  stopMic({ skipStop: true });
+}
+
+function toggleOrb() {
+  // In voice mode the orb runs the call; in chat mode the canvas
+  // isn't visible anyway, but fall back to PTT for safety.
+  if (mode === "voice") {
+    if (callMode) endCall();
+    else startCall();
+  } else {
+    toggleMic();
+  }
+}
+
 micBtn.addEventListener("click", toggleMic);
-orbCanvas.addEventListener("click", toggleMic);
+orbCanvas.addEventListener("click", toggleOrb);
 orbCanvas.addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " ") {
     e.preventDefault();
-    toggleMic();
+    toggleOrb();
   }
 });
 
@@ -379,12 +509,15 @@ function applyAudioPriority(next) {
   audioPriority = next;
   updatePriorityIndicator();
   if (next === "yielded") {
-    // Stop mic immediately and remember it was running so the next
-    // acquired auto-restarts capture. Tear the playback context down
-    // so any in-flight TTS buffers are dropped — re-creating it on
-    // the next chunk after re-acquire is cheaper than trying to
-    // dovetail buffers across a routing flip.
-    if (micActive) {
+    // Stop mic immediately and remember whether we were in a call so
+    // re-acquire can restore the same state (a chat-mode PTT turn
+    // that was mid-stream just dies — the user can re-press). Drop
+    // the playback context so in-flight TTS buffers from the
+    // previous priority window don't bleed into whoever takes over.
+    if (callMode) {
+      pausedByYield = true;
+      endCall();
+    } else if (micActive) {
       pausedByYield = true;
       stopMic();
     }
@@ -397,9 +530,9 @@ function applyAudioPriority(next) {
   } else if (next === "acquired") {
     if (pausedByYield && mode === "voice") {
       pausedByYield = false;
-      // Best-effort resume; if the mic permission has since been
-      // revoked, startMic will surface the failure on its own.
-      startMic();
+      // Best-effort resume of whichever flow was running. Permission
+      // failures surface inside startMic / startCall.
+      startCall();
     } else {
       pausedByYield = false;
     }
@@ -798,7 +931,14 @@ window.spar.onMessage((msg) => {
   if (!msg || typeof msg.type !== "string") return;
   switch (msg.type) {
     case "spar.state":
-      if (typeof msg.state === "string") setOrbState(msg.state);
+      if (typeof msg.state === "string") {
+        setOrbState(msg.state);
+        // Block VAD speech onset while the assistant is mid-turn —
+        // the relay drops chunks unless state is "listening", and a
+        // second audio.start would unconditionally cancel the
+        // in-flight thinking turn.
+        serverBusy = msg.state === "thinking" || msg.state === "speaking";
+      }
       break;
     case "spar.text.response":
       if (typeof msg.text === "string") appendStream(msg.text, !!msg.final);
