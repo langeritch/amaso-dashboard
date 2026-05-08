@@ -39,8 +39,10 @@ import { loadBrainContext } from "./spar-brain";
 import {
   appendMessage as appendSparMessage,
   createConversation as createSparConversation,
+  getConversation as getSparConversation,
   getRecentMessages,
   latestConversationId,
+  listConversations,
 } from "./spar-conversations";
 import { broadcastSparMessage } from "./ws";
 import { SPAR_MODEL, buildSparSystemPrompt } from "./spar-prompt";
@@ -72,18 +74,52 @@ export type SparRelayState =
   | "speaking";
 
 export type CompanionToSparMessage =
-  | { type: "spar.text"; text?: unknown }
+  | { type: "spar.text"; text?: unknown; conversationId?: unknown }
   | { type: "spar.audio.start" }
   | { type: "spar.audio.chunk"; data?: unknown }
-  | { type: "spar.audio.stop" }
-  | { type: "spar.state.request" };
+  | { type: "spar.audio.stop"; conversationId?: unknown }
+  | { type: "spar.state.request" }
+  | {
+      type: "spar.history.request";
+      conversationId?: unknown;
+      limit?: unknown;
+    }
+  | { type: "spar.conversations.list" };
+
+export interface CompanionHistoryMessage {
+  role: "user" | "assistant";
+  text: string;
+  /** ISO 8601 timestamp string. */
+  timestamp: string;
+}
+
+export interface CompanionConversationSummary {
+  id: string;
+  title?: string;
+  lastMessage?: string;
+  lastMessageAt?: string;
+  messageCount: number;
+}
 
 export type SparToCompanionMessage =
   | { type: "spar.state"; state: SparRelayState }
   | { type: "spar.transcript"; text: string }
   | { type: "spar.text.response"; text: string; final: boolean }
   | { type: "spar.audio.response"; data: string }
-  | { type: "spar.audio.response.end" };
+  | { type: "spar.audio.response.end" }
+  | {
+      type: "spar.history.response";
+      conversationId: string;
+      messages: CompanionHistoryMessage[];
+    }
+  | {
+      type: "spar.conversations.response";
+      conversations: CompanionConversationSummary[];
+    };
+
+const HISTORY_DEFAULT_LIMIT = 50;
+const HISTORY_MAX_LIMIT = 500;
+const CONVERSATIONS_LIST_LIMIT = 100;
 
 /** Per-device state. Lives on the companion-ws ClientState; this
  *  module just owns the shape and the helpers that mutate it. */
@@ -128,6 +164,42 @@ function setState(ctx: HandleContext, next: SparRelayState): void {
   }
 }
 
+/** Parse a conversation id off the wire. The companion sends them as
+ *  strings (JSON-friendly) but spar_messages keys on integers, so we
+ *  coerce + validate here. Returns null on anything non-numeric so
+ *  the caller can fall back to the latest conversation. */
+function parseConversationId(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const n = Number(trimmed);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+  }
+  return null;
+}
+
+function deriveConversationTitle(
+  explicit: string | null,
+  preview: string | null,
+  createdAt: number,
+): string {
+  if (explicit && explicit.trim().length > 0) {
+    return explicit.trim().slice(0, 60);
+  }
+  if (preview && preview.trim().length > 0) {
+    return preview.trim().slice(0, 60);
+  }
+  return new Date(createdAt).toISOString().slice(0, 10);
+}
+
+function isoOrEmpty(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString();
+}
+
 /**
  * Handle every spar.* message from a single companion device. The
  * caller (companion-ws) is responsible for narrowing the message
@@ -142,13 +214,21 @@ export async function handleSparMessage(
     case "spar.state.request":
       ctx.send({ type: "spar.state", state: ctx.state.state });
       return;
+    case "spar.history.request": {
+      handleHistoryRequest(ctx, msg);
+      return;
+    }
+    case "spar.conversations.list": {
+      handleConversationsList(ctx);
+      return;
+    }
     case "spar.text": {
       const text = typeof msg.text === "string" ? msg.text.trim() : "";
       if (!text) return;
       if (ctx.state.busy) return;
       ctx.state.busy = true;
       try {
-        await runTextTurn(ctx, text);
+        await runTextTurn(ctx, text, parseConversationId(msg.conversationId));
       } finally {
         ctx.state.busy = false;
       }
@@ -180,7 +260,7 @@ export async function handleSparMessage(
       if (ctx.state.busy) return;
       ctx.state.busy = true;
       try {
-        await processAudioStop(ctx);
+        await processAudioStop(ctx, parseConversationId(msg.conversationId));
       } finally {
         ctx.state.busy = false;
       }
@@ -201,7 +281,10 @@ export function resetSparState(state: CompanionSparState): void {
   state.state = "idle";
 }
 
-async function processAudioStop(ctx: HandleContext): Promise<void> {
+async function processAudioStop(
+  ctx: HandleContext,
+  preferredConversationId: number | null,
+): Promise<void> {
   const pcm = Buffer.concat(ctx.state.audioChunks);
   ctx.state.audioChunks = [];
   ctx.state.audioBytes = 0;
@@ -231,17 +314,29 @@ async function processAudioStop(ctx: HandleContext): Promise<void> {
     return;
   }
   ctx.send({ type: "spar.transcript", text });
-  await runTextTurn(ctx, text);
+  await runTextTurn(ctx, text, preferredConversationId);
 }
 
-async function runTextTurn(ctx: HandleContext, text: string): Promise<void> {
+async function runTextTurn(
+  ctx: HandleContext,
+  text: string,
+  preferredConversationId: number | null,
+): Promise<void> {
   const userId = ctx.user.id;
 
-  // Resolve / create the active conversation for this user. Companion
-  // turns share the SAME conversation as the browser spar so the
-  // agent's context follows the user across devices. Fall back to
-  // creating one when this is the user's very first turn.
-  let conversationId = latestConversationId(userId);
+  // Resolve the conversation. Order of preference:
+  //   1. Caller-supplied id (for switching between threads).
+  //   2. Latest conversation for this user.
+  //   3. Fresh conversation if this is the user's first turn.
+  // The id is validated against ownership via getSparConversation;
+  // if the companion sent a stale or someone else's id we silently
+  // fall back instead of erroring out, so the turn still lands.
+  let conversationId: number | null = null;
+  if (preferredConversationId != null) {
+    const owned = getSparConversation(userId, preferredConversationId);
+    if (owned) conversationId = owned.id;
+  }
+  if (conversationId == null) conversationId = latestConversationId(userId);
   if (conversationId == null) {
     conversationId = createSparConversation(userId, null).id;
   }
@@ -354,6 +449,69 @@ async function runTextTurn(ctx: HandleContext, text: string): Promise<void> {
   }
   ctx.send({ type: "spar.audio.response.end" });
   setState(ctx, "idle");
+}
+
+function handleHistoryRequest(
+  ctx: HandleContext,
+  msg: Extract<CompanionToSparMessage, { type: "spar.history.request" }>,
+): void {
+  const userId = ctx.user.id;
+  let conversationId = parseConversationId(msg.conversationId);
+  if (conversationId != null) {
+    const owned = getSparConversation(userId, conversationId);
+    if (!owned) conversationId = null;
+  }
+  if (conversationId == null) conversationId = latestConversationId(userId);
+  if (conversationId == null) {
+    // No conversations yet for this user. Send back an empty history
+    // pinned to id "0" so the companion can render its empty state
+    // without a second round-trip.
+    ctx.send({
+      type: "spar.history.response",
+      conversationId: "0",
+      messages: [],
+    });
+    return;
+  }
+  let limit = HISTORY_DEFAULT_LIMIT;
+  if (typeof msg.limit === "number" && Number.isFinite(msg.limit)) {
+    limit = Math.max(1, Math.min(HISTORY_MAX_LIMIT, Math.floor(msg.limit)));
+  }
+  // getRecentMessages already returns oldest-first (ASC after the
+  // inner LIMIT slice), which matches the protocol's "oldest first"
+  // contract; no need to re-sort here.
+  const rows = getRecentMessages(conversationId, limit);
+  const messages: CompanionHistoryMessage[] = rows
+    .filter((r) => r.role === "user" || r.role === "assistant")
+    .map((r) => ({
+      role: r.role === "assistant" ? "assistant" : "user",
+      text: r.content,
+      timestamp: isoOrEmpty(r.createdAt),
+    }));
+  ctx.send({
+    type: "spar.history.response",
+    conversationId: String(conversationId),
+    messages,
+  });
+}
+
+function handleConversationsList(ctx: HandleContext): void {
+  const userId = ctx.user.id;
+  // listConversations is already ORDER BY updated_at DESC; preserve
+  // that order on the wire so the companion can render newest-first
+  // without sorting again.
+  const rows = listConversations(userId, CONVERSATIONS_LIST_LIMIT);
+  const conversations: CompanionConversationSummary[] = rows.map((row) => ({
+    id: String(row.id),
+    title: deriveConversationTitle(row.title, row.preview ?? null, row.createdAt),
+    lastMessage: row.preview ?? undefined,
+    lastMessageAt: isoOrEmpty(row.updatedAt),
+    messageCount: row.messageCount ?? 0,
+  }));
+  ctx.send({
+    type: "spar.conversations.response",
+    conversations,
+  });
 }
 
 async function streamTtsToCompanion(

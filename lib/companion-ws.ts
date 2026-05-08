@@ -140,11 +140,17 @@ type ClientMessage =
       platform?: string;
       arch?: string;
     }
-  | { type: "spar.text"; text?: unknown }
+  | { type: "spar.text"; text?: unknown; conversationId?: unknown }
   | { type: "spar.audio.start" }
   | { type: "spar.audio.chunk"; data?: unknown }
-  | { type: "spar.audio.stop" }
-  | { type: "spar.state.request" };
+  | { type: "spar.audio.stop"; conversationId?: unknown }
+  | { type: "spar.state.request" }
+  | {
+      type: "spar.history.request";
+      conversationId?: unknown;
+      limit?: unknown;
+    }
+  | { type: "spar.conversations.list" };
 
 const SPAR_RELAY_TYPES = new Set<string>([
   "spar.text",
@@ -152,6 +158,8 @@ const SPAR_RELAY_TYPES = new Set<string>([
   "spar.audio.chunk",
   "spar.audio.stop",
   "spar.state.request",
+  "spar.history.request",
+  "spar.conversations.list",
 ]);
 
 interface PendingCommand {
