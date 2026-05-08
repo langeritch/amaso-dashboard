@@ -86,9 +86,18 @@ jobs:
           # GH_TOKEN; we publish manually in a separate step so force
           # --publish=never here.
           GH_TOKEN: ""
-        # The `mac.target` config in package.json already pins both
-        # arm64 and x64 — `--mac` alone produces both slices.
-        run: npx electron-builder --mac --publish=never
+        # mac.identity=- forces electron-builder to ad-hoc sign the
+        # outer .app on Apple Silicon. Without this, when
+        # CSC_IDENTITY_AUTO_DISCOVERY is off, electron-builder
+        # skips signing entirely and the bundle keeps the inherited
+        # Electron framework signature, which macOS Gatekeeper
+        # rejects as "damaged" because the bundle id no longer
+        # matches the signature. ad-hoc signing produces a fresh
+        # signature for nl.amaso.companion and the right-click +
+        # Open path works for end users.
+        # The mac.target config in package.json pins both arm64 and
+        # x64, so --mac alone produces both slices.
+        run: npx electron-builder --mac --publish=never -c.mac.identity=-
 
       - name: Build DMG + ZIP (signed + notarized)
         if: inputs.sign == true
