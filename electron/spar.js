@@ -16,6 +16,9 @@ const textInput = document.getElementById("text");
 const micBtn = document.getElementById("micBtn");
 const modeBtn = document.getElementById("modeBtn");
 const orb = document.getElementById("orb");
+const convPill = document.getElementById("convPill");
+const convLabel = document.getElementById("convLabel");
+const convMenu = document.getElementById("convMenu");
 const body = document.body;
 
 const MAX_MESSAGES = 20;
@@ -24,6 +27,14 @@ const CHUNK_MS = 250;
 const CHUNK_SAMPLES = (TARGET_SAMPLE_RATE * CHUNK_MS) / 1000; // 4000
 
 let mode = "chat";
+
+// Conversation state. activeConversationId is included on every
+// outbound spar.text and spar.audio.* message so the dashboard can
+// route each chunk to the right thread when the user has multiple
+// conversations open. conversations is the picker list, refreshed
+// from spar.conversations whenever the dashboard pushes one.
+let activeConversationId = null;
+let conversations = [];
 let micActive = false;
 let micStream = null;
 let micCtx = null;
@@ -79,12 +90,20 @@ function appendStream(text, final) {
   if (final) streamingDiv = null;
 }
 
+// Decorate an outbound message with the active conversationId,
+// when one exists. Server defaults if missing, so a click before
+// the first spar.conversations push still works.
+function withConversation(msg) {
+  if (!activeConversationId) return msg;
+  return { ...msg, conversationId: activeConversationId };
+}
+
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
   const t = textInput.value.trim();
   if (!t) return;
   appendMessage("user", t);
-  window.spar.send({ type: "spar.text", text: t }).catch(() => {});
+  window.spar.send(withConversation({ type: "spar.text", text: t })).catch(() => {});
   textInput.value = "";
 });
 
@@ -130,7 +149,7 @@ async function startMic() {
         micAccumLen = tail.length;
         const i16 = floatToInt16(head);
         const b64 = bufferToBase64(i16.buffer);
-        window.spar.send({ type: "spar.audio.chunk", data: b64 }).catch(() => {});
+        window.spar.send(withConversation({ type: "spar.audio.chunk", data: b64 })).catch(() => {});
       }
     };
 
@@ -144,7 +163,7 @@ async function startMic() {
     micActive = true;
     micBtn.classList.add("active");
     setOrbState("listening");
-    window.spar.send({ type: "spar.audio.start" }).catch(() => {});
+    window.spar.send(withConversation({ type: "spar.audio.start" })).catch(() => {});
   } catch (err) {
     console.warn("[spar] mic start failed:", (err && err.message) || err);
     micActive = false;
@@ -167,7 +186,7 @@ function stopMic() {
   micAccumLen = 0;
   micActive = false;
   micBtn.classList.remove("active");
-  window.spar.send({ type: "spar.audio.stop" }).catch(() => {});
+  window.spar.send(withConversation({ type: "spar.audio.stop" })).catch(() => {});
   setOrbState("idle");
 }
 
@@ -270,6 +289,163 @@ function setOrbState(state) {
   orb.dataset.state = state;
 }
 
+// ---- Conversation picker -------------------------------------------------
+//
+// The pill in the title strip shows the active conversation's label;
+// clicking it opens a dropdown of every conversation the dashboard
+// has surfaced, plus a "New conversation" entry. The dropdown closes
+// on outside click or after any selection.
+
+function activeConversation() {
+  return conversations.find((c) => c && c.id === activeConversationId) || null;
+}
+
+function renderConvLabel() {
+  const active = activeConversation();
+  convLabel.textContent = active && active.label
+    ? active.label
+    : conversations.length === 0
+      ? "Sparring"
+      : "Untitled";
+}
+
+// Format an ISO timestamp as a compact relative label. Same calendar
+// day = "today", previous day = "yesterday", within the past week =
+// short weekday ("Mon"), older = locale month + day ("May 6").
+function relativeTime(iso) {
+  if (typeof iso !== "string" || !iso) return "";
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return "";
+  const now = new Date();
+  const sameDay = (a, b) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (sameDay(then, now)) return "today";
+  if (sameDay(then, yesterday)) return "yesterday";
+  const ageDays = Math.floor((now.getTime() - then.getTime()) / (1000 * 60 * 60 * 24));
+  if (ageDays >= 0 && ageDays < 7) {
+    return then.toLocaleDateString(undefined, { weekday: "short" });
+  }
+  return then.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function renderConvMenu() {
+  convMenu.replaceChildren();
+  for (const c of conversations) {
+    if (!c || typeof c.id !== "string") continue;
+    const item = document.createElement("div");
+    item.className = "conv-item" + (c.id === activeConversationId ? " active" : "");
+    item.setAttribute("role", "menuitem");
+
+    const name = document.createElement("div");
+    name.className = "conv-name";
+    name.textContent = c.label || "Untitled";
+
+    const meta = document.createElement("div");
+    meta.className = "conv-meta";
+    const ts = relativeTime(c.updatedAt);
+    const last = typeof c.lastMessage === "string" ? c.lastMessage : "";
+    meta.textContent = ts && last ? `${ts} · ${last}` : ts || last;
+
+    item.append(name, meta);
+    item.addEventListener("click", () => {
+      closeConvMenu();
+      if (c.id === activeConversationId) return;
+      // Optimistic switch so subsequent outbound messages tag the
+      // new conversation. The dashboard's spar.history reply will
+      // confirm and replace the thread; we clear locally first to
+      // avoid showing the previous conversation's tail underneath
+      // a not-yet-arrived history.
+      activeConversationId = c.id;
+      renderConvLabel();
+      messagesEl.replaceChildren();
+      streamingDiv = null;
+      window.spar
+        .send({ type: "spar.conversation.switch", conversationId: c.id })
+        .catch(() => {});
+    });
+    convMenu.append(item);
+  }
+
+  if (conversations.length > 0) {
+    const sep = document.createElement("div");
+    sep.className = "conv-divider";
+    convMenu.append(sep);
+  }
+  const newItem = document.createElement("div");
+  newItem.className = "conv-new";
+  newItem.setAttribute("role", "menuitem");
+  newItem.textContent = "+ New conversation";
+  newItem.addEventListener("click", () => {
+    closeConvMenu();
+    // Clear locally so the user sees a fresh thread immediately;
+    // server will reply with spar.conversation.created (containing
+    // the new id) and a fresh empty spar.history.
+    messagesEl.replaceChildren();
+    streamingDiv = null;
+    window.spar.send({ type: "spar.conversation.new" }).catch(() => {});
+  });
+  convMenu.append(newItem);
+}
+
+function openConvMenu() {
+  renderConvMenu();
+  convMenu.classList.add("open");
+  convPill.setAttribute("aria-expanded", "true");
+}
+function closeConvMenu() {
+  convMenu.classList.remove("open");
+  convPill.setAttribute("aria-expanded", "false");
+}
+
+convPill.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (convMenu.classList.contains("open")) closeConvMenu();
+  else openConvMenu();
+});
+// Outside click closes the menu. Keying off mousedown rather than
+// click lets the close fire before any other component swallows the
+// click; safer when the dropdown is layered over scrollable content.
+document.addEventListener("mousedown", (e) => {
+  if (!convMenu.classList.contains("open")) return;
+  const target = e.target;
+  if (convMenu.contains(target) || convPill.contains(target)) return;
+  closeConvMenu();
+});
+
+// ---- History rendering ---------------------------------------------------
+//
+// A spar.history payload replaces the in-memory thread wholesale.
+// We trim to the same 20-message cap the live thread uses so a long
+// history doesn't balloon the DOM; the dashboard remains the source
+// of truth for older messages.
+
+function loadHistory(messages) {
+  messagesEl.replaceChildren();
+  streamingDiv = null;
+  if (!Array.isArray(messages)) return;
+  for (const m of messages) {
+    if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
+    if (typeof m.text !== "string") continue;
+    const div = document.createElement("div");
+    div.className = "msg " + m.role;
+    div.textContent = m.text;
+    messagesEl.append(div);
+  }
+  while (messagesEl.children.length > MAX_MESSAGES) {
+    messagesEl.firstChild.remove();
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function requestConversationState() {
+  window.spar.send({ type: "spar.conversations.request" }).catch(() => {});
+  window.spar.send({ type: "spar.history.request" }).catch(() => {});
+}
+
 // ---- Inbound dashboard messages -----------------------------------------
 
 window.spar.onMessage((msg) => {
@@ -294,6 +470,32 @@ window.spar.onMessage((msg) => {
       // chasing a stale playbackHead.
       playbackHead = playbackCtx ? playbackCtx.currentTime : 0;
       break;
+    case "spar.history":
+      loadHistory(msg.messages);
+      if (typeof msg.conversationId === "string") {
+        activeConversationId = msg.conversationId;
+        renderConvLabel();
+      }
+      break;
+    case "spar.conversations":
+      if (Array.isArray(msg.conversations)) {
+        conversations = msg.conversations;
+      }
+      if (typeof msg.activeId === "string") {
+        activeConversationId = msg.activeId;
+      }
+      renderConvLabel();
+      break;
+    case "spar.conversation.created":
+      if (typeof msg.conversationId === "string") {
+        activeConversationId = msg.conversationId;
+        renderConvLabel();
+        // Pull a fresh conversations list so the new entry appears
+        // in the picker. The dashboard will also push spar.history
+        // (likely empty) for the new id, which loadHistory handles.
+        window.spar.send({ type: "spar.conversations.request" }).catch(() => {});
+      }
+      break;
     default:
       break;
   }
@@ -301,4 +503,12 @@ window.spar.onMessage((msg) => {
 
 window.spar.onFocusChange((focused) => {
   body.classList.toggle("unfocused", !focused);
+});
+
+// Fetch state on first load and again every time the window
+// becomes visible. Server-side handlers are idempotent so the
+// (rare) duplicate on first show after a hide is harmless.
+requestConversationState();
+window.spar.onVisible(() => {
+  requestConversationState();
 });

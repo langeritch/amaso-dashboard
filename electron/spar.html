@@ -11,6 +11,15 @@
     <!-- Top strip is the drag handle. The mode toggle floats above
          it with -webkit-app-region: no-drag so clicks register. -->
     <div class="drag-strip" aria-hidden="true"></div>
+    <div class="conv-select no-drag">
+      <button id="convPill" class="conv-pill" type="button"
+        aria-haspopup="menu" aria-expanded="false"
+        title="Switch conversation">
+        <span class="conv-label" id="convLabel">Sparring</span>
+        <span class="conv-chev" aria-hidden="true">▾</span>
+      </button>
+      <div id="convMenu" class="conv-menu" role="menu"></div>
+    </div>
     <div class="mode-toggle no-drag">
       <button id="modeBtn" class="ghost-icon" type="button"
         title="Switch mode" aria-label="Switch mode"></button>

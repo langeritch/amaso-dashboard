@@ -19,4 +19,12 @@ contextBridge.exposeInMainWorld("spar", {
     ipcRenderer.on("spar:focus", handler);
     return () => ipcRenderer.removeListener("spar:focus", handler);
   },
+  // Fired by main every time the spar window becomes visible
+  // (initial show or re-show after hide). Renderer uses this to
+  // refetch conversation state.
+  onVisible: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("spar:visible", handler);
+    return () => ipcRenderer.removeListener("spar:visible", handler);
+  },
 });

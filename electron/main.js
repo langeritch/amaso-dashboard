@@ -434,6 +434,14 @@ function getOrCreateSparWindow() {
     if (!sparWindow || sparWindow.isDestroyed()) return;
     sparWindow.webContents.send("spar:focus", false);
   });
+  // Fires on every show, including the first one after creation,
+  // so the renderer can refetch conversation state. webContents
+  // buffers IPC sends until the renderer is ready, so racing the
+  // first show against load is safe.
+  sparWindow.on("show", () => {
+    if (!sparWindow || sparWindow.isDestroyed()) return;
+    sparWindow.webContents.send("spar:visible");
+  });
   // OS-level close (Cmd+W, etc.) hides instead of destroying so the
   // next toggle reopens instantly with the chat thread intact.
   sparWindow.on("close", (e) => {

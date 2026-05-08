@@ -39,6 +39,84 @@ body.unfocused { opacity: 0.72; }
 .mode-toggle {
   position: absolute; top: 4px; right: 6px; z-index: 2;
 }
+
+/* ---- Conversation selector ---- */
+.conv-select {
+  position: absolute; top: 4px; left: 6px; z-index: 3;
+  max-width: 200px;
+}
+body.mode-voice .conv-select { display: none; }
+
+.conv-pill {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg);
+  font: inherit; font-size: 11px;
+  padding: 0 8px;
+  height: 22px;
+  display: inline-flex; align-items: center; gap: 6px;
+  cursor: pointer;
+  white-space: nowrap; max-width: 200px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.conv-pill:hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.18); }
+.conv-pill .conv-label {
+  max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-pill .conv-chev { color: var(--muted); font-size: 9px; line-height: 1; }
+
+.conv-menu {
+  position: absolute; top: 28px; left: 0;
+  width: 220px;
+  background: rgba(20, 22, 26, 0.97);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  display: none;
+  max-height: 280px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.16) transparent;
+}
+.conv-menu.open { display: block; }
+.conv-menu::-webkit-scrollbar { width: 4px; }
+.conv-menu::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.16); border-radius: 2px;
+}
+
+.conv-item {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.conv-item:hover { background: rgba(255,255,255,0.06); }
+.conv-item.active { background: rgba(16,185,129,0.14); }
+.conv-item .conv-name {
+  color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-item .conv-meta {
+  color: var(--muted); font-size: 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-item.active .conv-name { color: var(--accent); }
+
+.conv-divider {
+  height: 1px; background: rgba(255,255,255,0.06);
+  margin: 4px 2px;
+}
+
+.conv-new {
+  padding: 6px 8px; border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px; color: var(--accent);
+}
+.conv-new:hover { background: rgba(16,185,129,0.10); }
 .ghost-icon {
   width: 22px; height: 22px;
   background: transparent;
