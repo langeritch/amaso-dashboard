@@ -6,7 +6,8 @@
     "dev": "tsx server.ts",
     "build": "cross-env NODE_ENV=production next build",
     "start": "cross-env NODE_ENV=production tsx server.ts",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -28,6 +29,8 @@
     "node-pty": "^1.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "web-push": "^3.6.7",
     "ws": "^8.18.0",
     "youtube-sr": "^4.3.12"

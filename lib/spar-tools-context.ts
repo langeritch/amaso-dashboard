@@ -17,7 +17,7 @@ import {
 import { visibleProjects, canAccessProject } from "./access";
 import { readHeartbeat, writeHeartbeat, isSuperUser } from "./heartbeat";
 import { readProfile, writeProfile } from "./user-profile";
-import { BRAIN_ROOT } from "./spar-brain";
+import { BRAIN_ROOT, slugifyUser } from "./spar-brain";
 import { getHistory } from "./history";
 import {
   getSession,
@@ -33,8 +33,10 @@ import {
   broadcastRemark,
   broadcastChatMessage,
   broadcastSparRemoteControl,
+  broadcastTask,
   type SparRemoteControlAction,
   type SparRemoteControlPayload,
+  type TaskEventAction,
 } from "./ws";
 import {
   enableAutopilot,
@@ -95,6 +97,38 @@ import {
   getJob as getBrowserJob,
   type BrowserJobStatus,
 } from "./browser-jobs";
+import {
+  cancelTask as cancelTaskRegistry,
+  completeTask as completeTaskRegistry,
+  createTask as createTaskRegistry,
+  failTask as failTaskRegistry,
+  getTask as getTaskRegistry,
+  isTerminal as isTaskTerminal,
+  listTasks as listTasksRegistry,
+  pauseTask as pauseTaskRegistry,
+  resumeTask as resumeTaskRegistry,
+  setTaskConversation,
+  updateTask as updateTaskRegistry,
+  type Task,
+  type TaskStatus,
+  type TaskType,
+} from "./tasks";
+import { createConversation as createSparConversation } from "./spar-conversations";
+import {
+  cancelTaskAgent as cancelTaskAgentRunner,
+  runTaskAgent,
+} from "./task-agent";
+import {
+  deletePlaybook as deletePlaybookRegistry,
+  findPlaybook,
+  getPlaybook as getPlaybookRegistry,
+  incrementUseCount,
+  listPlaybooks,
+  savePlaybook,
+  searchPlaybooks,
+  updatePlaybook as updatePlaybookRegistry,
+  type Playbook,
+} from "./playbooks";
 
 const MAX_SCROLLBACK_TAIL = 262_144; // 256 KB — enough for any session the PTY ring holds
 const DEFAULT_SCROLLBACK_TAIL = 16_000;
@@ -944,10 +978,30 @@ export function updateUserProfileTool(
 // (`..`, an absolute path, a symlink target outside) is rejected with
 // a hard error. Only `.md` is writable; reads accept any extension so
 // the spar can still inspect any non-md scaffolding the user adds.
+//
+// ACL: paths under users/<name>/ are private to that user — any other
+// user gets a hard error. Paths outside users/ must match the shared
+// allowlist below; everything else is default-denied.
 
 const BRAIN_FILE_MAX_BYTES = 256 * 1024;
 
-function resolveInBrain(relPathRaw: string): string {
+// Cross-user readable/writable shared brain paths. Every entry is either
+// an exact filename or a directory prefix ending in '/'.
+const SHARED_BRAIN_ALLOWLIST = [
+  "brain.md",
+  "projects.md",
+  "decisions.md",
+  "lessons.md",
+  "goals.md",
+  "timeline.md",
+  "people.md",
+  "MEMORY.md",
+  "daily/",       // shared team-level daily logs
+  "references/",  // shared reference files (jiang_worldview, etc.)
+  "plans/",       // shared plan documents
+];
+
+export function resolveInBrain(user: User, relPathRaw: string): string {
   // Reject absolute inputs early so we never accidentally break out of
   // the root via path.resolve absorbing an absolute second arg.
   if (path.isAbsolute(relPathRaw)) {
@@ -959,6 +1013,32 @@ function resolveInBrain(relPathRaw: string): string {
   // front keeps the safety check below honest.
   const normalised = relPathRaw.replace(/\\/g, "/").replace(/^\/+/, "");
   if (!normalised) throw new Error("brain path required");
+
+  if (normalised.startsWith("users/")) {
+    // Per-user private subtree: caller must own the folder.
+    // Allow both the directory itself ("users/santi") and any file inside
+    // it ("users/santi/profile.md") as long as the slug matches.
+    const slug = slugifyUser(user.name);
+    const ownBase = `users/${slug}`;
+    if (normalised !== ownBase && !normalised.startsWith(`${ownBase}/`)) {
+      throw new Error(
+        `access denied: '${normalised}' is in another user's private brain directory`,
+      );
+    }
+  } else {
+    // Shared path: must be in the explicit allowlist (default-deny).
+    const allowed = SHARED_BRAIN_ALLOWLIST.some((entry) =>
+      entry.endsWith("/")
+        ? normalised === entry.slice(0, -1) || normalised.startsWith(entry)
+        : normalised === entry,
+    );
+    if (!allowed) {
+      throw new Error(
+        `access denied: '${normalised}' is not in the shared brain allowlist`,
+      );
+    }
+  }
+
   const candidate = path.resolve(BRAIN_ROOT, normalised);
   // path.resolve already collapses `..`, but a sibling directory whose
   // name STARTS with the root prefix could still pass a `startsWith`
@@ -972,11 +1052,11 @@ function resolveInBrain(relPathRaw: string): string {
 }
 
 export async function readBrainFileTool(
-  _ctx: SparContext,
+  ctx: SparContext,
   args: Record<string, unknown>,
 ) {
   const relPath = getStr(args, "rel_path");
-  const abs = resolveInBrain(relPath);
+  const abs = resolveInBrain(ctx.user, relPath);
   const stat = await fs.stat(abs).catch(() => null);
   if (!stat || !stat.isFile()) {
     throw new Error("brain file not found");
@@ -1009,14 +1089,14 @@ interface WriteBrainArgs {
 }
 
 export async function writeBrainFileTool(
-  _ctx: SparContext,
+  ctx: SparContext,
   args: Record<string, unknown>,
 ) {
   const relPath = getStr(args, "rel_path");
   if (!relPath.toLowerCase().endsWith(".md")) {
     throw new Error("only .md files are writable in the brain");
   }
-  const abs = resolveInBrain(relPath);
+  const abs = resolveInBrain(ctx.user, relPath);
   const argsTyped = args as WriteBrainArgs;
 
   // Mode A: whole-file write. Used for fresh daily logs and for
@@ -1097,12 +1177,12 @@ interface BrainFileListEntry {
 }
 
 export async function listBrainFilesTool(
-  _ctx: SparContext,
+  ctx: SparContext,
   args: Record<string, unknown>,
 ) {
   const subdir = (args.subdir as string | undefined) ?? "";
   const recursive = args.recursive === true;
-  const root = subdir ? resolveInBrain(subdir) : BRAIN_ROOT;
+  const root = subdir ? resolveInBrain(ctx.user, subdir) : BRAIN_ROOT;
   const stat = await fs.stat(root).catch(() => null);
   if (!stat || !stat.isDirectory()) {
     throw new Error(subdir ? "subdir not found" : "brain root not found");
@@ -2652,6 +2732,397 @@ export async function companionInputTool(
   };
 }
 
+// ---- Tasks + Playbooks ---------------------------------------------------
+// Higher-level orchestration than browser-jobs: the agent registers a
+// concrete goal, drives it (browser_*, companion_exec, etc), checks
+// whether the goal is met, and either flips the row to completed or
+// hands off after maxChecks. Playbooks are saved instructions the agent
+// can pull when the same task comes up again.
+
+const ALLOWED_TASK_STATUSES: TaskStatus[] = [
+  "queued",
+  "running",
+  "paused",
+  "checking",
+  "completed",
+  "failed",
+  "cancelled",
+];
+const ALLOWED_TASK_TYPES: TaskType[] = ["browser", "companion", "mixed"];
+
+function taskWire(t: Task) {
+  return {
+    id: t.id,
+    name: t.name,
+    goal: t.goal,
+    instructions: t.instructions,
+    playbookId: t.playbookId,
+    status: t.status,
+    progress: t.progress,
+    createdAt: t.createdAt,
+    startedAt: t.startedAt,
+    completedAt: t.completedAt,
+    checkCount: t.checkCount,
+    maxChecks: t.maxChecks,
+    error: t.error,
+    type: t.type,
+    deviceId: t.deviceId,
+    conversationId: t.conversationId,
+  };
+}
+
+function playbookWire(pb: Playbook) {
+  return {
+    id: pb.id,
+    name: pb.name,
+    goalTemplate: pb.goalTemplate,
+    instructions: pb.instructions,
+    tags: pb.tags,
+    createdAt: pb.createdAt,
+    updatedAt: pb.updatedAt,
+    lastUsedAt: pb.lastUsedAt,
+    useCount: pb.useCount,
+  };
+}
+
+function fanOutTask(userId: number, action: TaskEventAction, task: Task) {
+  broadcastTask(userId, { action, task: taskWire(task) });
+}
+
+export function createTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const name = getStr(args, "name").trim();
+  const goal = getStr(args, "goal").trim();
+  if (!name) throw new Error("name must not be empty");
+  if (!goal) throw new Error("goal must not be empty");
+  const instructions =
+    typeof args.instructions === "string"
+      ? args.instructions
+      : undefined;
+  const typeRaw =
+    typeof args.type === "string" ? args.type.trim() : undefined;
+  if (typeRaw && !(ALLOWED_TASK_TYPES as string[]).includes(typeRaw)) {
+    throw new Error(
+      `type must be one of: ${ALLOWED_TASK_TYPES.join(", ")}`,
+    );
+  }
+  const deviceId =
+    typeof args.device_id === "string" ? args.device_id : undefined;
+  const maxChecks = getOptNum(args, "max_checks");
+  const autoStart = args.auto_start !== false;
+
+  // Optional playbook resolution. The caller can pass either
+  // playbook_id (the registry id) or playbook (a name match). When it
+  // resolves we copy the goalTemplate as the goal default and the
+  // instructions as the playbook's known steps; both can be overridden
+  // by explicit args. We also bump the use count immediately — once
+  // we've spawned a task off it, it counts as used.
+  let playbookId: string | undefined;
+  let resolvedInstructions = instructions;
+  let resolvedGoal = goal;
+  const playbookRef =
+    (typeof args.playbook_id === "string" && args.playbook_id) ||
+    (typeof args.playbook === "string" && args.playbook) ||
+    "";
+  if (playbookRef) {
+    const pb = findPlaybook(ctx.user.id, playbookRef);
+    if (!pb) {
+      throw new Error(`unknown playbook: ${playbookRef}`);
+    }
+    playbookId = pb.id;
+    if (!resolvedInstructions) resolvedInstructions = pb.instructions;
+    if (!goal) resolvedGoal = pb.goalTemplate;
+    incrementUseCount(ctx.user.id, pb.id);
+  }
+
+  const task = createTaskRegistry({
+    userId: ctx.user.id,
+    name,
+    goal: resolvedGoal,
+    instructions: resolvedInstructions,
+    playbookId,
+    type: (typeRaw as TaskType | undefined) ?? "browser",
+    deviceId,
+    maxChecks,
+    autoStart,
+  });
+
+  // Per-task chat thread: create a dedicated spar_conversations row
+  // owned by the task so the background agent can stream its progress
+  // into a conversation that the Tasks tab UI hydrates separately
+  // from the main spar chat. The conversation title seeds from the
+  // task name; auto-naming will not run because we filter task convs
+  // out of the auto-namer's surface.
+  let conversationId: number | undefined;
+  try {
+    const conv = createSparConversation(ctx.user.id, task.name, task.id);
+    conversationId = conv.id;
+    setTaskConversation(ctx.user.id, task.id, conversationId);
+  } catch (err) {
+    console.warn(
+      `[create_task] failed to create per-task conversation task=${task.id}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  fanOutTask(ctx.user.id, "created", task);
+
+  // Fire-and-forget the per-task agent. The runner persists progress
+  // to the task conversation, broadcasts task-tagged spar:message
+  // events, and posts a completion summary to the user's main chat
+  // when the goal is reached or the task fails. The main spar agent
+  // (this caller) does not block on the result — it returns the task
+  // wire and moves on.
+  if (autoStart && conversationId != null) {
+    void runTaskAgent({
+      user: ctx.user,
+      task: { ...task, conversationId },
+    }).catch((err) => {
+      console.warn(
+        `[create_task] runTaskAgent failed task=${task.id}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
+  return taskWire(task);
+}
+
+export function updateTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const statusRaw =
+    typeof args.status === "string" ? args.status.trim() : undefined;
+  if (statusRaw && !(ALLOWED_TASK_STATUSES as string[]).includes(statusRaw)) {
+    throw new Error(
+      `status must be one of: ${ALLOWED_TASK_STATUSES.join(", ")}`,
+    );
+  }
+  const progress =
+    typeof args.progress === "string" ? args.progress : undefined;
+  const error =
+    typeof args.error === "string" ? args.error : undefined;
+  const recordCheck = args.record_check === true;
+  if (!statusRaw && progress === undefined && error === undefined && !recordCheck) {
+    throw new Error(
+      "at least one of status, progress, error, or record_check is required",
+    );
+  }
+  if (!getTaskRegistry(ctx.user.id, id)) {
+    throw new Error(`unknown task: ${id}`);
+  }
+  const task = updateTaskRegistry(ctx.user.id, id, {
+    status: statusRaw as TaskStatus | undefined,
+    progress,
+    error,
+    recordCheck,
+  });
+  if (!task) throw new Error(`unknown task: ${id}`);
+  const action: TaskEventAction =
+    statusRaw === "completed"
+      ? "completed"
+      : statusRaw === "failed"
+        ? "failed"
+        : statusRaw === "cancelled"
+          ? "cancelled"
+          : "updated";
+  fanOutTask(ctx.user.id, action, task);
+  return taskWire(task);
+}
+
+export function completeTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const verified = args.verified === true;
+  const summary =
+    typeof args.summary === "string" ? args.summary : undefined;
+  if (!getTaskRegistry(ctx.user.id, id)) {
+    throw new Error(`unknown task: ${id}`);
+  }
+  // Always bump checkCount when the agent claims completion — the
+  // verification it did to decide "yes, goal met" is the same kind
+  // of check update_task records, and the panel shows it as the
+  // verification-budget indicator.
+  const task = updateTaskRegistry(ctx.user.id, id, {
+    status: "completed",
+    progress: summary,
+    recordCheck: true,
+  });
+  if (!task) throw new Error(`unknown task: ${id}`);
+  fanOutTask(ctx.user.id, "completed", task);
+  return { ...taskWire(task), verified };
+}
+
+export function failTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const reason =
+    typeof args.reason === "string" ? args.reason : undefined;
+  if (!getTaskRegistry(ctx.user.id, id)) {
+    throw new Error(`unknown task: ${id}`);
+  }
+  const task = failTaskRegistry(ctx.user.id, id, reason);
+  if (!task) throw new Error(`unknown task: ${id}`);
+  fanOutTask(ctx.user.id, "failed", task);
+  return taskWire(task);
+}
+
+export function pauseTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const existing = getTaskRegistry(ctx.user.id, id);
+  if (!existing) throw new Error(`unknown task: ${id}`);
+  if (isTaskTerminal(existing.status)) {
+    throw new Error(`task already in terminal state: ${existing.status}`);
+  }
+  const task = pauseTaskRegistry(ctx.user.id, id);
+  if (!task) throw new Error(`unknown task: ${id}`);
+  fanOutTask(ctx.user.id, "updated", task);
+  return taskWire(task);
+}
+
+export function resumeTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  if (!getTaskRegistry(ctx.user.id, id)) {
+    throw new Error(`unknown task: ${id}`);
+  }
+  const task = resumeTaskRegistry(ctx.user.id, id);
+  if (!task) throw new Error(`unknown task: ${id}`);
+  fanOutTask(ctx.user.id, "updated", task);
+  return taskWire(task);
+}
+
+export function cancelTaskTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  if (!getTaskRegistry(ctx.user.id, id)) {
+    throw new Error(`unknown task: ${id}`);
+  }
+  const task = cancelTaskRegistry(ctx.user.id, id);
+  if (!task) throw new Error(`unknown task: ${id}`);
+  cancelTaskAgentRunner(id);
+  fanOutTask(ctx.user.id, "cancelled", task);
+  return taskWire(task);
+}
+
+export function listTasksTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const statusRaw =
+    typeof args.status === "string" ? args.status.trim() : undefined;
+  if (statusRaw && !(ALLOWED_TASK_STATUSES as string[]).includes(statusRaw)) {
+    throw new Error(
+      `status must be one of: ${ALLOWED_TASK_STATUSES.join(", ")}`,
+    );
+  }
+  const includeTerminal = args.include_terminal === true;
+  const tasks = listTasksRegistry(ctx.user.id, {
+    status: statusRaw as TaskStatus | undefined,
+    includeTerminal,
+  });
+  return { tasks: tasks.map(taskWire) };
+}
+
+export function savePlaybookTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const name = getStr(args, "name").trim();
+  const goalTemplate = getStr(args, "goal_template").trim();
+  const instructions = getStr(args, "instructions").trim();
+  if (!name) throw new Error("name must not be empty");
+  if (!goalTemplate) throw new Error("goal_template must not be empty");
+  if (!instructions) throw new Error("instructions must not be empty");
+  const tags = Array.isArray(args.tags)
+    ? (args.tags as unknown[]).filter((t): t is string => typeof t === "string")
+    : undefined;
+  // If a playbook with the same name already exists, treat save as
+  // an upsert so the agent doesn't accumulate duplicates after a
+  // successful task → save flow that runs more than once.
+  const existing = findPlaybook(ctx.user.id, name);
+  if (existing) {
+    const updated = updatePlaybookRegistry(ctx.user.id, existing.id, {
+      goalTemplate,
+      instructions,
+      tags,
+    });
+    if (!updated) throw new Error(`unknown playbook: ${existing.id}`);
+    return playbookWire(updated);
+  }
+  const pb = savePlaybook({
+    userId: ctx.user.id,
+    name,
+    goalTemplate,
+    instructions,
+    tags,
+  });
+  return playbookWire(pb);
+}
+
+export function getPlaybookTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id =
+    typeof args.id === "string" ? args.id.trim() : "";
+  const name =
+    typeof args.name === "string" ? args.name.trim() : "";
+  if (!id && !name) {
+    throw new Error("either id or name is required");
+  }
+  const pb = id
+    ? getPlaybookRegistry(ctx.user.id, id)
+    : findPlaybook(ctx.user.id, name);
+  if (!pb) {
+    throw new Error(`unknown playbook: ${id || name}`);
+  }
+  return playbookWire(pb);
+}
+
+export function listPlaybooksTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const q =
+    typeof args.q === "string" && args.q.trim() ? args.q.trim() : undefined;
+  const playbooks = q
+    ? searchPlaybooks(ctx.user.id, q)
+    : listPlaybooks(ctx.user.id);
+  return { playbooks: playbooks.map(playbookWire) };
+}
+
+export function deletePlaybookTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const id = getStr(args, "id").trim();
+  if (!id) throw new Error("id must not be empty");
+  const removed = deletePlaybookRegistry(ctx.user.id, id);
+  return { ok: removed };
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -2730,6 +3201,20 @@ export const TOOL_HANDLERS: Record<
   update_browser_job: (ctx, a) => updateBrowserJobTool(ctx, a),
   complete_browser_job: (ctx, a) => completeBrowserJobTool(ctx, a),
   list_browser_jobs: (ctx) => listBrowserJobsTool(ctx),
+  // Tasks + playbooks: higher-level orchestration the spar uses to
+  // delegate goal-shaped work and reuse known-good steps.
+  create_task: (ctx, a) => createTaskTool(ctx, a),
+  update_task: (ctx, a) => updateTaskTool(ctx, a),
+  complete_task: (ctx, a) => completeTaskTool(ctx, a),
+  fail_task: (ctx, a) => failTaskTool(ctx, a),
+  pause_task: (ctx, a) => pauseTaskTool(ctx, a),
+  resume_task: (ctx, a) => resumeTaskTool(ctx, a),
+  cancel_task: (ctx, a) => cancelTaskTool(ctx, a),
+  list_tasks: (ctx, a) => listTasksTool(ctx, a),
+  save_playbook: (ctx, a) => savePlaybookTool(ctx, a),
+  get_playbook: (ctx, a) => getPlaybookTool(ctx, a),
+  list_playbooks: (ctx, a) => listPlaybooksTool(ctx, a),
+  delete_playbook: (ctx, a) => deletePlaybookTool(ctx, a),
   // Companion devices: shell.exec / fs.read tunnelled to a specific
   // paired companion (MacBook, office Mac, etc).
   companion_list_devices: (ctx) => companionListDevicesTool(ctx),
