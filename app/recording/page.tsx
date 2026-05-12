@@ -11,7 +11,7 @@ export default async function RecordingListPage() {
   return (
     <div className="flex h-[100dvh] flex-col">
       <Topbar user={user} />
-      <main className="flex-1 overflow-y-auto bg-neutral-950 text-neutral-100">
+      <main className="min-h-0 flex-1 overflow-y-auto bg-neutral-950 text-neutral-100">
         <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
           <header className="mb-6 flex items-baseline justify-between sm:mb-8">
             <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">

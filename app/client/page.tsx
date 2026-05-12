@@ -29,7 +29,7 @@ export default async function ClientHomePage() {
   enriched.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
 
   return (
-    <section className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
+    <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
       <header className="mb-8 sm:mb-10">
         <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
           Welcome back, {user.name.split(" ")[0]}.
@@ -40,6 +40,6 @@ export default async function ClientHomePage() {
         </p>
       </header>
       <ClientProjectList projects={enriched} />
-    </section>
+    </main>
   );
 }

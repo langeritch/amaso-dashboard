@@ -103,7 +103,7 @@ export default function BrainView({
           </div>
         )}
         {tab === "spar" && (
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-y-auto pb-[var(--spar-footer-h,0px)]">
             <BrainSparringPanel
               projects={projects}
               openRemarks={openRemarks}
