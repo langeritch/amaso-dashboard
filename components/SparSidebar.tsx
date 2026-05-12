@@ -4,15 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import { MessageSquarePlus, Pin, PinOff, Trash2, X } from "lucide-react";
 import { useSpar, type SparConversationSummary } from "./SparContext";
 import { WorkerList } from "./WorkerStatusPanel";
+import TasksPanel from "./TasksPanel";
+import SparHistoryPanel from "./SparHistoryPanel";
 
-type SparSidebarTab = "chat" | "workers";
+type SparSidebarTab = "chat" | "workers" | "tasks" | "history";
 const SIDEBAR_TAB_STORAGE_KEY = "amaso.spar.sidebar.tab";
 
 function readPersistedTab(): SparSidebarTab {
   if (typeof window === "undefined") return "chat";
   try {
     const v = window.localStorage.getItem(SIDEBAR_TAB_STORAGE_KEY);
-    return v === "workers" ? "workers" : "chat";
+    if (v === "workers" || v === "tasks" || v === "history") return v;
+    return "chat";
   } catch {
     return "chat";
   }
@@ -194,10 +197,16 @@ export default function SparSidebar({
         </>
       )}
       {tab === "workers" && (
-        <div className="flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <WorkerList />
         </div>
       )}
+      {tab === "tasks" && (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <TasksPanel />
+        </div>
+      )}
+      {tab === "history" && <SparHistoryPanel />}
     </aside>
   );
 
@@ -234,6 +243,8 @@ function SidebarTabs({
   const tabs: { id: SparSidebarTab; label: string }[] = [
     { id: "chat", label: "Chat" },
     { id: "workers", label: "Workers" },
+    { id: "tasks", label: "Tasks" },
+    { id: "history", label: "History" },
   ];
   return (
     <nav
@@ -270,6 +281,28 @@ function SidebarTabs({
   );
 }
 
+function dailyLabel(dateLocal: string): string {
+  // Compare against today/yesterday in the same Europe/Amsterdam frame
+  // the server stamped the row with. Anything older renders as a
+  // locale-formatted month/day ("May 8"). Future dates (clock skew)
+  // fall through to the locale path too.
+  const today = new Date().toLocaleDateString("en-CA", {
+    timeZone: "Europe/Amsterdam",
+  });
+  if (dateLocal === today) return "Today";
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  const yesterday = y.toLocaleDateString("en-CA", {
+    timeZone: "Europe/Amsterdam",
+  });
+  if (dateLocal === yesterday) return "Yesterday";
+  // Parse YYYY-MM-DD as a local date so we don't drift a day from UTC.
+  const [yyyy, mm, dd] = dateLocal.split("-").map(Number);
+  if (!yyyy || !mm || !dd) return dateLocal;
+  const d = new Date(yyyy, mm - 1, dd);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function ChatList({
   conversations,
   activeConversationId,
@@ -281,8 +314,23 @@ function ChatList({
   onSelect: (id: number) => void | Promise<void>;
   onDelete: (id: number) => void | Promise<void>;
 }) {
+  // Layer 3: when a conversation is mapped to a daily chat, sort by
+  // date_local DESC then active DESC (so today's active row floats
+  // first, legacy same-day rows tuck under it). Un-mapped rows fall
+  // back to updated_at. The server already returns rows in this
+  // order, but we re-sort defensively in case a refresh interleaves
+  // a fresh response with stale local edits.
   const sorted = useMemo(
-    () => conversations.slice().sort((a, b) => b.updatedAt - a.updatedAt),
+    () =>
+      conversations.slice().sort((a, b) => {
+        const ad = a.dateLocal ?? "";
+        const bd = b.dateLocal ?? "";
+        if (ad !== bd) return bd.localeCompare(ad);
+        const aa = a.isDailyActive === true ? 1 : 0;
+        const bb = b.isDailyActive === true ? 1 : 0;
+        if (aa !== bb) return bb - aa;
+        return b.updatedAt - a.updatedAt;
+      }),
     [conversations],
   );
   if (sorted.length === 0) {
@@ -296,7 +344,7 @@ function ChatList({
     );
   }
   return (
-    <ul className="amaso-fade-in flex-1 overflow-y-auto py-1">
+    <ul className="amaso-fade-in min-h-0 flex-1 overflow-y-auto py-1">
       {sorted.map((c) => {
         const active = c.id === activeConversationId;
         return (
@@ -311,11 +359,18 @@ function ChatList({
               <button
                 type="button"
                 onClick={() => void onSelect(c.id)}
-                title={c.title || "New chat"}
+                title={c.dateLocal ? dailyLabel(c.dateLocal) : c.title || "New chat"}
                 className="flex min-w-0 flex-1 flex-col items-start text-left"
               >
                 <span className="w-full truncate text-sm">
-                  {c.title || "New chat"}
+                  {c.dateLocal
+                    ? dailyLabel(c.dateLocal)
+                    : c.title || "New chat"}
+                  {c.dateLocal && c.isDailyActive === false && (
+                    <span className="ml-1.5 text-[10px] font-normal uppercase tracking-wider text-neutral-500">
+                      prior
+                    </span>
+                  )}
                 </span>
                 <span className="flex w-full items-center gap-2 text-[10px] uppercase tracking-wider text-neutral-500">
                   <span>{relativeTime(c.updatedAt)}</span>
