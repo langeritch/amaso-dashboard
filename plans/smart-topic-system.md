@@ -17,6 +17,13 @@ Status:
   Three modes (date / topic / keyword). Wired into the spar tool registry,
   MCP server, and system prompt. recall_invocations audit table.
   See the "Layer 6 — recall tool (SHIPPED)" section below.
+- **Final pass shipped 2026-05-14** — daily_topic_stats rollup, tightened
+  subject-consolidator prompt (#446/#448/#455 closed), auto-populated
+  daily-log markdown from subjects (#453 closed), lazy brain-extraction
+  trigger (#444 closed), GET /api/spar/topics?scope= endpoint, list_topics
+  spar tool, "Active topics today" prompt block, per-message topic tags
+  inline in the LLM history window, sticky topic strip + per-day topic
+  chips in the mobile history UI. See the "Final pass" section below.
 
 This doc is the spec for the remaining layers so we don't invent
 architecture mid-build.
@@ -301,3 +308,86 @@ where topic summaries themselves get promoted is the open work.
 Behind a per-user flag (`topics_enabled` on autopilot_users or a
 similar table). Default off. Enable for Santi first, verify Layers 1+2
 work in practice, then enable for ilias/noah.
+
+---
+
+### Final pass — daily_subjects rollup + spar topic visibility (SHIPPED 2026-05-14)
+
+Closes the seven remaining smart-context remarks (#444, #446, #448,
+#450, #453, #454, #455) and adds the "make topics visible to the spar
+AI in real time" surface from the closeout dispatch.
+
+What landed:
+
+1. **daily_topic_stats table** — per (user_id, date, topic_id) row
+   with `message_count`, first/last message id, first/last timestamp,
+   computed_at. PK on the natural key; idempotent UPSERT semantics.
+   Lives in `lib/db.ts`; refreshed by `lib/daily-topic-rollup.ts`:
+   - `refreshRollupForDay(userId, date)` — single aggregate query
+     over spar_message_topics → spar_messages → daily_chats.
+   - `getDailyTopics(userId, date, {autoRefresh, limit})` — fetch
+     rollup rows for one day; lazy-refresh on miss.
+   - `listTopicsForScope(userId, 'today'|'week'|'all', limit)` —
+     scope-aware list with related brain files joined in via
+     `topic_brain_refs`.
+   - `formatActiveTopicsBlock(userId)` — the 200-token-cap block the
+     spar route injects at the top of every system prompt.
+
+2. **Subject consolidator prompt tightening (#446 / #448 / #455)**:
+   `lib/spar-subjects.ts` SYSTEM_PROMPT now enforces verb-noun
+   labels, sentence case, max 40 chars, merge-near-dupes and
+   fold-sub-2-msg-into-neighbour consolidation, and explicit
+   section-classification heuristics for the 6 canonical buckets
+   (Shipped / Built / Decisions / Conversations / Open Loops /
+   Energy) with a documented priority-order tiebreaker.
+
+3. **Auto-populate daily log from subjects (#453)**:
+   `lib/daily-log-writer.ts` runs after every successful
+   `getOrExtractSubjects` and writes each subject as a bullet under
+   its section in `users/<slug>/daily/YYYY-MM-DD.md`. Read-modify-
+   write — never blow away manual entries. Project topics become
+   `see projects/<slug>` cross-references on the bullet. Fresh
+   scaffold (frontmatter + 6 section H2s) on missing file.
+
+4. **Lazy brain-extraction trigger (#444 third path)**:
+   `/api/spar/history/facts` auto-fires `extractDailyFacts` when the
+   date has spar messages but no daily_extractions row. Cron at
+   03:00 + admin endpoint + this lazy path now cover all three
+   triggers.
+
+5. **Subjects schema + endpoint (#450 / #454)**: Already shipped —
+   `SubjectEntry` interface in `lib/spar-subjects.ts` already matches
+   `{label, summary, topic_ids, brain_refs, section}` and
+   `GET /api/spar/subjects?date=` already triggers lazy extraction.
+   Confirmed during the final pass; remarks closed with that note.
+
+6. **Topic visibility for spar (Part B)**:
+   - `GET /api/spar/topics?scope=today|week|all` — scope-aware topic
+     list with `messageCount`, `lastTouchedAt`, `relatedBrainFiles`.
+     Drives the sticky strip + list_topics tool. Legacy
+     no-scope path stays for the existing By topic tab.
+   - `list_topics` spar tool — adapter in
+     `lib/spar-tools-context.ts:listTopicsToolImpl`, registered in
+     `TOOL_HANDLERS["list_topics"]`, advertised in `SPAR_TOOLS`,
+     JSON-Schema entry in `scripts/spar-mcp-server.mjs`.
+   - "Active topics today" prompt injection — `app/api/spar/route.ts`
+     appends `formatActiveTopicsBlock(user.id)` to `baseSystemPrompt`
+     on every turn. Empty when nothing has been tagged today.
+   - Per-message topic tags — `lib/spar-topic-context.ts`
+     `buildTopicAwareWindow` now batches a slug lookup over
+     `spar_message_topics` and prefixes each topic-pulled message
+     with `[topics: slug1, slug2] `. Compact, scannable, no JSON.
+   - Mobile UI: `ActiveTopicStrip` sticky horizontal strip at top of
+     `HistoryScreen` (today's topics, click → TopicDetail);
+     `DayList` cards now render topic chips with `messageCount`
+     pills, click chip → `DayDetail` with a `topicFilter` applied,
+     which fetches `/api/spar/topics/[slug]/messages?date=` instead
+     of the conversation transcript.
+
+Out of scope (intentionally — not in the seven-remark closeout): the
+later Layer-5 / Layer-6 brain-integration remarks (#477, #478, #479,
+#480, #481, #482), the "ask about this" pivot (#464), and the
+remaining Layer-0/2 polish (#390, #391, #392, #431). Some of these
+overlap with the writers shipped here (e.g. #477's daily-log
+cross-refs are now produced by `lib/daily-log-writer.ts`); they're
+left for the user to close manually.

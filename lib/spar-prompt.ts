@@ -40,6 +40,7 @@ export const SPAR_TOOLS = [
   "read_graph",
   "write_graph",
   "recall",
+  "list_topics",
   // Chat
   "list_channels",
   "read_messages",

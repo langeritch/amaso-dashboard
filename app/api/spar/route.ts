@@ -143,8 +143,33 @@ export async function POST(req: NextRequest) {
 
   const heartbeat = readHeartbeat(user.id);
   const userProfile = readProfile(user.id);
-  const brain = loadBrainContext();
-  const baseSystemPrompt = buildSparSystemPrompt(user.name);
+  const brain = requestedMemory ? loadBrainContext(user) : { block: "", loaded: [] };
+  let baseSystemPrompt = buildSparSystemPrompt(user.name);
+
+  // Smart Topic System — final pass: inject the "Active topics today"
+  // block right after the persona header so the assistant sees, on
+  // every turn, which threads are in motion without having to call
+  // list_topics. The block is empty (and therefore costs zero tokens)
+  // when nothing has been tagged today — covers fresh days and
+  // detector cold starts.
+  try {
+    const { formatActiveTopicsBlock } = await import("@/lib/daily-topic-rollup");
+    const topicsBlock = formatActiveTopicsBlock(user.id);
+    if (topicsBlock) {
+      baseSystemPrompt += "\n\n" + topicsBlock;
+    }
+  } catch (err) {
+    console.warn(
+      "[spar] active-topics injection failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  if (requestedTone === "terse · honest") {
+    baseSystemPrompt += "\n\nTONE: Be extremely terse, dry, and honest. No fluff. Minimum words needed to convey truth.";
+  } else if (requestedTone === "detailed · helpful") {
+    baseSystemPrompt += "\n\nTONE: Be proactive, detailed, and highly helpful. Think ahead for the user.";
+  }
 
   // Auto-report turn detection. flushNudgeBatch (lib/terminal-idle.ts)
   // and buildMergedAutoReportContent (components/SparProvider.tsx) both

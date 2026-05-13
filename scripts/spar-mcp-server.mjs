@@ -324,6 +324,29 @@ const TOOLS = [
     },
   },
   {
+    name: "list_topics",
+    description:
+      "Final pass — list the calling user's active topics (slug-addressable threads the topic detector has been tagging messages with). Use when you want to know what's currently in motion without inspecting the chat history: 'what have we been talking about today', 'what are the live projects this week', or to confirm a topic exists before calling recall(type='topic'). The top-5 today subset is already inlined into your system prompt; reach for this tool when you need more entries, a wider scope, or the related_brain_files cross-refs.\n" +
+      "  • scope='today' (default) — only topics with messages today (Europe/Amsterdam local date).\n" +
+      "  • scope='week'            — topics with messages in the last 7 days.\n" +
+      "  • scope='all'             — every topic the user has, sorted by last_active_at.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "string",
+          enum: ["today", "week", "all"],
+          description: "Time window. Default 'today'.",
+        },
+        limit: {
+          type: "number",
+          description: "Max rows returned. Default 25, hard ceiling 100.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "read_user_profile",
     description:
       "Read the calling user's persona profile (markdown) — language, tone, verbosity, communication style, and behavioural rules tailored to this specific user. The profile is already injected into your system prompt; reach for this tool only when you need to see the exact text before updating it via update_user_profile.",

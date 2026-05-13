@@ -3136,6 +3136,39 @@ export async function webSearchTool(
 }
 
 /**
+ * Final pass — list_topics tool. Mirrors GET /api/spar/topics?scope=
+ * for the spar agent so the model can ask "what have we been
+ * touching today / this week" without round-tripping through the
+ * inline prompt block.
+ */
+export async function listTopicsToolImpl(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const scopeRaw = typeof args.scope === "string" ? args.scope : "today";
+  const scope =
+    scopeRaw === "today" || scopeRaw === "week" || scopeRaw === "all"
+      ? scopeRaw
+      : "today";
+  const limitRaw = typeof args.limit === "number" ? args.limit : 25;
+  const limit = Math.min(Math.max(Math.floor(limitRaw), 1), 100);
+  const { listTopicsForScope } = await import("./daily-topic-rollup");
+  const rows = listTopicsForScope(ctx.user.id, scope, limit);
+  return {
+    scope,
+    topics: rows.map((t) => ({
+      topic_id: t.topicId,
+      name: t.title,
+      slug: t.slug,
+      status: t.status,
+      message_count: t.messageCount,
+      last_touched_at: t.lastTs,
+      related_brain_files: t.relatedBrainFiles,
+    })),
+  };
+}
+
+/**
  * Layer 6 — recall tool wrapper. Thin adapter around lib/spar-recall
  * that validates the model's JSON arguments before dispatch. The tool
  * is scoped to the calling user via ctx.user.id; passing some other
@@ -3189,6 +3222,7 @@ export const TOOL_HANDLERS: Record<
   read_graph: (ctx) => readGraphTool(ctx),
   write_graph: (ctx, a) => writeGraphTool(ctx, a),
   recall: (ctx, a) => recallTool(ctx, a),
+  list_topics: (ctx, a) => listTopicsToolImpl(ctx, a),
   youtube_search: (ctx, a) => youtubeSearchTool(ctx, a),
   youtube_play: (ctx, a) => youtubePlayTool(ctx, a),
   youtube_enqueue: (ctx, a) => youtubeEnqueueTool(ctx, a),

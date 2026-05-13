@@ -26,7 +26,17 @@ interface DaySummary {
   conversationIds: number[]
   messageCount: number
   summary: string | null
-  topics: { id: number; slug: string; title: string }[]
+  topics: { id: number; slug: string; title: string; messageCount?: number }[]
+}
+
+interface ScopeTopic {
+  topicId: number
+  slug: string
+  title: string
+  status: "active" | "archived"
+  messageCount: number
+  lastTouchedAt: number | null
+  relatedBrainFiles: string[]
 }
 
 interface HistoryMessage {
@@ -38,7 +48,15 @@ interface HistoryMessage {
 
 type Detail =
   | { kind: "topic"; slug: string; title: string }
-  | { kind: "day"; date: string; conversationId: number }
+  | {
+      kind: "day"
+      date: string
+      conversationId: number
+      /** Optional topic filter — when set, DayDetail restricts the
+       *  transcript to messages tagged with this topic for the day.
+       *  Drives the "tap chip on day card → filtered day view". */
+      topicFilter?: { slug: string; title: string }
+    }
 
 export default function HistoryScreen({ onBack, onNavigateToChat }: { onBack: () => void; onNavigateToChat?: (prefill?: string) => void }) {
   const [tab, setTab] = useState<"topic" | "day">("topic")
@@ -69,6 +87,7 @@ export default function HistoryScreen({ onBack, onNavigateToChat }: { onBack: ()
       <DayDetail
         date={detail.date}
         conversationId={detail.conversationId}
+        topicFilter={detail.topicFilter}
         onBack={() => setDetail(null)}
       />
     )
@@ -87,6 +106,11 @@ export default function HistoryScreen({ onBack, onNavigateToChat }: { onBack: ()
         />
       ) : (
         <>
+          <ActiveTopicStrip
+            onOpenTopic={(t) =>
+              setDetail({ kind: "topic", slug: t.slug, title: t.title })
+            }
+          />
           <div style={{ display: "flex", borderBottom: "1px solid var(--rule)" }}>
             {(["topic", "day"] as const).map((id) => {
               const active = tab === id
@@ -123,6 +147,15 @@ export default function HistoryScreen({ onBack, onNavigateToChat }: { onBack: ()
                 onOpen={(d) =>
                   d.activeConversationId !== null &&
                   setDetail({ kind: "day", date: d.date, conversationId: d.activeConversationId })
+                }
+                onOpenWithTopic={(d, t) =>
+                  d.activeConversationId !== null &&
+                  setDetail({
+                    kind: "day",
+                    date: d.date,
+                    conversationId: d.activeConversationId,
+                    topicFilter: t,
+                  })
                 }
               />
             )}
@@ -598,7 +631,13 @@ function TopicList({ onOpen }: { onOpen: (t: TopicSummary) => void }) {
   )
 }
 
-function DayList({ onOpen }: { onOpen: (d: DaySummary) => void }) {
+function DayList({
+  onOpen,
+  onOpenWithTopic,
+}: {
+  onOpen: (d: DaySummary) => void
+  onOpenWithTopic?: (d: DaySummary, topic: { slug: string; title: string }) => void
+}) {
   const [items, setItems] = useState<DaySummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
@@ -642,11 +681,23 @@ function DayList({ onOpen }: { onOpen: (d: DaySummary) => void }) {
         <div style={{ padding: "4px 12px 24px" }}>
           {items.map((d) => {
             const disabled = d.activeConversationId === null
+            // Card is a div (not a button) so we can render
+            // independently-clickable topic chips inside without
+            // nesting <button> elements. Keyboard nav still works via
+            // explicit role + tabIndex.
             return (
-              <button
+              <div
                 key={d.date}
-                disabled={disabled}
-                onClick={() => onOpen(d)}
+                onClick={() => { if (!disabled) onOpen(d) }}
+                role="button"
+                tabIndex={disabled ? -1 : 0}
+                onKeyDown={(e) => {
+                  if (disabled) return
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault()
+                    onOpen(d)
+                  }
+                }}
                 style={{
                   display: "block", width: "100%", textAlign: "left",
                   padding: "12px 12px",
@@ -674,16 +725,43 @@ function DayList({ onOpen }: { onOpen: (d: DaySummary) => void }) {
                 )}
                 {d.topics.length > 0 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
-                    {d.topics.map((t) => (
-                      <span key={t.id} style={{
-                        fontSize: 9.5, padding: "2px 8px", borderRadius: 999,
-                        background: "var(--bg-1)", border: "1px solid var(--rule-strong)",
-                        color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.1em",
-                      }}>{t.title}</span>
-                    ))}
+                    {d.topics.map((t) => {
+                      const onChip = (e: React.MouseEvent | React.KeyboardEvent) => {
+                        e.stopPropagation()
+                        if (disabled) return
+                        if (onOpenWithTopic) {
+                          onOpenWithTopic(d, { slug: t.slug, title: t.title })
+                        } else {
+                          onOpen(d)
+                        }
+                      }
+                      return (
+                        <button
+                          key={t.id}
+                          onClick={onChip}
+                          disabled={disabled}
+                          style={{
+                            fontSize: 10, padding: "2px 8px", borderRadius: 999,
+                            background: "var(--bg-1)", border: "1px solid var(--rule-strong)",
+                            color: "var(--fg-2)",
+                            display: "inline-flex", alignItems: "center", gap: 5,
+                            fontFamily: "var(--font-sans)",
+                            cursor: disabled ? "default" : "pointer",
+                          }}
+                          title={`Filter ${dayLabel(d.date)} transcript to ${t.title}`}
+                        >
+                          <span>{t.title}</span>
+                          {typeof t.messageCount === "number" && (
+                            <span className="t-mono" style={{
+                              fontSize: 9, color: "var(--fg-4)",
+                            }}>{t.messageCount}</span>
+                          )}
+                        </button>
+                      )
+                    })}
                   </div>
                 )}
-              </button>
+              </div>
             )
           })}
         </div>
@@ -736,25 +814,84 @@ function TopicDetail({ slug, fallbackTitle, onBack, onAskAboutThis }: { slug: st
   )
 }
 
-function DayDetail({ date, conversationId, onBack }: { date: string; conversationId: number; onBack: () => void }) {
+function DayDetail({
+  date,
+  conversationId,
+  topicFilter,
+  onBack,
+}: {
+  date: string
+  conversationId: number
+  topicFilter?: { slug: string; title: string }
+  onBack: () => void
+}) {
   const [data, setData] = useState<{ messages: HistoryMessage[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Local mirror of the prop so the user can clear the filter inside
+  // the screen without going back to the day list.
+  const [filter, setFilter] = useState<{ slug: string; title: string } | null>(
+    topicFilter ?? null,
+  )
+  useEffect(() => { setFilter(topicFilter ?? null) }, [topicFilter, conversationId])
+
   useEffect(() => {
     let cancelled = false
-    fetch(`/api/spar/conversations/${conversationId}`)
+    setData(null)
+    setError(null)
+    const url = filter
+      ? `/api/spar/topics/${encodeURIComponent(filter.slug)}/messages?date=${encodeURIComponent(date)}`
+      : `/api/spar/conversations/${conversationId}`
+    fetch(url)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d) => { if (!cancelled) setData({ messages: d.messages ?? [] }) })
+      .then((d) => {
+        if (cancelled) return
+        const msgs: HistoryMessage[] = Array.isArray(d.messages)
+          ? d.messages.map((m: { id: number; role: "user" | "assistant" | "system"; content: string; createdAt: number }) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              createdAt: m.createdAt,
+            }))
+          : []
+        setData({ messages: msgs })
+      })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
-  }, [conversationId])
+  }, [conversationId, date, filter])
+
   return (
     <div className="amaso-screen" style={{ background: "var(--bg-0)" }}>
       <Header title={dayLabel(date)} onBack={onBack} />
       <div className="amaso-scroll" style={{ flex: 1 }}>
-        <FactsPanel date={date} />
+        {filter && (
+          <div style={{
+            margin: "10px 12px", padding: "8px 12px",
+            background: "var(--accent-soft)", border: "1px solid var(--accent-glow)",
+            borderRadius: 10,
+            display: "flex", alignItems: "center", gap: 8,
+            fontSize: 12, color: "var(--fg)",
+          }}>
+            <span style={{ flex: 1 }}>
+              Filtered to topic <strong style={{ color: "var(--accent)" }}>{filter.title}</strong>
+            </span>
+            <button
+              onClick={() => setFilter(null)}
+              style={{
+                padding: "4px 10px", borderRadius: 6,
+                background: "transparent", border: "1px solid var(--rule-strong)",
+                color: "var(--fg-2)", cursor: "pointer", fontSize: 11,
+              }}
+              title="Show all of this day's messages"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+        {!filter && <FactsPanel date={date} />}
         {error ? <Empty msg={`Couldn't load day (${error}).`} />
           : data === null ? <Empty msg="Loading…" />
-          : data.messages.length === 0 ? <Empty msg="No messages on this day." />
+          : data.messages.length === 0
+            ? <Empty msg={filter ? `No "${filter.title}" messages on this day.` : "No messages on this day."} />
           : <MessageStream messages={data.messages} />}
       </div>
     </div>
@@ -795,6 +932,68 @@ function Empty({ msg }: { msg: string }) {
   return (
     <div style={{ padding: "32px 16px", textAlign: "center", fontSize: 12, color: "var(--fg-4)" }}>
       {msg}
+    </div>
+  )
+}
+
+// ── Smart Topic System final pass: sticky active-topics strip ─────────
+
+/**
+ * Horizontal scroll strip pinned above the By topic / By day tabs.
+ * Shows the user's most-touched topics for today, with a per-topic
+ * message count. Tap → drill into TopicDetail. Renders nothing when
+ * the day is fresh (no detector hits yet) so a quiet morning doesn't
+ * waste rows.
+ */
+function ActiveTopicStrip({
+  onOpenTopic,
+}: {
+  onOpenTopic: (t: { slug: string; title: string }) => void
+}) {
+  const [topics, setTopics] = useState<ScopeTopic[] | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch("/api/spar/topics?scope=today&limit=12")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((d: { topics: ScopeTopic[] }) => {
+        if (!cancelled) setTopics(Array.isArray(d.topics) ? d.topics : [])
+      })
+      .catch(() => { if (!cancelled) setTopics([]) })
+    return () => { cancelled = true }
+  }, [])
+  if (topics === null || topics.length === 0) return null
+  return (
+    <div style={{
+      display: "flex", gap: 6, padding: "8px 12px",
+      overflowX: "auto", WebkitOverflowScrolling: "touch" as const,
+      borderBottom: "1px solid var(--rule)",
+      background: "var(--bg-0)",
+    }}>
+      <span className="t-mono" style={{
+        fontSize: 9, color: "var(--fg-4)",
+        textTransform: "uppercase", letterSpacing: "0.18em",
+        alignSelf: "center", marginRight: 4, flexShrink: 0,
+      }}>Today</span>
+      {topics.map((t) => (
+        <button
+          key={t.topicId}
+          onClick={() => onOpenTopic({ slug: t.slug, title: t.title })}
+          style={{
+            flexShrink: 0, padding: "4px 10px", borderRadius: 999,
+            background: "var(--accent-soft)", color: "var(--accent)",
+            border: "1px solid var(--accent-glow)",
+            fontSize: 11, cursor: "pointer", whiteSpace: "nowrap",
+            fontFamily: "var(--font-sans)", fontWeight: 500,
+          }}
+        >
+          {t.title}
+          <span className="t-mono" style={{
+            marginLeft: 6, fontSize: 9, color: "var(--accent)", opacity: 0.7,
+          }}>
+            {t.messageCount}
+          </span>
+        </button>
+      ))}
     </div>
   )
 }

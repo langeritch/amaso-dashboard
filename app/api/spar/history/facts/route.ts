@@ -89,12 +89,51 @@ export async function GET(req: NextRequest) {
   }
 
   const db = getDb();
-  const extraction = db
+  let extraction = db
     .prepare(
       `SELECT id, status, fact_count, classifications_json, run_at, error_text
          FROM daily_extractions WHERE user_id = ? AND date = ?`,
     )
     .get(targetUserId, date) as ExtractionRow | undefined;
+
+  // Remark #444 — lazy extraction trigger (third path).
+  // Cron handles yesterday at 03:00 and the admin endpoint covers
+  // manual reruns. The third trigger is "first time a user opens a
+  // past day in the history UI": if the date has spar messages but
+  // no extraction row yet, fire one inline. We block the response on
+  // it so the sidebar that called this endpoint gets the populated
+  // result on the first paint — no spinner-then-data-then-refetch
+  // dance. Caller decides whether to opt out via &lazy=0.
+  const wantLazy = url.searchParams.get("lazy") !== "0";
+  if (!extraction && wantLazy) {
+    const hasMessages = db
+      .prepare(
+        `SELECT 1 FROM daily_chats dc
+           JOIN spar_messages m ON m.conversation_id = dc.conversation_id
+          WHERE dc.user_id = ? AND dc.date_local = ?
+          LIMIT 1`,
+      )
+      .get(targetUserId, date);
+    if (hasMessages) {
+      try {
+        const { extractDailyFacts } = await import("@/lib/daily-extraction");
+        await extractDailyFacts({ userId: targetUserId, date });
+        extraction = db
+          .prepare(
+            `SELECT id, status, fact_count, classifications_json, run_at, error_text
+               FROM daily_extractions WHERE user_id = ? AND date = ?`,
+          )
+          .get(targetUserId, date) as ExtractionRow | undefined;
+      } catch (err) {
+        // Surface as a soft warning header but don't 500 — the UI
+        // can still render the empty state.
+        console.warn(
+          "[spar-history-facts] lazy extraction failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
 
   const factRows = db
     .prepare(
