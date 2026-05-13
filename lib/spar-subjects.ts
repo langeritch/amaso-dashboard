@@ -14,6 +14,13 @@ export interface SubjectEntry {
   section: "Shipped" | "Decisions" | "Conversations" | "Open Loops" | "Energy" | "Built";
   topic_ids: number[]; // source topic IDs from the DB
   brain_refs: string[];// brain file paths that were touched (may be empty)
+  /** Remark #431 — set by the summary quality validator after the
+   *  generation/regenerate-once loop. 'pass' means the summary
+   *  references the topic AND carries at least one concrete signal;
+   *  'weak' means even the regenerated attempt didn't satisfy both
+   *  checks. Readers skip 'weak' entries from search / context by
+   *  default. Undefined when the entry pre-dates the validator. */
+  quality_flag?: "pass" | "weak";
 }
 
 const SUBJECTS_MODEL = process.env.AMASO_SUBJECTS_MODEL || "sonnet";
@@ -213,18 +220,41 @@ function loadDayData(
 }
 
 /**
+ * Tighter prompt prepended for the regenerate-once retry. Surfaces
+ * the validation failure shape so the model knows what to fix.
+ */
+const REGEN_PROMPT_PREFIX = [
+  "The previous extraction attempt produced summaries that were too vague",
+  "or didn't reference their topic by name. For THIS attempt, every",
+  "subject's `summary` MUST:",
+  "  • mention the topic title (or a salient word from it) at least once,",
+  "  • include at least one concrete signal — a number, a date, a person",
+  "    or project name, OR a decision phrase like 'decided X' /",
+  "    'shipped X' / 'chose X'. Vague hedges like \"they discussed\"",
+  "    don't count.",
+  "Stay under 3 sentences per summary. Keep the rest of the shape",
+  "identical to the original system prompt — verb-noun labels,",
+  "sentence case, the same 6 section buckets.",
+  "",
+].join("\n");
+
+/**
  * Call Claude to extract subjects for the given (userId, date). Queries the
  * DB for messages, builds a prompt, calls the CLI, and returns the parsed
  * array. Returns [] on any error or when there's nothing to summarize.
+ *
+ * Internal — not the public entry. `getOrExtractSubjects` wraps this
+ * with the validation + regenerate-once loop required by remark #431.
  */
-export async function extractDaySubjects(
+async function runExtractDaySubjects(
   userId: number,
   date: string,
+  promptPrefix: string = "",
 ): Promise<SubjectEntry[]> {
   const data = loadDayData(userId, date);
   if (!data) return [];
 
-  const userPrompt = buildUserPrompt(data.messages, data.topicRows);
+  const userPrompt = promptPrefix + buildUserPrompt(data.messages, data.topicRows);
   let cliOutput = "";
   try {
     cliOutput = await collectFromClaudeCli({
@@ -247,6 +277,190 @@ export async function extractDaySubjects(
   } catch {
     return [];
   }
+}
+
+/** Public — kept for back-compat with callers that just want the raw
+ *  extraction without validation. New callers should use
+ *  `getOrExtractSubjects` which validates + caches. */
+export async function extractDaySubjects(
+  userId: number,
+  date: string,
+): Promise<SubjectEntry[]> {
+  return runExtractDaySubjects(userId, date);
+}
+
+// ---------------------------------------------------------------------------
+// Remark #431 — validation + regenerate-once loop
+// ---------------------------------------------------------------------------
+
+interface TopicAnchorRow {
+  id: number;
+  title: string;
+  slug: string;
+}
+
+/** Batched lookup of (title, slug) for a topic-id set. */
+function loadTopicAnchors(topicIds: number[]): Map<number, TopicAnchorRow> {
+  const map = new Map<number, TopicAnchorRow>();
+  if (topicIds.length === 0) return map;
+  const placeholders = topicIds.map(() => "?").join(",");
+  const rows = getDb()
+    .prepare(
+      `SELECT id, title, slug FROM topics WHERE id IN (${placeholders})`,
+    )
+    .all(...topicIds) as TopicAnchorRow[];
+  for (const r of rows) map.set(r.id, r);
+  return map;
+}
+
+/**
+ * Apply the quality validator to each entry. Returns a parallel
+ * array of validation outcomes plus the count of weak entries. The
+ * topic anchors used per entry are the union of all its topic_ids'
+ * titles + slugs — a summary that references ANY of its source
+ * topics counts as anchored.
+ */
+async function validateSubjectEntries(
+  entries: SubjectEntry[],
+): Promise<{
+  total: number;
+  weak: number;
+  perEntry: Array<{ ok: boolean; reasons: string[]; signals: string[] }>;
+}> {
+  const { validateSummary } = await import("./topic-summary-validator");
+  const allTopicIds = Array.from(
+    new Set(entries.flatMap((e) => e.topic_ids ?? [])),
+  );
+  const anchors = loadTopicAnchors(allTopicIds);
+  let weak = 0;
+  const perEntry = entries.map((e) => {
+    const titles = (e.topic_ids ?? [])
+      .map((id) => anchors.get(id))
+      .filter((r): r is TopicAnchorRow => !!r);
+    // Merge the label itself into the anchor set too — extractor labels
+    // are derived from the source topics' content, so a summary
+    // referencing the label still anchors.
+    const combined = {
+      title: e.label,
+      aliases: titles.flatMap((t) => [t.title, t.slug]),
+    };
+    const v = validateSummary(e.summary, combined);
+    if (!v.ok) weak++;
+    return { ok: v.ok, reasons: v.reasons, signals: v.signals };
+  });
+  return { total: entries.length, weak, perEntry };
+}
+
+/**
+ * Persist a row to summary_validation_log so we can later audit
+ * whether the regen loop is actually saving entries (vs paying a
+ * Sonnet round-trip for the same weak output). Source identifies
+ * which path fired ('subject' = extraction-time, 'backfill' = the
+ * one-shot pass, 'topic' = future per-topic generator hook).
+ */
+function logValidation(args: {
+  source: "topic" | "subject" | "backfill";
+  refId: number | null;
+  userId: number | null;
+  total: number;
+  passedFirst: number;
+  regenerated: number;
+  passedAfterRegen: number;
+  remainedWeak: number;
+  notes?: string | null;
+}): void {
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO summary_validation_log
+           (ts, source, ref_id, user_id, total, passed_first,
+            regenerated, passed_after_regen, remained_weak, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Date.now(),
+        args.source,
+        args.refId,
+        args.userId,
+        args.total,
+        args.passedFirst,
+        args.regenerated,
+        args.passedAfterRegen,
+        args.remainedWeak,
+        args.notes ?? null,
+      );
+  } catch (err) {
+    console.warn(
+      "[spar-subjects] failed to log validation:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * Top-level orchestrator for #431. Runs the extractor, validates the
+ * outcome, regenerates ONCE with a tighter prompt if any entry is
+ * weak, then stamps each surviving weak entry with
+ * `quality_flag: 'weak'` so downstream readers can filter. Pass-quality
+ * entries get `quality_flag: 'pass'`. Logs the full pipeline result.
+ */
+async function extractAndValidate(
+  userId: number,
+  date: string,
+): Promise<SubjectEntry[]> {
+  // Pass 1.
+  let entries = await runExtractDaySubjects(userId, date);
+  if (entries.length === 0) {
+    logValidation({
+      source: "subject",
+      refId: null,
+      userId,
+      total: 0,
+      passedFirst: 0,
+      regenerated: 0,
+      passedAfterRegen: 0,
+      remainedWeak: 0,
+      notes: "empty extraction",
+    });
+    return entries;
+  }
+  let v = await validateSubjectEntries(entries);
+  const passedFirst = v.total - v.weak;
+  let regenerated = 0;
+  let passedAfterRegen = 0;
+
+  if (v.weak > 0) {
+    regenerated = 1;
+    const regen = await runExtractDaySubjects(userId, date, REGEN_PROMPT_PREFIX);
+    if (regen.length > 0) {
+      const vr = await validateSubjectEntries(regen);
+      // Keep the regenerated set ONLY if it has strictly fewer weak
+      // entries than the original — a regen that came back worse
+      // would be a downgrade, so stay with pass-1 in that case.
+      if (vr.weak < v.weak) {
+        entries = regen;
+        v = vr;
+      }
+      passedAfterRegen = entries.length - v.weak;
+    }
+  }
+
+  for (let i = 0; i < entries.length; i++) {
+    entries[i] = { ...entries[i], quality_flag: v.perEntry[i].ok ? "pass" : "weak" };
+  }
+
+  logValidation({
+    source: "subject",
+    refId: null,
+    userId,
+    total: entries.length,
+    passedFirst,
+    regenerated,
+    passedAfterRegen,
+    remainedWeak: entries.length - passedFirst - (passedAfterRegen - passedFirst),
+    notes: `passes=${entries.length - v.weak} weak=${v.weak}`,
+  });
+  return entries;
 }
 
 /**
@@ -274,7 +488,10 @@ export async function getOrExtractSubjects(
     }
   }
 
-  const subjects = await extractDaySubjects(userId, date);
+  // Remark #431: route extraction through the validation + regen-once
+  // wrapper so every cached row carries a quality_flag and the audit
+  // log captures whether the regen pass paid off.
+  const subjects = await extractAndValidate(userId, date);
 
   // Persist (upsert — re-extraction overwrites stale cache).
   try {

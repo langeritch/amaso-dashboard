@@ -163,10 +163,18 @@ export async function GET(req: NextRequest) {
         WHERE user_id = ? AND date IN (${datePlaceholders})`,
     )
     .all(user.id, ...dateList) as DailySubjectsRow[];
+  // Remark #431: filter weak-flagged subjects out of the day card
+  // payload by default. The chip strip is meant for at-a-glance
+  // signal; noisy summaries belong in admin tooling, not here.
+  const includeWeak = url.searchParams.get("includeWeak") === "1";
   const subjectsByDate = new Map<string, SubjectEntry[]>();
   for (const row of subjectsRows) {
     try {
-      subjectsByDate.set(row.date, JSON.parse(row.subjects) as SubjectEntry[]);
+      const parsed = JSON.parse(row.subjects) as SubjectEntry[];
+      const filtered = includeWeak
+        ? parsed
+        : parsed.filter((s) => s.quality_flag !== "weak");
+      subjectsByDate.set(row.date, filtered);
     } catch {
       /* skip corrupt rows */
     }
