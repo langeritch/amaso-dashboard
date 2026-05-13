@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft } from "lucide-react";
 import AssistantMarkdown from "./AssistantMarkdown";
+import { useSpar } from "./SparContext";
 
 /**
  * Layer 5 — read-only history browser. Lives inside SparSidebar
@@ -311,8 +312,9 @@ function TopicDetail({
   fallbackTitle: string;
   onBack: () => void;
 }) {
+  const { setActiveTopic } = useSpar();
   const [data, setData] = useState<{
-    topic: { title: string; summary: string | null };
+    topic: { id: number; slug: string; title: string; summary: string | null };
     messages: HistoryMessage[];
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -335,9 +337,12 @@ function TopicDetail({
   const topicTitle = data?.topic.title ?? fallbackTitle;
 
   function handleAskAboutThis() {
-    window.dispatchEvent(
-      new CustomEvent("spar:prefill", { detail: { text: "Tell me more about: " + topicTitle } }),
-    );
+    if (!data?.topic) return;
+    setActiveTopic({
+      id: data.topic.id,
+      slug: data.topic.slug,
+      title: data.topic.title,
+    });
     onBack();
   }
 

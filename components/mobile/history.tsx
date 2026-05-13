@@ -58,7 +58,19 @@ type Detail =
       topicFilter?: { slug: string; title: string }
     }
 
-export default function HistoryScreen({ onBack, onNavigateToChat }: { onBack: () => void; onNavigateToChat?: (prefill?: string) => void }) {
+export default function HistoryScreen({
+  onBack,
+  onNavigateToChat,
+  onScopeTopic,
+}: {
+  onBack: () => void
+  onNavigateToChat?: (prefill?: string) => void
+  /** Push an active topic up to MobileApp. When invoked the parent
+   *  sets the activeTopic state and switches to the chat screen;
+   *  the composer renders a TopicPill and the next send tags the
+   *  /api/spar body with `topicId`. */
+  onScopeTopic?: (topic: { id: number; slug: string; title: string }) => void
+}) {
   const [tab, setTab] = useState<"topic" | "day">("topic")
   const [detail, setDetail] = useState<Detail | null>(null)
   // Layer 5: full-text search across messages + extracted facts. The
@@ -74,9 +86,12 @@ export default function HistoryScreen({ onBack, onNavigateToChat }: { onBack: ()
         slug={detail.slug}
         fallbackTitle={detail.title}
         onBack={() => setDetail(null)}
-        onAskAboutThis={(text) => {
-          window.dispatchEvent(new CustomEvent("spar:prefill", { detail: { text } }))
-          if (onNavigateToChat) onNavigateToChat(text)
+        onScopeTopic={(topic) => {
+          if (onScopeTopic) {
+            onScopeTopic(topic)
+          } else if (onNavigateToChat) {
+            onNavigateToChat()
+          }
           onBack()
         }}
       />
@@ -875,8 +890,21 @@ function DayList({
   )
 }
 
-function TopicDetail({ slug, fallbackTitle, onBack, onAskAboutThis }: { slug: string; fallbackTitle: string; onBack: () => void; onAskAboutThis?: (text: string) => void }) {
-  const [data, setData] = useState<{ topic: { title: string; summary: string | null }; messages: HistoryMessage[] } | null>(null)
+function TopicDetail({
+  slug,
+  fallbackTitle,
+  onBack,
+  onScopeTopic,
+}: {
+  slug: string
+  fallbackTitle: string
+  onBack: () => void
+  onScopeTopic?: (topic: { id: number; slug: string; title: string }) => void
+}) {
+  const [data, setData] = useState<{
+    topic: { id: number; slug: string; title: string; summary: string | null }
+    messages: HistoryMessage[]
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -901,10 +929,14 @@ function TopicDetail({ slug, fallbackTitle, onBack, onAskAboutThis }: { slug: st
           : data.messages.length === 0 ? <Empty msg="No messages tied to this topic." />
           : <MessageStream messages={data.messages} />}
       </div>
-      {data && data.messages.length > 0 && onAskAboutThis && (
+      {data && data.messages.length > 0 && onScopeTopic && (
         <div style={{ padding: "8px 12px 16px", flexShrink: 0 }}>
           <button
-            onClick={() => onAskAboutThis("Tell me more about: " + topicTitle)}
+            onClick={() => onScopeTopic({
+              id: data.topic.id,
+              slug: data.topic.slug,
+              title: data.topic.title,
+            })}
             style={{
               width: "100%", padding: "10px 0", fontSize: 13,
               background: "rgba(249,115,22,0.08)", border: "1px solid rgba(249,115,22,0.28)",
