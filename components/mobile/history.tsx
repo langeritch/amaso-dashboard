@@ -228,6 +228,52 @@ interface SearchBucket {
   date: string
   messages: Array<{ id: number; conversationId: number; role: string; createdAt: number; date: string; snippet: string }>
   facts: Array<{ id: number; date: string; classification: string; brainFile: string; section: string; snippet: string }>
+  /** Remark #482 — consolidated SubjectEntry hits from daily_subjects. */
+  subjects: Array<{ date: string; label: string; section: string; snippet: string }>
+}
+
+interface BrainSearchHit {
+  relPath: string
+  section: string | null
+  date: string | null
+  snippet: string
+}
+
+interface SearchPayload {
+  buckets: SearchBucket[]
+  brain: BrainSearchHit[]
+  totalMessages: number
+  totalFacts: number
+  totalSubjects: number
+  totalBrain: number
+}
+
+/** Visual badge for a search hit source. Four colours mirror the
+ *  facts-panel palette so users learn the language quickly:
+ *  message = neutral, fact = green, subject = amber, brain = orange. */
+function SourcePill({ source }: { source: "message" | "fact" | "subject" | "brain" }) {
+  const styles = {
+    message: { bg: "var(--bg-3)", fg: "var(--fg-3)" },
+    fact: { bg: "rgba(110,231,168,0.15)", fg: "#6ee7a8" },
+    subject: { bg: "rgba(252,211,77,0.15)", fg: "#fcd34d" },
+    brain: { bg: "rgba(249,115,22,0.15)", fg: "#f97316" },
+  } as const
+  const s = styles[source]
+  return (
+    <span
+      className="t-mono"
+      style={{
+        display: "inline-block",
+        fontSize: 9, padding: "1px 6px", borderRadius: 999,
+        background: s.bg, color: s.fg,
+        textTransform: "lowercase", letterSpacing: 0.4,
+        marginRight: 6,
+        verticalAlign: "1px",
+      }}
+    >
+      {source}
+    </span>
+  )
 }
 
 function SearchResults({
@@ -237,7 +283,7 @@ function SearchResults({
   query: string
   onOpenConversation: (date: string, conversationId: number) => void
 }) {
-  const [data, setData] = useState<{ buckets: SearchBucket[]; totalMessages: number; totalFacts: number } | null>(null)
+  const [data, setData] = useState<SearchPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -249,8 +295,11 @@ function SearchResults({
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
         .then((d) => { if (!cancelled) setData({
           buckets: Array.isArray(d.buckets) ? d.buckets : [],
+          brain: Array.isArray(d.brain) ? d.brain : [],
           totalMessages: d.totalMessages ?? 0,
           totalFacts: d.totalFacts ?? 0,
+          totalSubjects: d.totalSubjects ?? 0,
+          totalBrain: d.totalBrain ?? 0,
         }) })
         .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
     }, 280)
@@ -259,7 +308,8 @@ function SearchResults({
 
   if (error) return <Empty msg={`Couldn't search (${error}).`} />
   if (data === null) return <Empty msg="Searching…" />
-  if (data.buckets.length === 0) return <Empty msg={`No matches for "${query}".`} />
+  const totalHits = data.totalMessages + data.totalFacts + data.totalSubjects + data.totalBrain
+  if (totalHits === 0) return <Empty msg={`No matches for "${query}".`} />
 
   return (
     <div className="amaso-scroll" style={{ flex: 1 }}>
@@ -268,8 +318,44 @@ function SearchResults({
         textTransform: "uppercase", letterSpacing: "0.18em",
         borderBottom: "1px solid var(--rule)",
       }}>
-        {data.totalMessages} {data.totalMessages === 1 ? "message" : "messages"} · {data.totalFacts} {data.totalFacts === 1 ? "fact" : "facts"} · {data.buckets.length} {data.buckets.length === 1 ? "day" : "days"}
+        {data.totalMessages} msg · {data.totalFacts} facts · {data.totalSubjects} subj · {data.totalBrain} brain · {data.buckets.length} {data.buckets.length === 1 ? "day" : "days"}
       </div>
+      {data.brain.length > 0 && (
+        <div style={{ padding: "12px 12px 4px" }}>
+          <div className="t-mono" style={{
+            fontSize: 9, color: "var(--fg-4)",
+            textTransform: "uppercase", letterSpacing: "0.18em",
+            marginBottom: 6,
+          }}>Brain · {data.totalBrain}</div>
+          {data.brain.map((h) => (
+            <a
+              key={h.relPath + ":" + (h.section ?? "")}
+              href={`/brain?file=${encodeURIComponent(h.relPath)}${h.section ? "&section=" + encodeURIComponent(h.section) : ""}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: "block",
+                padding: "8px 10px", marginBottom: 4,
+                background: "var(--bg-1)", borderLeft: "2px solid #f97316",
+                borderRadius: "0 6px 6px 0",
+                fontSize: 12, lineHeight: 1.45, color: "var(--fg-2)",
+                textDecoration: "none",
+              }}
+            >
+              <div style={{ marginBottom: 4 }}>
+                <SourcePill source="brain" />
+                <span className="t-mono" style={{
+                  fontSize: 9, color: "var(--fg-4)",
+                  textTransform: "uppercase", letterSpacing: "0.12em",
+                }}>
+                  {h.relPath}{h.section ? ` · ${h.section}` : ""}
+                </span>
+              </div>
+              <div dangerouslySetInnerHTML={{ __html: h.snippet }} />
+            </a>
+          ))}
+        </div>
+      )}
       <div style={{ padding: "8px 12px 32px" }}>
         {data.buckets.map((b) => {
           // Pick a conversation id for the day. Search hits already
@@ -296,6 +382,23 @@ function SearchResults({
               <div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg)" }}>{dayLabel(b.date)}</div>
               <div className="t-mono" style={{ fontSize: 9, color: "var(--fg-4)" }}>{b.date}</div>
             </button>
+            {(b.subjects ?? []).map((s, i) => (
+              <div key={`s-${b.date}-${i}`} style={{
+                padding: "6px 10px", marginBottom: 4,
+                background: "var(--bg-1)", borderLeft: "2px solid #fcd34d",
+                borderRadius: "0 6px 6px 0",
+                fontSize: 12, lineHeight: 1.45, color: "var(--fg-2)",
+              }}>
+                <div style={{ marginBottom: 4 }}>
+                  <SourcePill source="subject" />
+                  <span className="t-mono" style={{
+                    fontSize: 9, color: "var(--fg-4)",
+                    textTransform: "uppercase", letterSpacing: "0.12em",
+                  }}>{s.section} · {s.label}</span>
+                </div>
+                <div dangerouslySetInnerHTML={{ __html: s.snippet }} />
+              </div>
+            ))}
             {b.facts.map((f) => (
               <div key={`f-${f.id}`} style={{
                 padding: "6px 10px", marginBottom: 4,
@@ -303,6 +406,7 @@ function SearchResults({
                 borderRadius: "0 6px 6px 0",
                 fontSize: 12, lineHeight: 1.45, color: "var(--fg-2)",
               }}>
+                <SourcePill source="fact" />
                 <ClassificationPill label={f.classification} />
                 <span dangerouslySetInnerHTML={{ __html: f.snippet }} />
               </div>
@@ -315,6 +419,7 @@ function SearchResults({
                 fontSize: 12, lineHeight: 1.45,
                 color: m.role === "assistant" ? "var(--fg-2)" : "var(--fg-3)",
               }}>
+                <SourcePill source="message" />
                 <span className="t-mono" style={{
                   fontSize: 9, color: m.role === "assistant" ? "var(--accent)" : "var(--fg-4)",
                   textTransform: "uppercase", letterSpacing: "0.12em", marginRight: 6,

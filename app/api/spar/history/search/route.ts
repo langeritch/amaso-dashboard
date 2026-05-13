@@ -22,7 +22,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { apiRequireNonClient } from "@/lib/guard";
-import { getDb } from "@/lib/db";
+import { getDb, publicUser } from "@/lib/db";
+import { searchBrain } from "@/lib/brain-search";
+import type { SubjectEntry } from "@/lib/spar-subjects";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,10 +47,31 @@ interface FactHit {
   snippet: string;
 }
 
+/** Remark #482 — subject hit type. Sourced from daily_subjects rows;
+ *  weak-flagged subjects are filtered out before the LIKE match so
+ *  noisy summaries don't pollute results. */
+interface SubjectHit {
+  date: string;
+  label: string;
+  section: string;
+  snippet: string;
+}
+
+/** Remark #482 — brain markdown hit. Sourced from lib/brain-search;
+ *  each carries an optional section anchor that the UI links into
+ *  /brain?file=…&section=…. */
+interface BrainSearchHit {
+  relPath: string;
+  section: string | null;
+  date: string | null;
+  snippet: string;
+}
+
 interface DayBucket {
   date: string;
   messages: MessageHit[];
   facts: FactHit[];
+  subjects: SubjectHit[];
 }
 
 const SNIPPET_RADIUS = 80; // chars around the match
@@ -181,11 +204,46 @@ export async function GET(req: NextRequest) {
     section: string;
   }>;
 
+  // Remark #482: also LIKE-search daily_subjects. The subjects column
+  // is a JSON array, so we use SQL LIKE as a coarse pre-filter on
+  // the JSON blob then parse + per-entry-match in JS. Skips weak-
+  // flagged entries so noisy summaries stay out of search.
+  const subjectRows = db
+    .prepare(
+      `SELECT user_id, date, subjects FROM daily_subjects
+        WHERE user_id = ? AND subjects LIKE ? ESCAPE '\\'`,
+    )
+    .all(targetUserId, like) as Array<{
+    user_id: number;
+    date: string;
+    subjects: string;
+  }>;
+  const subjectHits: SubjectHit[] = [];
+  for (const row of subjectRows) {
+    let parsed: SubjectEntry[];
+    try {
+      parsed = JSON.parse(row.subjects) as SubjectEntry[];
+    } catch {
+      continue;
+    }
+    for (const s of parsed) {
+      if (s.quality_flag === "weak") continue;
+      const haystack = `${s.label}\n${s.summary}`;
+      if (!haystack.toLowerCase().includes(q.toLowerCase())) continue;
+      subjectHits.push({
+        date: row.date,
+        label: s.label,
+        section: s.section,
+        snippet: buildSnippet(haystack, q),
+      });
+    }
+  }
+
   const buckets = new Map<string, DayBucket>();
   const bucket = (date: string): DayBucket => {
     let b = buckets.get(date);
     if (!b) {
-      b = { date, messages: [], facts: [] };
+      b = { date, messages: [], facts: [], subjects: [] };
       buckets.set(date, b);
     }
     return b;
@@ -212,6 +270,49 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  for (const h of subjectHits) {
+    bucket(h.date).subjects.push({
+      date: h.date,
+      label: h.label,
+      section: h.section,
+      snippet: h.snippet,
+    });
+  }
+
+  // Remark #482: brain markdown corpus search. Off the SQLite path;
+  // runs entirely on disk via lib/brain-search. Results are
+  // surfaced as a flat array so the UI can render a "Brain"
+  // section at the top of the result set (they cover knowledge
+  // across all time, not bucketed by day). The walker enforces
+  // per-user ACL — non-admins see only shared roots + own subtree.
+  const callerUser = publicUser({
+    id: auth.user.id,
+    email: auth.user.email,
+    name: auth.user.name,
+    role: auth.user.role,
+    created_at: auth.user.created_at,
+  });
+  // Admin-only targeted-user search keeps the brain scope locked to
+  // the search target (not the caller) so admins probing another
+  // user's history don't accidentally leak their own private brain.
+  const brainTargetUser = targetUserId === auth.user.id
+    ? callerUser
+    : (db
+        .prepare(
+          "SELECT id, email, name, role, created_at FROM users WHERE id = ?",
+        )
+        .get(targetUserId) as
+        | { id: number; email: string; name: string; role: "admin" | "team" | "client"; created_at: number }
+        | undefined);
+  const brainHits: BrainSearchHit[] = brainTargetUser
+    ? (await searchBrain(publicUser(brainTargetUser), q)).map((h) => ({
+        relPath: h.relPath,
+        section: h.section,
+        date: h.date,
+        snippet: h.snippet,
+      }))
+    : [];
+
   const ordered = Array.from(buckets.values()).sort((a, b) =>
     a.date < b.date ? 1 : a.date > b.date ? -1 : 0,
   );
@@ -219,7 +320,10 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     query: q,
     buckets: ordered,
+    brain: brainHits,
     totalMessages: messageRows.length,
     totalFacts: factRows.length,
+    totalSubjects: subjectHits.length,
+    totalBrain: brainHits.length,
   });
 }
