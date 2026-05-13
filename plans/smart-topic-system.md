@@ -391,3 +391,67 @@ remaining Layer-0/2 polish (#390, #391, #392, #431). Some of these
 overlap with the writers shipped here (e.g. #477's daily-log
 cross-refs are now produced by `lib/daily-log-writer.ts`); they're
 left for the user to close manually.
+
+### Layer 6.5 — tense-aware recall hints (SHIPPED 2026-05-14)
+
+Layer 6's recall tool fires only when the model itself decides to —
+trigger phrases live in the system prompt ("last time", "on Tuesday",
+explicit dates). That misses implicit backwards references via verb
+tense: when the user says "I've been struggling with X" or "we've
+decided on pricing" or "had finished the audit", those are perfect-
+tense constructions that semantically point backwards in time and
+almost always mean "this connects to something we already discussed".
+
+Layer 6.5 closes that gap with a conservative regex pipeline at the
+top of the spar route:
+
+1. **Detector** — `lib/spar-tense-hints.ts:detectTenseHint`. Four
+   matcher patterns (present-perfect-progressive, present-perfect
+   verb list, has/have + been + verb-ed/ing, past-perfect) plus a
+   four-item reject list ("I've got", "have you …", "I've a …",
+   "has it been …") to skip the common false-positive shapes.
+   Returns `{ matchedPhrase, suggestedKeyword, context }` or null.
+
+2. **Keyword extraction** — bias toward proper nouns (sentence-cased
+   tokens), fall back to longest non-stopword. Stopword list drops
+   the trigger verbs themselves so they can't end up as the suggested
+   `recall(value:…)` argument.
+
+3. **Gates in the route**:
+   - The latest user message must NOT already carry a `[topics: …]`
+     inline tag (the topic-context system already wired the
+     connection — no need to nudge).
+   - The user must have at least one prior day's `daily_chats` row
+     (day-1 users have nothing to recall, so skip).
+   - The hint never auto-fires recall — it only nudges the model.
+     Cost discipline lives in that separation.
+
+4. **Audit** — `tense_hint_invocations(id, user_id, ts, matched_phrase,
+   suggested_keyword, conversation_id, model_called_recall)`. The row
+   is inserted with `model_called_recall = 0` at injection time and
+   back-filled to 1 in the route's `finally` block when an
+   `onToolUse` event for the `recall` tool fired during that turn.
+   `SELECT AVG(model_called_recall) FROM tense_hint_invocations …`
+   tells us whether the hint is actually pulling its weight.
+
+5. **Cost shape** — when a match fires, the hint block adds roughly
+   60–80 tokens to the system prompt for that turn only. When no
+   match fires (the common case), zero tokens. False-positive cost
+   is bounded by the same 80 tokens; false-negative cost is the
+   counterfactual recall the model didn't realise to make.
+
+Tests in `tests/spar-tense-hints.test.ts` (16 cases) cover the
+matchers, the reject list, the keyword extractor (proper-noun
+preference + longest-non-stopword fallback + null-when-empty), and
+the hint-block renderer. Three real-shape examples for sanity:
+
+  - "I've been struggling with the audio glitch in spar."
+    → match "I've been struggling", key "glitch".
+  - "We've decided on the woonklasse pricing tiers …"
+    → match "We've decided", key "woonklasse".
+  - "Yassine had finished the HyET pricing thing last week."
+    → match "had finished", key "HyET".
+
+Negative examples that correctly skip:
+  - "I've got coffee, just woke up." → no fire.
+  - "Have you seen Noah's latest message?" → no fire.
