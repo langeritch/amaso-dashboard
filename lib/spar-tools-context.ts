@@ -3123,6 +3123,44 @@ export function deletePlaybookTool(
   return { ok: removed };
 }
 
+export async function webSearchTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const query = getStr(args, "query").slice(0, 200);
+  const num = typeof args.num_results === "number"
+    ? Math.min(Math.max(Math.floor(args.num_results), 1), 8)
+    : 4;
+  const { webSearch } = await import("./spar-web-search");
+  return webSearch(query, num, ctx.user.id);
+}
+
+/**
+ * Layer 6 — recall tool wrapper. Thin adapter around lib/spar-recall
+ * that validates the model's JSON arguments before dispatch. The tool
+ * is scoped to the calling user via ctx.user.id; passing some other
+ * user's facts back into the model is not possible from this entry.
+ */
+export async function recallTool(
+  ctx: SparContext,
+  args: Record<string, unknown>,
+) {
+  const type = getStr(args, "type");
+  if (type !== "date" && type !== "topic" && type !== "keyword") {
+    throw new Error(
+      `recall: type must be 'date' | 'topic' | 'keyword', got "${String(type)}"`,
+    );
+  }
+  const value = getStr(args, "value");
+  if (!value.trim()) throw new Error("recall: value is required");
+  let limit: number | undefined;
+  if (typeof args.limit === "number" && Number.isFinite(args.limit)) {
+    limit = Math.floor(args.limit);
+  }
+  const { recall } = await import("./spar-recall");
+  return recall({ userId: ctx.user.id, type, value, limit });
+}
+
 /** Registry of tool names → handler. Used by the internal API route. */
 export const TOOL_HANDLERS: Record<
   string,
@@ -3150,11 +3188,13 @@ export const TOOL_HANDLERS: Record<
   list_brain_files: (ctx, a) => listBrainFilesTool(ctx, a),
   read_graph: (ctx) => readGraphTool(ctx),
   write_graph: (ctx, a) => writeGraphTool(ctx, a),
+  recall: (ctx, a) => recallTool(ctx, a),
   youtube_search: (ctx, a) => youtubeSearchTool(ctx, a),
   youtube_play: (ctx, a) => youtubePlayTool(ctx, a),
   youtube_enqueue: (ctx, a) => youtubeEnqueueTool(ctx, a),
   youtube_stop: (ctx) => youtubeStopTool(ctx),
   youtube_status: (ctx) => youtubeStatusTool(ctx),
+  web_search: (ctx, a) => webSearchTool(ctx, a),
   filler_set_mode: (ctx, a) => fillerSetModeTool(ctx, a),
   filler_get_mode: (ctx) => fillerGetModeTool(ctx),
   autopilot_status: (ctx) => ({

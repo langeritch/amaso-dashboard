@@ -296,6 +296,34 @@ const TOOLS = [
     },
   },
   {
+    name: "recall",
+    description:
+      "Layer 6 — past-context lookup. Use when the user references something from an earlier conversation that's no longer in your context window: 'last time', 'on Tuesday', 'what did we decide about X', 'remember when', or any explicit past-date / past-topic / past-project reference. Returns a JSON envelope of day-bucketed messages + extracted facts. Cost discipline: call ONCE per qualifying turn, not every turn — each call replays up to ~200 message lines.\n" +
+      "  • type='date'    — value is YYYY-MM-DD (Europe/Amsterdam). Loads that day's full transcript + extracted facts.\n" +
+      "  • type='topic'   — value is a topic slug OR a substring of the topic title. Matches across all days.\n" +
+      "  • type='keyword' — value is a free-text keyword. LIKE-searches message bodies + extracted facts, grouped by date.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          enum: ["date", "topic", "keyword"],
+          description: "Which lookup mode to run.",
+        },
+        value: {
+          type: "string",
+          description: "The date / topic-slug / keyword to recall. For type='date' must match YYYY-MM-DD.",
+        },
+        limit: {
+          type: "number",
+          description: "Max total message lines across all returned buckets. Default 200, hard ceiling 600.",
+        },
+      },
+      required: ["type", "value"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "read_user_profile",
     description:
       "Read the calling user's persona profile (markdown) — language, tone, verbosity, communication style, and behavioural rules tailored to this specific user. The profile is already injected into your system prompt; reach for this tool only when you need to see the exact text before updating it via update_user_profile.",

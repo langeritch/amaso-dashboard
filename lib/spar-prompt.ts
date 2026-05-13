@@ -39,6 +39,7 @@ export const SPAR_TOOLS = [
   "list_brain_files",
   "read_graph",
   "write_graph",
+  "recall",
   // Chat
   "list_channels",
   "read_messages",
@@ -156,6 +157,50 @@ system. The active user is ${userName}. The shape:
   • lessons.md — hard-won technical solutions.
   • goals.md — week / quarter / year ambitions.
   • timeline.md — chronological spine.
+
+Lazy loading — only soul.md, profile.md, and brain.md are pre-loaded.
+Every other file is on-demand. Call read_brain_file when the conversation
+actually needs the content — do NOT preload everything on every turn.
+Trigger rules (mirrors brain.md → Loading Protocol):
+  • User mentions a project or asks "what's the status of X"
+    → read_brain_file('projects.md')
+  • User mentions a person by name
+    → read_brain_file('people.md') + read_brain_file('users/<name>/profile.md')
+  • User asks about plans, goals, priorities, this week / quarter / year
+    → read_brain_file('goals.md')
+  • User asks about a past decision or architecture call
+    → read_brain_file('decisions.md')
+  • User has a technical problem; check what's been solved before
+    → read_brain_file('lessons.md')
+  • User asks about history, timeline, or major milestones
+    → read_brain_file('timeline.md')
+  • User mentions dates, birthdays, upcoming events, reminders
+    → read_brain_file('users/${userSlug}/calendar.md')
+  • User asks about their own preferences or taste
+    → read_brain_file('users/${userSlug}/preferences.md')
+  • User asks "what were we doing on <date>"
+    → read_brain_file('users/${userSlug}/daily/<YYYY-MM-DD>.md')
+  • User asks about team-level events on a specific day
+    → read_brain_file('daily/<YYYY-MM-DD>.md')
+Do NOT call read_brain_file preemptively "just in case". Wait for an
+actual conversational signal that the content is needed.
+
+Recall — past-context lookup:
+You have a dedicated 'recall' tool for replaying past conversations and
+facts that aren't currently in your context window. Invoke it ONCE per
+qualifying turn, not every turn — every call replays up to ~200
+message lines, so the cost discipline matters. Trigger phrases:
+  • "last time we talked about …"   → recall({type:'topic', value:'…'})
+  • "what did we decide about <X>"   → recall({type:'keyword', value:'<X>'})
+  • "on Tuesday / yesterday / last week" / "on YYYY-MM-DD"
+                                     → recall({type:'date', value:'YYYY-MM-DD'})
+  • "remember when / earlier you said …" → recall({type:'keyword', value:'<phrase>'})
+  • Explicit "what was that project / person / decision called"
+                                     → recall({type:'topic', value:'<slug or guess>'})
+The result is a JSON envelope of day-bucketed messages + extracted
+facts. Use the messages to ground yourself in what was actually said
+and the facts to surface durable decisions / commitments. Don't quote
+the bundle back at the user verbatim — fold it into your reply.
 
 You read AND write brain markdown files directly via three dedicated tools:
   • list_brain_files — discover what exists. Pass an optional subdir

@@ -10,6 +10,13 @@ Status:
 - **Layer 4 shipped 2026-05-13** — nightly post-day fact extraction. See the
   "Layer 4 — post-day extraction (SHIPPED)" section below for what actually
   landed vs. the original plan.
+- **Layer 5 shipped 2026-05-14** — extracted-facts sidebar in the day-detail
+  history view + full-text search bar across messages and facts. See the
+  "Layer 5 — history UI (SHIPPED)" section below.
+- **Layer 6 shipped 2026-05-14** — recall tool for past-context lookup.
+  Three modes (date / topic / keyword). Wired into the spar tool registry,
+  MCP server, and system prompt. recall_invocations audit table.
+  See the "Layer 6 — recall tool (SHIPPED)" section below.
 
 This doc is the spec for the remaining layers so we don't invent
 architecture mid-build.
@@ -184,38 +191,87 @@ Out of scope (intentionally left to future passes):
   Open Loops/Energy already, but smarter heuristic backups (the `#455`
   remark) are not implemented.
 
-### Layer 5 — history UI
+### Layer 5 — history UI (SHIPPED 2026-05-14)
 
-New route `/topics` in the dashboard:
+The original plan called for a /topics route in the desktop dashboard.
+What shipped instead — closer to what the actual product needed — is a
+mobile-first history view inside the PWA with two tabs (By topic / By
+day) plus two new polish pieces from the dispatch:
 
-- Sidebar: list active topics for current user, sorted by
-  last_active_at, with message count + relative date.
-- Main: drill into a topic → message list (reuse spar transcript
-  rendering), summary at top, ability to archive / rename.
-- Search: substring match over topic titles + summaries (cheap LIKE
-  query — the dataset stays small).
+1. **Extracted-facts sidebar** in the day-detail view.
+   - Component: `FactsPanel` in `components/mobile/history.tsx`.
+   - Endpoint: `GET /api/spar/history/facts?date=YYYY-MM-DD[&user=]`.
+   - Renders each fact as a clickable row with a classification pill
+     (orange = self, cyan = people, green = work, amber = time). Click
+     opens `/brain?file=<path>&section=<heading>` in a new tab.
+   - Empty state: "Not extracted yet for this day. Run extraction."
+     with a button that POSTs `/api/admin/extract-facts {date, force}`.
+     The button is admin-gated server-side via `apiRequireAdmin`.
 
-API surface: `GET /api/topics`, `GET /api/topics/:slug`, `PATCH
-/api/topics/:slug`. All scoped to the session user.
+2. **Full-text history search**.
+   - Sticky search bar at the top of `HistoryScreen`.
+   - Endpoint: `GET /api/spar/history/search?q=<query>[&user=][&limit=]`.
+   - SQLite `LIKE` over `spar_messages.content` AND `extracted_facts.fact`,
+     grouped by `date_local`, snippet-highlighted (`<mark>` wrapper).
+   - 200-char snippet around each match. Empty query (< 2 chars)
+     returns the buckets-tab view; non-empty promotes to results.
+   - Clicking a result-day jumps into that day's full DayDetail
+     (which then loads the facts sidebar too).
 
-### Layer 6 — brain integration
+Schema additions (alongside the existing `daily_chats`,
+`daily_extractions`, `daily_subjects`, `topic_transitions`):
 
-When a topic crosses thresholds — say message_count ≥ 20, or
-last_active_at within last 7 days plus age ≥ 14 days — promote its
-summary into a brain file:
+- `extracted_facts(id, extraction_id FK CASCADE, user_id, date, fact,
+  classification, brain_file, section, source_message_ids, created_at)`
+  with indexes on `(user_id, date DESC)`, `extraction_id`, and
+  `(user_id, classification)`. Populated by `lib/daily-extraction.ts`
+  during each successful run (DELETE-then-INSERT per extraction, so
+  reruns don't accumulate stale rows).
 
-- Project-flavored topics → entry in global `projects.md`.
-- Person-flavored topics → entry in global `people.md` + that person's
-  `users/<name>/profile.md`.
-- Personal-pattern topics → `users/<user>/profile.md` or
-  `lessons.md` depending on shape.
+Out of scope (left for the topic-driven daily_subjects pass referenced
+by the open #444 / #446 / #448 / #450 / #453 / #454 / #455 remarks):
+the topic-archive / rename UI and the original /topics desktop route.
 
-Detection of "flavor" runs through Haiku once per promotion. The
-templater (`lib/brain-vars.ts`) is already in place so promoted entries
-can reference `{{user.name}}` etc. without duplication.
+### Layer 6 — recall tool (SHIPPED 2026-05-14)
 
-Promotion is one-way: brain files are the durable record. Topics keep
-existing in case they get reactivated.
+The original Layer 6 brief in this file (promote topic summaries into
+brain files based on activity thresholds) is partially superseded by
+Layer 4's brain-write extraction. What shipped under the Layer 6 name
+in the 2026-05-14 dispatch is what was actually needed: a recall tool
+the assistant can invoke when the user references past context.
+
+Implementation:
+
+- `lib/spar-recall.ts` — pure logic. Three modes:
+  - `type='date'`     — loads YYYY-MM-DD's full transcript + facts.
+  - `type='topic'`    — resolves the slug or partial title to a row in
+    the `topics` table, then loads cross-day messages via
+    `spar_message_topics` + facts whose body or section matches the
+    title or raw input.
+  - `type='keyword'`  — `LIKE` search across `spar_messages.content`
+    AND `extracted_facts.fact`, grouped by `date_local`.
+- Cost discipline lives in the lib, not the model: default limit 200
+  total message lines per call, hard ceiling 600. Each bucket is
+  flagged `truncated: true` if it would have exceeded the budget.
+- Registered as the `recall` tool in `lib/spar-tools-context.ts`
+  (TOOL_HANDLERS + the `recallTool` adapter), advertised in
+  `lib/spar-prompt.ts` (`SPAR_TOOLS` + trigger-phrase guidance in the
+  system prompt), and exposed via JSON-Schema in
+  `scripts/spar-mcp-server.mjs` so the local MCP server forwards it to
+  the same `/api/internal/spar-tools` loopback that all other tools use.
+- Audit log: `recall_invocations(id, user_id, ts, type, value,
+  result_count, total_messages, total_facts)`. Lets us see which
+  trigger phrases the model actually fires on and what they returned,
+  for tuning later.
+
+Tests in `tests/spar-recall.test.ts` (10 cases) cover all three modes
++ limit ceiling + audit row write/skip + bad-input rejection. All
+pass against a seeded fixture user with cross-day topic + facts.
+
+Brain promotion (the originally-planned Layer 6 — auto-promoting topic
+summaries into projects.md / people.md / etc.) is left for a future
+pass. Layer 4 already covers the durable-fact write path; the cycle
+where topic summaries themselves get promoted is the open work.
 
 ## Open decisions before Layer 1
 
