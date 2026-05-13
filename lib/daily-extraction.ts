@@ -561,6 +561,63 @@ function existingSuccessful(userId: number, date: string): boolean {
   return row?.status === "success";
 }
 
+/**
+ * Fetch the parent daily_extractions.id for a given (user, date). Used
+ * by the per-fact persistence path to link extracted_facts rows.
+ * Returns null if no row exists yet (which shouldn't happen — the
+ * parent is upserted to status='pending' before facts are processed).
+ */
+function getExtractionId(userId: number, date: string): number | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      "SELECT id FROM daily_extractions WHERE user_id = ? AND date = ?",
+    )
+    .get(userId, date) as { id: number } | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * Replace the extracted_facts rows for one extraction. Called once per
+ * successful run, AFTER brain-file writes complete, so a partial
+ * run doesn't leave stale rows in the child table. We use DELETE +
+ * INSERT (not ON CONFLICT) because facts have no natural unique key
+ * other than their full body, and re-extraction can produce a
+ * different shape entirely.
+ */
+function persistFactRows(args: {
+  extractionId: number;
+  userId: number;
+  date: string;
+  facts: ExtractedFact[];
+}): void {
+  const db = getDb();
+  const now = Date.now();
+  db.transaction(() => {
+    db.prepare(
+      "DELETE FROM extracted_facts WHERE extraction_id = ?",
+    ).run(args.extractionId);
+    const ins = db.prepare(
+      `INSERT INTO extracted_facts
+         (extraction_id, user_id, date, fact, classification, brain_file, section, source_message_ids, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const f of args.facts) {
+      ins.run(
+        args.extractionId,
+        args.userId,
+        args.date,
+        f.fact,
+        f.classification,
+        f.brain_file,
+        f.section,
+        JSON.stringify(f.source_message_ids ?? []),
+        now,
+      );
+    }
+  })();
+}
+
 // ---------------------------------------------------------------------------
 // Main pipeline
 // ---------------------------------------------------------------------------
@@ -786,6 +843,19 @@ export async function extractDailyFacts(
       sourceMessageIds: messages.map((m) => m.id),
       errorText: null,
     });
+    // Persist per-fact rows for the Layer 5 history sidebar + Layer 6
+    // recall(type='keyword') search path. Done AFTER the parent row
+    // is upserted to status=success so the FK link points at the
+    // committed row, not an in-flight one.
+    const extractionId = getExtractionId(opts.userId, date);
+    if (extractionId !== null && facts.length > 0) {
+      persistFactRows({
+        extractionId,
+        userId: opts.userId,
+        date,
+        facts,
+      });
+    }
   }
 
   const breakdown = Object.entries(classifications)
