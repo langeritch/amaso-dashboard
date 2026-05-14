@@ -4,11 +4,12 @@ import dynamic from "next/dynamic"
 import type { MobileUser } from "./mobile/types"
 
 const MobileApp = dynamic(() => import("./mobile/app"), { ssr: false })
+const DisableZoom = dynamic(() => import("./mobile/DisableZoom"), { ssr: false })
 
 // Must match CACHE_VERSION in public/sw.js. Used to detect stale SWs on cold
 // standalone launches where sessionStorage is empty and the version-change
 // path never fires.
-const SW_EXPECTED_VERSION = "v65-2026-05-14-topic-aware-sidebar"
+const SW_EXPECTED_VERSION = "v66-2026-05-14-pwa-no-zoom"
 
 interface Props {
   user?: MobileUser
@@ -204,6 +205,7 @@ export default function MobileShell({ user }: Props) {
         overflow: "hidden",
       }}
     >
+      <DisableZoom />
       <MobileApp user={user} />
     </div>
   )

@@ -634,3 +634,27 @@ body.spar-remote-flash::after {
   30%  { opacity: 1; }
   100% { opacity: 0; }
 }
+
+/* AMASO// PWA zoom kill.
+ * Belt-and-braces against pinch + double-tap zoom on the mobile PWA.
+ * `components/mobile/DisableZoom.tsx` carries the JS layer for the
+ * iOS Safari surfaces that ignore `user-scalable=no`; this block is
+ * the CSS layer for everything else.
+ *
+ * Strictly scoped:
+ *   - html/body rules sit inside a (max-width: 767px) media query so
+ *     the desktop dashboard's text-selection + pan + browser-native
+ *     zoom stay completely untouched.
+ *   - The touch-callout disable lives under .amaso-mobile-shell only.
+ *     Globally killing the callout would also kill long-press copy
+ *     on the desktop sidebar, which we don't want. */
+@media (max-width: 767px) {
+  html, body {
+    touch-action: pan-x pan-y;
+    -ms-content-zooming: none;
+  }
+}
+.amaso-mobile-shell,
+.amaso-mobile-shell * {
+  -webkit-touch-callout: none;
+}
