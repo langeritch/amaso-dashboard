@@ -17,7 +17,7 @@
 //   - Clients listening for the `controllerchange` event trigger a soft
 //     reload so the new assets actually get fetched — hot-reload semantics
 //     without a visible prompt.
-const CACHE_VERSION = "v64-2026-05-14-daily-log-decay";
+const CACHE_VERSION = "v65-2026-05-14-topic-aware-sidebar";
 const RUNTIME_CACHE = `amaso-runtime-${CACHE_VERSION}`;
 const SHELL_CACHE = `amaso-shell-${CACHE_VERSION}`;
 

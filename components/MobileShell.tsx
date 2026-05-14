@@ -8,7 +8,7 @@ const MobileApp = dynamic(() => import("./mobile/app"), { ssr: false })
 // Must match CACHE_VERSION in public/sw.js. Used to detect stale SWs on cold
 // standalone launches where sessionStorage is empty and the version-change
 // path never fires.
-const SW_EXPECTED_VERSION = "v64-2026-05-14-daily-log-decay"
+const SW_EXPECTED_VERSION = "v65-2026-05-14-topic-aware-sidebar"
 
 interface Props {
   user?: MobileUser

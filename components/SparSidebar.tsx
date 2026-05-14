@@ -381,11 +381,26 @@ function ChatList({
                     </>
                   )}
                 </span>
-                {c.preview && (
+                {c.dominantTopic ? (
+                  // Topic-aware row label. When the conversation has
+                  // a dominant topic (most-tagged across its
+                  // messages), surface that name in place of the
+                  // message-preview snippet — Santi scans these and
+                  // wants topic anchors over raw first-line text.
+                  // The leading # is a subtle accent that marks the
+                  // row as topic-anchored without shouting.
+                  <span
+                    className="mt-0.5 line-clamp-1 flex w-full items-center gap-1 text-[11px] text-orange-300/85"
+                    title={`Dominant topic for this chat: ${c.dominantTopic.title} (${c.dominantTopic.messageCount} tagged msgs)`}
+                  >
+                    <span aria-hidden className="text-orange-400/70">#</span>
+                    <span className="truncate">{c.dominantTopic.title}</span>
+                  </span>
+                ) : c.preview ? (
                   <span className="mt-0.5 line-clamp-1 w-full text-[11px] text-neutral-500">
                     {c.preview}
                   </span>
-                )}
+                ) : null}
               </button>
               <button
                 type="button"

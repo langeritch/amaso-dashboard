@@ -45,23 +45,13 @@ interface HistoryMessage {
   createdAt: number;
 }
 
-type Detail =
-  | { kind: "topic"; slug: string; title: string }
-  | { kind: "day"; date: string; conversationId: number };
+type Detail = { kind: "day"; date: string; conversationId: number };
 
 export default function SparHistoryPanel() {
+  const { setActiveTopic } = useSpar();
   const [sub, setSub] = useState<HistorySubTab>("topic");
   const [detail, setDetail] = useState<Detail | null>(null);
 
-  if (detail?.kind === "topic") {
-    return (
-      <TopicDetail
-        slug={detail.slug}
-        fallbackTitle={detail.title}
-        onBack={() => setDetail(null)}
-      />
-    );
-  }
   if (detail?.kind === "day") {
     return (
       <DayDetail
@@ -76,8 +66,13 @@ export default function SparHistoryPanel() {
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <SubTabs active={sub} onChange={setSub} />
       {sub === "topic" ? (
+        // Click on a topic row swaps the MAIN chat view to that
+        // topic by setting the composer pill — same dispatch the
+        // topic-pill work shipped from TopicDetail's "Ask AI about
+        // this" button. The detail/peek panel is gone; the row is
+        // now the single entry point.
         <TopicList
-          onOpen={(t) => setDetail({ kind: "topic", slug: t.slug, title: t.title })}
+          onOpen={(t) => setActiveTopic({ id: t.id, slug: t.slug, title: t.title })}
         />
       ) : (
         <DayList
@@ -303,78 +298,13 @@ function DayList({ onOpen }: { onOpen: (d: DaySummary) => void }) {
   );
 }
 
-function TopicDetail({
-  slug,
-  fallbackTitle,
-  onBack,
-}: {
-  slug: string;
-  fallbackTitle: string;
-  onBack: () => void;
-}) {
-  const { setActiveTopic } = useSpar();
-  const [data, setData] = useState<{
-    topic: { id: number; slug: string; title: string; summary: string | null };
-    messages: HistoryMessage[];
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`/api/spar/topics/${encodeURIComponent(slug)}/messages`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d) => {
-        if (!cancelled) setData(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [slug]);
-
-  const topicTitle = data?.topic.title ?? fallbackTitle;
-
-  function handleAskAboutThis() {
-    if (!data?.topic) return;
-    setActiveTopic({
-      id: data.topic.id,
-      slug: data.topic.slug,
-      title: data.topic.title,
-    });
-    onBack();
-  }
-
-  return (
-    <DetailFrame
-      title={topicTitle}
-      subtitle={data?.topic.summary ?? null}
-      onBack={onBack}
-    >
-      {error ? (
-        <Empty msg={`Couldn't load topic (${error}).`} />
-      ) : data === null ? (
-        <LoadingHint />
-      ) : data.messages.length === 0 ? (
-        <Empty msg="No messages tied to this topic." />
-      ) : (
-        <>
-          <MessageStream messages={data.messages} />
-          <div className="shrink-0 px-3 pb-3">
-            <button
-              type="button"
-              onClick={handleAskAboutThis}
-              className="mt-4 w-full rounded-lg border border-orange-500/30 bg-orange-500/10 py-2 text-sm text-orange-300 transition hover:bg-orange-500/20"
-            >
-              Ask AI about this
-            </button>
-          </div>
-        </>
-      )}
-    </DetailFrame>
-  );
-}
+// TopicDetail (in-panel "peek" view) was removed in the
+// topic-aware-sidebar dispatch. Clicking a topic row in the By-topic
+// tab now swaps the main chat view directly via setActiveTopic — the
+// detail view's "Ask AI about this" button was the only path that
+// led here, and the row click is now the canonical entry point. The
+// /api/spar/topics/[slug]/messages endpoint is unaffected for any
+// future surface that wants to mount its own detail view.
 
 function DayDetail({
   date,
