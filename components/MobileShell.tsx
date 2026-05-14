@@ -9,7 +9,7 @@ const DisableZoom = dynamic(() => import("./mobile/DisableZoom"), { ssr: false }
 // Must match CACHE_VERSION in public/sw.js. Used to detect stale SWs on cold
 // standalone launches where sessionStorage is empty and the version-change
 // path never fires.
-const SW_EXPECTED_VERSION = "v66-2026-05-14-pwa-no-zoom"
+const SW_EXPECTED_VERSION = "v67-2026-05-14-topic-mirror-view"
 
 interface Props {
   user?: MobileUser

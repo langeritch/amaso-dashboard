@@ -48,7 +48,7 @@ interface HistoryMessage {
 type Detail = { kind: "day"; date: string; conversationId: number };
 
 export default function SparHistoryPanel() {
-  const { setActiveTopic } = useSpar();
+  const { setMirrorTopic } = useSpar();
   const [sub, setSub] = useState<HistorySubTab>("topic");
   const [detail, setDetail] = useState<Detail | null>(null);
 
@@ -66,13 +66,14 @@ export default function SparHistoryPanel() {
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <SubTabs active={sub} onChange={setSub} />
       {sub === "topic" ? (
-        // Click on a topic row swaps the MAIN chat view to that
-        // topic by setting the composer pill — same dispatch the
-        // topic-pill work shipped from TopicDetail's "Ask AI about
-        // this" button. The detail/peek panel is gone; the row is
-        // now the single entry point.
+        // Click on a topic row opens the read-only TopicMirrorView in
+        // the main chat region. The mirror exposes its own "Ask about
+        // this" button, which is the canonical promotion path to a
+        // live conversation with the topic pill loaded. Mirrors the
+        // PWA flow in components/mobile/history.tsx (TopicDetail ->
+        // onScopeTopic).
         <TopicList
-          onOpen={(t) => setActiveTopic({ id: t.id, slug: t.slug, title: t.title })}
+          onOpen={(t) => setMirrorTopic({ id: t.id, slug: t.slug, title: t.title })}
         />
       ) : (
         <DayList
@@ -298,13 +299,12 @@ function DayList({ onOpen }: { onOpen: (d: DaySummary) => void }) {
   );
 }
 
-// TopicDetail (in-panel "peek" view) was removed in the
-// topic-aware-sidebar dispatch. Clicking a topic row in the By-topic
-// tab now swaps the main chat view directly via setActiveTopic — the
-// detail view's "Ask AI about this" button was the only path that
-// led here, and the row click is now the canonical entry point. The
-// /api/spar/topics/[slug]/messages endpoint is unaffected for any
-// future surface that wants to mount its own detail view.
+// TopicDetail (in-panel "peek" view) lives elsewhere now: clicking a
+// topic row sets mirrorTopic on the spar context, which SparFullView
+// reads to swap its text-mode chat region for <TopicMirrorView>. The
+// mirror owns the topic transcript fetch + the "Ask about this"
+// promotion button. Visual parity with the PWA TopicDetail in
+// components/mobile/history.tsx is the goal of the swap.
 
 function DayDetail({
   date,
