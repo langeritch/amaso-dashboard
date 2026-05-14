@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "tsx --test tests/**/*.test.ts",
     "extract-facts": "tsx scripts/extract-daily-facts.ts",
-    "backfill-summary-validation": "tsx scripts/backfill-summary-validation.ts"
+    "backfill-summary-validation": "tsx scripts/backfill-summary-validation.ts",
+    "compact-daily-logs": "tsx scripts/compact-daily-logs.ts"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
