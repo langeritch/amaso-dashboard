@@ -29,7 +29,10 @@
 
 import { getProject } from "./config";
 import { pushToUsers } from "./push";
-import { markDispatchCompleted } from "./spar-dispatch";
+import {
+  findPendingDispatchForSession,
+  markDispatchCompleted,
+} from "./spar-dispatch";
 import { readAutopilotDirective } from "./autopilot";
 import {
   appendMessage,
@@ -447,13 +450,26 @@ export function armIdle(
   const s = getOrCreate(sid, projectId);
   const wasArmed = s.awaitingResponse;
   s.awaitingResponse = true;
-  if (userId != null) s.notifyUserId = userId;
+  // Only stamp notifyUserId on a FRESH arm. Re-arms during an in-flight
+  // dispatch (paste body \n, delayed \r, watchdog retry, OR an unrelated
+  // user typing in the same project's terminal viewer) must not clobber
+  // the original dispatcher — fireIdle still falls back through the
+  // dispatch log for the authoritative dispatcher id, but keeping the
+  // in-memory pointer pinned to the original writer makes the manual-
+  // typing path (no dispatch log entry) behave intuitively too.
+  if (userId != null && !wasArmed) s.notifyUserId = userId;
   s.armedAt = Date.now();
-  s.firstActivitySeen = false;
-  s.hasSeenWorking = false;
-  clearSettle(s);
+  // Reset the per-cycle observation flags only on a FRESH arm. Re-arming
+  // during an ongoing dispatch must not forget that we already observed
+  // `thinking` — otherwise the worker→at_prompt transition that follows
+  // bails silently because hasSeenWorking is false again.
+  if (!wasArmed) {
+    s.firstActivitySeen = false;
+    s.hasSeenWorking = false;
+    clearSettle(s);
+  }
   console.log(
-    `[idle] armed session=${sid} project=${projectId} user=${s.notifyUserId} reArm=${wasArmed} (waiting for thinking→at_prompt)`,
+    `[idle] armed session=${sid} project=${projectId} user=${s.notifyUserId} reArm=${wasArmed} hasSeenWorking=${s.hasSeenWorking} (waiting for thinking→at_prompt)`,
   );
 }
 
@@ -550,7 +566,11 @@ export function noteActivity(projectId: string, sessionId?: string): void {
   );
 
   if (detection.state === "thinking") {
+    const flipped = !s.hasSeenWorking;
     s.hasSeenWorking = true;
+    if (flipped) {
+      console.log(`[idle] saw thinking session=${sid} — hasSeenWorking=true`);
+    }
     // If we'd previously scheduled a fire and Claude started thinking
     // again, cancel the settle — clearly not done.
     if (s.settleTimer) {
@@ -566,7 +586,12 @@ export function noteActivity(projectId: string, sessionId?: string): void {
     // Worker is blocked on a human, not done. Don't fire and don't
     // schedule. Cancel any pending settle so a previous "looked done"
     // stretch doesn't ride this through.
-    if (s.settleTimer) clearSettle(s);
+    if (s.settleTimer) {
+      clearSettle(s);
+      console.log(
+        `[idle] cancelled settle session=${sid} — state=${detection.state}`,
+      );
+    }
     return;
   }
 
@@ -644,12 +669,25 @@ function fireIdle(sessionId: string): void {
     return;
   }
   s.awaitingResponse = false;
-  const userId = s.notifyUserId;
+  const projectId = s.projectId;
+  // Prefer the durable dispatch log over the in-memory notifyUserId: any
+  // `\r`/`\n` writeTerminal call (user B typing in the same project's
+  // terminal viewer while user A's dispatch is in flight) stamps
+  // notifyUserId with whoever wrote last, so the auto-report would land
+  // in the wrong user's spar chat. The dispatch log entry is keyed to
+  // the original dispatcher and survives the in-memory clobber.
+  const pendingForSession = findPendingDispatchForSession(projectId, sessionId);
+  const userId = pendingForSession?.userId ?? s.notifyUserId;
   if (userId == null) {
     console.log(`[idle] fireIdle session=${sessionId} bailed (notifyUserId=null)`);
     return;
   }
-  const projectId = s.projectId;
+  if (pendingForSession && pendingForSession.userId !== s.notifyUserId) {
+    console.log(
+      `[idle] fireIdle session=${sessionId} routing to dispatcher=${pendingForSession.userId} ` +
+        `(in-memory notifyUserId=${s.notifyUserId} was clobbered by an unrelated writer)`,
+    );
+  }
   const project = getProject(projectId);
   const name = project?.name ?? projectId;
   // Stage 3: compute the session's 1-based ordinal among the project's

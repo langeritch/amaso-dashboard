@@ -384,6 +384,41 @@ export function markDispatchCompleted(
   return null;
 }
 
+/** Find the newest still-in-flight dispatch for `sessionId` across all
+ *  users. Used by the auto-report path to scope the nudge back to the
+ *  original dispatcher even when somebody else's keystroke has since
+ *  re-armed the idle watcher (which clobbers the in-memory
+ *  `notifyUserId`). Falls back to scanning by projectId when the entry
+ *  predates Stage 2 (no sessionId stored). Returns null when nothing
+ *  matches — caller falls back to the latest writer in that case. */
+export function findPendingDispatchForSession(
+  projectId: string,
+  sessionId: string,
+): { userId: number; entry: DispatchLogEntry } | null {
+  const eligible = (r: DispatchLogEntry) =>
+    r.projectId === projectId &&
+    r.status === "sent" &&
+    r.completedAt === undefined;
+  let bestSession: { userId: number; entry: DispatchLogEntry } | null = null;
+  let bestProject: { userId: number; entry: DispatchLogEntry } | null = null;
+  for (const [userId, rows] of logStore()) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (!eligible(r)) continue;
+      if (r.sessionId === sessionId) {
+        if (!bestSession || r.confirmedAt > bestSession.entry.confirmedAt) {
+          bestSession = { userId, entry: r };
+        }
+      } else if (!r.sessionId) {
+        if (!bestProject || r.confirmedAt > bestProject.entry.confirmedAt) {
+          bestProject = { userId, entry: r };
+        }
+      }
+    }
+  }
+  return bestSession ?? bestProject;
+}
+
 /** Every dispatch that's still in-flight across all users — status
  *  "sent" with no completedAt yet. Used by the post-restart recovery
  *  in lib/terminal-backend.ts to re-arm idle detection for entries
