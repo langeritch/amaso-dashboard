@@ -27,13 +27,13 @@
 // === projectId for every existing call site, so behaviour is the
 // same as pre-refactor.
 
-import { getProject } from "./config";
+import { isAutopilotEnabled } from "./autopilot";
+import { getProject, projectTerminalAutoReportEnabled } from "./config";
 import { pushToUsers } from "./push";
 import {
   findPendingDispatchForSession,
   markDispatchCompleted,
 } from "./spar-dispatch";
-import { readAutopilotDirective } from "./autopilot";
 import {
   appendMessage,
   createConversation,
@@ -42,11 +42,30 @@ import {
 import { detectWorkerState } from "./terminal-state";
 import { listSessionsForProject } from "./terminal-backend";
 import { broadcastDispatchCompleted, broadcastSparMessage } from "./ws";
+import { tryClaimAutoReport } from "./spar-autoreport-dedupe";
 
 // How long to wait after observing a non-thinking state before firing.
 // Absorbs the ~0.5–1 s gaps Claude leaves between tool calls without
 // letting the state look "done" for long enough to false-positive.
 const SETTLE_MS = 1_500;
+
+// Byte-silence fallback path. When the terminal is not running Claude
+// Code (no braille-spinner OSC title → detectWorkerState never returns
+// "thinking" → hasSeenWorking never flips), we still want an auto-report
+// after any user-armed command goes quiet. Runs in parallel with the
+// Claude state machine; whichever fires first wins. Because Claude's
+// settle is 1.5s and byte-silence is 10s, Claude always wins when its
+// title is being painted. The byte threshold filters trivial commands
+// (cd, short echo, clean `git status`) that arm but produce no
+// meaningful output the operator would want a chat ping about.
+const BYTE_SILENCE_QUIET_MS = Math.max(
+  1_000,
+  Number(process.env.AMASO_AUTOREPORT_QUIET_MS ?? "10000"),
+);
+const BYTE_SILENCE_MIN_BYTES = Math.max(
+  0,
+  Number(process.env.AMASO_AUTOREPORT_MIN_BYTES ?? "200"),
+);
 
 // Loop guard for the auto-report nudge.
 //
@@ -105,14 +124,16 @@ const NUDGE_BATCH_MS = 5_000;
 interface PendingNudge {
   projectId: string;
   sessionId: string;
-  completedDispatchId: string;
+  /** Dispatch row this nudge was tied to, when the working→idle cycle
+   *  was triggered by a spar dispatch. Null when the cycle came from
+   *  the user typing directly into the terminal — the nudge still
+   *  fires (workers-sidebar lifecycle), just without a dispatch id to
+   *  cross-reference. */
+  completedDispatchId: string | null;
+  /** Human-readable worker name (project name, plus "#N" suffix when
+   *  the project has multiple live sessions). Surfaces verbatim inside
+   *  the `Check terminal "<sessionLabel>" in this chat` line. */
   sessionLabel: string;
-  /** Full text of the dispatch prompt that just finished. Captured at
-   *  fireIdle time from markDispatchCompleted's returned entry, then
-   *  surfaced inline in the merged nudge so the model can decide
-   *  success/failure + match the right open remark without first having
-   *  to look it up. Empty string when the dispatch row vanished. */
-  prompt: string;
 }
 
 const pendingNudgesByUser = new Map<number, PendingNudge[]>();
@@ -127,7 +148,7 @@ function queueNudge(userId: number, nudge: PendingNudge) {
   queue.push(nudge);
   console.log(
     `[idle] queueNudge user=${userId} project=${nudge.projectId} session=${nudge.sessionId} ` +
-      `dispatch=${nudge.completedDispatchId} promptLen=${nudge.prompt.length} ` +
+      `dispatch=${nudge.completedDispatchId ?? "<none>"} label=${nudge.sessionLabel} ` +
       `pendingCount=${queue.length} timerArmed=${NUDGE_BATCH_MS}ms`,
   );
   // (Re)start the batch timer so late arrivals extend the window —
@@ -141,12 +162,9 @@ function queueNudge(userId: number, nudge: PendingNudge) {
   );
 }
 
-// Hard ceiling on a single auto-report nudge message. When the merged
-// nudge (boilerplate + label list + "Last sent prompts" bullets) would
-// exceed this, splitNudgesIntoChunks splits the projects across
-// multiple sequential messages instead of dumping one wall of text.
-// Picked to comfortably fit a typical 5-12 project burst without
-// chunking, while keeping any one chunk readable as a chat bubble.
+// Hard ceiling on a single auto-report nudge message. With the new
+// minimal copy each worker contributes ~45-60 chars, so a 1500-char
+// budget comfortably holds 25+ workers per chunk before splitting.
 const NUDGE_MAX_CHARS = 1500;
 
 // Delay between sequential chunk emissions for the same user. Long
@@ -154,68 +172,42 @@ const NUDGE_MAX_CHARS = 1500;
 // them, short enough that the operator perceives them as one event.
 const NUDGE_CHUNK_DELAY_MS = 250;
 
-function buildNudgeMessage(
-  chunk: PendingNudge[],
-  customInstructions: string,
-): string {
-  const labels: string[] = [];
+// One pointer line per worker. Singular completion renders as exactly
+// one line; concurrent completions get newline-stacked so the operator
+// sees every worker that just flipped to idle without scrolling. No
+// summary, no result blurb, no last-prompt block, no custom instructions
+// — the message is the pointer, not the recap.
+//
+// Autopilot-off branches to a more explicit wording so Santi knows the
+// project is done and waiting on him directly (no autonomous loop will
+// pick it up). Autopilot-on keeps the original pointer wording — the
+// autonomous-loop side of that branch is handled in a follow-up.
+function buildNudgeMessage(chunk: PendingNudge[], userId: number): string {
+  const autopilotOn = isAutopilotEnabled(userId);
+  const seen = new Set<string>();
+  const lines: string[] = [];
   for (const n of chunk) {
-    if (!labels.includes(n.sessionLabel)) labels.push(n.sessionLabel);
-  }
-  const labelList = labels.join(", ");
-  const perProject =
-    labels.length === 1
-      ? "Read the terminal"
-      : "For each project, read the terminal";
-
-  // One bullet per project carrying the FULL prompt text that just
-  // finished. The model uses these to decide success/failure and to
-  // match the right open remark in the queue without having to grep
-  // recent dispatches itself.
-  const promptLines: string[] = [];
-  for (const n of chunk) {
-    if (n.prompt && n.prompt.trim().length > 0) {
-      promptLines.push(`- ${n.sessionLabel}: ${n.prompt.trim()}`);
+    if (seen.has(n.sessionLabel)) continue;
+    seen.add(n.sessionLabel);
+    if (autopilotOn) {
+      lines.push(`Check terminal "${n.sessionLabel}" in this chat`);
+    } else {
+      lines.push(`${n.sessionLabel} is done. Autopilot is off — waiting on you.`);
     }
   }
-  const promptBlock =
-    promptLines.length > 0
-      ? `\n\nLast sent prompts:\n${promptLines.join("\n")}`
-      : "";
-
-  // User-set custom instructions ride along on EVERY auto-report,
-  // basic or smart mode alike. Stored in `autopilot_users.directive`
-  // (legacy field name; surfaces in the UI as "Custom instructions").
-  // The smart-mode autopilot block also reads the same value as a
-  // strategic directive — the Auto-report sidebar makes that single
-  // source of truth explicit.
-  const trimmedInstructions = customInstructions.trim();
-  const instructionsBlock =
-    trimmedInstructions.length > 0
-      ? `\n\nCustom instructions:\n${trimmedInstructions}`
-      : "";
-
-  return (
-    `Check the output of terminal for ${labelList}. ` +
-    `${perProject} to see if the dispatched task finished successfully. ` +
-    `If it did, resolve any open remark that matches the task ` +
-    `using resolve_remark.${promptBlock}${instructionsBlock}`
-  );
+  return lines.join("\n");
 }
 
 // Greedy packer: walks the nudges in arrival order, accumulating
-// projects into a chunk until adding the next project would push the
-// rendered message past NUDGE_MAX_CHARS. A single project whose own
-// prompt already exceeds the limit becomes its own chunk (we can't
-// split a single dispatch — it's atomic). Order is preserved so the
-// chat reads in the same sequence the terminals finished.
+// workers into a chunk until adding the next would push the rendered
+// message past NUDGE_MAX_CHARS. Order is preserved so the chat reads
+// in the same sequence the terminals finished.
 function splitNudgesIntoChunks(
   nudges: PendingNudge[],
-  customInstructions: string,
+  userId: number,
 ): PendingNudge[][] {
   if (nudges.length === 0) return [];
-  if (buildNudgeMessage(nudges, customInstructions).length <= NUDGE_MAX_CHARS)
-    return [nudges];
+  if (buildNudgeMessage(nudges, userId).length <= NUDGE_MAX_CHARS) return [nudges];
 
   const chunks: PendingNudge[][] = [];
   let current: PendingNudge[] = [];
@@ -223,7 +215,7 @@ function splitNudgesIntoChunks(
     const candidate = [...current, n];
     if (
       current.length > 0 &&
-      buildNudgeMessage(candidate, customInstructions).length > NUDGE_MAX_CHARS
+      buildNudgeMessage(candidate, userId).length > NUDGE_MAX_CHARS
     ) {
       chunks.push(current);
       current = [n];
@@ -235,12 +227,8 @@ function splitNudgesIntoChunks(
   return chunks;
 }
 
-function emitNudgeChunk(
-  userId: number,
-  chunk: PendingNudge[],
-  customInstructions: string,
-): void {
-  const nudge = buildNudgeMessage(chunk, customInstructions);
+function emitNudgeChunk(userId: number, chunk: PendingNudge[]): void {
+  const nudge = buildNudgeMessage(chunk, userId);
 
   const toolCalls =
     chunk.length === 1
@@ -333,24 +321,24 @@ function flushNudgeBatch(userId: number) {
     return;
   }
 
-  // Pull the user's custom instructions once per flush so every chunk
-  // in this batch carries the same trailing block. Reading inside the
-  // loop would race a mid-flush directive edit and produce chunks that
-  // disagree with each other.
-  let customInstructions = "";
-  try {
-    customInstructions = readAutopilotDirective(userId);
-  } catch (err) {
-    console.warn(
-      `[idle] readAutopilotDirective threw for user=${userId}:`,
-      err instanceof Error ? err.message : String(err),
-    );
+  // Cross-emitter dedupe (see lib/spar-autoreport-dedupe.ts). Claim
+  // BEFORE chunking so the whole batch shares one slot — multi-chunk
+  // batches must not self-collide. Loss means task-agent already
+  // posted a completion summary covering the same root cause; drop
+  // the nudge before persist + broadcast. The ref uses dispatch id
+  // when present, otherwise the session id of the first nudge so
+  // manually-typed cycles (no dispatch row) still dedupe cleanly.
+  const refBase =
+    nudges[0].completedDispatchId ?? `session:${nudges[0].sessionId}`;
+  const dedupeRef =
+    refBase + (nudges.length > 1 ? `+${nudges.length - 1}more` : "");
+  if (!tryClaimAutoReport(userId, { ref: dedupeRef, source: "terminal-idle" })) {
+    return;
   }
 
-  const chunks = splitNudgesIntoChunks(nudges, customInstructions);
+  const chunks = splitNudgesIntoChunks(nudges, userId);
   console.log(
-    `[idle] flushNudgeBatch user=${userId} nudges=${nudges.length} chunks=${chunks.length} ` +
-      `instructionsLen=${customInstructions.length}`,
+    `[idle] flushNudgeBatch user=${userId} nudges=${nudges.length} chunks=${chunks.length}`,
   );
 
   // Emit chunks sequentially with a short delay between them. The first
@@ -362,12 +350,9 @@ function flushNudgeBatch(userId: number) {
   // back into one giant prompt.
   chunks.forEach((chunk, idx) => {
     if (idx === 0) {
-      emitNudgeChunk(userId, chunk, customInstructions);
+      emitNudgeChunk(userId, chunk);
     } else {
-      setTimeout(
-        () => emitNudgeChunk(userId, chunk, customInstructions),
-        idx * NUDGE_CHUNK_DELAY_MS,
-      );
+      setTimeout(() => emitNudgeChunk(userId, chunk), idx * NUDGE_CHUNK_DELAY_MS);
     }
   });
 }
@@ -393,6 +378,22 @@ interface IdleState {
   /** True once noteActivity has run since the last arm. Logged once
    *  per cycle so diagnostic output stays readable. */
   firstActivitySeen: boolean;
+  /** Bytes of terminal output observed since the last fresh arm.
+   *  Drives the byte-silence fallback path: if at least
+   *  BYTE_SILENCE_MIN_BYTES have flowed and chunks stop for
+   *  BYTE_SILENCE_QUIET_MS, the auto-report fires even without the
+   *  Claude state-machine transition. Reset only on fresh arms so
+   *  re-arms (paste bodies, parallel writers) accumulate. */
+  bytesSinceArm: number;
+  /** Count of chunks observed since the last fresh arm. Purely
+   *  diagnostic — logged when byte-silence fires so we can tell
+   *  "one big chunk" from "lots of trickling output". */
+  chunkCount: number;
+  /** Debounce timer for the byte-silence fallback. (Re)scheduled on
+   *  every incoming chunk; fires fireIdleByteSilence when chunks
+   *  stop landing for BYTE_SILENCE_QUIET_MS. Cleared on settle,
+   *  fireIdle, and cancelIdle so it can't race the Claude path. */
+  quietTimer: NodeJS.Timeout | null;
 }
 
 declare global {
@@ -423,6 +424,9 @@ function getOrCreate(sessionId: string, projectId: string): IdleState {
       settleTimer: null,
       armedAt: null,
       firstActivitySeen: false,
+      bytesSinceArm: 0,
+      chunkCount: 0,
+      quietTimer: null,
     };
     map.set(sessionId, s);
   } else {
@@ -435,6 +439,13 @@ function clearSettle(s: IdleState): void {
   if (s.settleTimer) {
     clearTimeout(s.settleTimer);
     s.settleTimer = null;
+  }
+}
+
+function clearQuiet(s: IdleState): void {
+  if (s.quietTimer) {
+    clearTimeout(s.quietTimer);
+    s.quietTimer = null;
   }
 }
 
@@ -466,10 +477,13 @@ export function armIdle(
   if (!wasArmed) {
     s.firstActivitySeen = false;
     s.hasSeenWorking = false;
+    s.bytesSinceArm = 0;
+    s.chunkCount = 0;
     clearSettle(s);
+    clearQuiet(s);
   }
   console.log(
-    `[idle] armed session=${sid} project=${projectId} user=${s.notifyUserId} reArm=${wasArmed} hasSeenWorking=${s.hasSeenWorking} (waiting for thinking→at_prompt)`,
+    `[idle] armed session=${sid} project=${projectId} user=${s.notifyUserId} reArm=${wasArmed} hasSeenWorking=${s.hasSeenWorking} (waiting for thinking→at_prompt or ${BYTE_SILENCE_QUIET_MS}ms byte silence)`,
   );
 }
 
@@ -535,8 +549,19 @@ export function armIdleWithImmediateTimer(
 /** Called from the data subscriber attached in terminal-backend on
  *  every chunk. Runs detectWorkerState against the live scrollback,
  *  tracks whether we've ever been in `thinking`, and fires the auto-
- *  report on the working→at_prompt transition (after a settle). */
-export function noteActivity(projectId: string, sessionId?: string): void {
+ *  report on the working→at_prompt transition (after a settle).
+ *
+ *  `chunkBytes` is the size of the chunk that triggered this call. Used
+ *  to drive the byte-silence fallback path so non-Claude commands (raw
+ *  shells, npm, build scripts) still produce a nudge when they finish.
+ *  Optional for back-compat with any caller that doesn't pass it; in
+ *  that case the byte path is effectively disabled (no chunks counted)
+ *  and the Claude state-machine path remains the only trigger. */
+export function noteActivity(
+  projectId: string,
+  sessionId?: string,
+  chunkBytes?: number,
+): void {
   const sid = resolveSessionId(projectId, sessionId);
   const s = states().get(sid);
   if (!s || !s.awaitingResponse) return;
@@ -545,6 +570,22 @@ export function noteActivity(projectId: string, sessionId?: string): void {
     const waited = s.armedAt ? Date.now() - s.armedAt : 0;
     console.log(
       `[idle] first chunk after arm session=${sid} project=${projectId} waited=${waited}ms`,
+    );
+  }
+
+  // Byte-silence fallback. Accumulate bytes since arm and (re)schedule
+  // the quiet timer on every chunk so the timer fires only after
+  // BYTE_SILENCE_QUIET_MS of dead air. Runs in parallel with the
+  // Claude state machine below; whichever fires first wins. The
+  // hasSeenWorking gate inside fireIdleByteSilence prevents a
+  // double-fire when both paths converge on the same cycle.
+  if (typeof chunkBytes === "number" && chunkBytes > 0) {
+    s.bytesSinceArm += chunkBytes;
+    s.chunkCount += 1;
+    clearQuiet(s);
+    s.quietTimer = setTimeout(
+      () => fireIdleByteSilence(sid),
+      BYTE_SILENCE_QUIET_MS,
     );
   }
 
@@ -637,7 +678,45 @@ export function cancelIdle(projectId: string, sessionId?: string): void {
   const s = states().get(sid);
   if (!s) return;
   clearSettle(s);
+  clearQuiet(s);
   states().delete(sid);
+}
+
+/** Fallback trigger for non-Claude terminals. Called when the byte-
+ *  silence quiet timer elapses without a new chunk landing. Suppressed
+ *  when the Claude state machine is active (hasSeenWorking=true) — the
+ *  1.5s settle path already handles those cycles and a parallel fire
+ *  would race for the same dispatch. Also gated by a minimum-output
+ *  threshold so trivial commands (cd, short echo, clean git status)
+ *  don't spam the operator's spar chat. */
+function fireIdleByteSilence(sessionId: string): void {
+  const s = states().get(sessionId);
+  if (!s) return;
+  s.quietTimer = null;
+  if (!s.awaitingResponse) {
+    console.log(
+      `[idle] byte-silence noop session=${sessionId} — awaitingResponse=false (already fired)`,
+    );
+    return;
+  }
+  if (s.hasSeenWorking) {
+    // Claude state machine took over since the timer was scheduled.
+    // Let its settle path do the firing so we don't double-emit.
+    console.log(
+      `[idle] byte-silence skipped session=${sessionId} — Claude state-machine active (hasSeenWorking=true)`,
+    );
+    return;
+  }
+  if (s.bytesSinceArm < BYTE_SILENCE_MIN_BYTES) {
+    console.log(
+      `[idle] byte-silence below threshold session=${sessionId} bytes=${s.bytesSinceArm}/${BYTE_SILENCE_MIN_BYTES} chunks=${s.chunkCount} — skipping trivial command`,
+    );
+    return;
+  }
+  console.log(
+    `[idle] byte-silence fired session=${sessionId} bytes=${s.bytesSinceArm} chunks=${s.chunkCount} quietMs=${BYTE_SILENCE_QUIET_MS}`,
+  );
+  fireIdle(sessionId);
 }
 
 /** True when at least one session for `projectId` is mid-dispatch
@@ -664,6 +743,7 @@ function fireIdle(sessionId: string): void {
   const s = states().get(sessionId);
   if (!s) return;
   clearSettle(s);
+  clearQuiet(s);
   if (!s.awaitingResponse) {
     console.log(`[idle] fireIdle session=${sessionId} bailed (awaitingResponse=false)`);
     return;
@@ -714,11 +794,9 @@ function fireIdle(sessionId: string): void {
   // resolver picks the right pending entry when multiple sessions
   // for the same project have queued dispatches.
   let completedDispatchId: string | null = null;
-  let completedPrompt = "";
   try {
     const completed = markDispatchCompleted(userId, projectId, sessionId);
     completedDispatchId = completed?.id ?? null;
-    completedPrompt = completed?.prompt ?? "";
   } catch (err) {
     console.warn(`[idle] markDispatchCompleted threw for project=${projectId}:`, err);
   }
@@ -764,9 +842,16 @@ function fireIdle(sessionId: string): void {
     data: { projectId, sessionId, sessionOrdinal },
   });
 
-  // No-op when this idle wasn't a spar dispatch (manual user typing
-  // straight into a terminal shouldn't litter the spar transcript).
-  if (!completedDispatchId) return;
+  // Feature flag gate — when the project-terminal auto-report chat
+  // message is disabled, bail BEFORE the cooldown latches and BEFORE
+  // queueNudge so the spar transcript stays clean. Everything above
+  // still runs (push, dispatch ack); only the chat-bubble path is gated.
+  if (!projectTerminalAutoReportEnabled()) {
+    console.log(
+      `[idle] auto-report disabled by feature flag — skipping nudge for user=${userId} project=${projectId} session=${sessionId}`,
+    );
+    return;
+  }
 
   // Loop guard. If THIS project's previous auto-report response
   // triggered the sparring partner to dispatch another task INTO THE
@@ -777,25 +862,25 @@ function fireIdle(sessionId: string): void {
   // completion in some other project still gets through.
   if (isAutoReportCooldownActive(userId, projectId)) {
     console.log(
-      `[idle] auto-report cooldown active for user=${userId} project=${projectId} — suppressing nudge session=${sessionId} dispatch=${completedDispatchId}`,
+      `[idle] auto-report cooldown active for user=${userId} project=${projectId} — suppressing nudge session=${sessionId}`,
     );
     return;
   }
 
-  // Hand off to the per-user batch buffer. The actual spar message
-  // (and its WS broadcast) lands when flushNudgeBatch fires after
-  // NUDGE_BATCH_MS of quiet — a 12-terminal blast becomes one
-  // merged "check output of terminals for A, B, …, L" row instead
-  // of twelve separate ones in the chat.
+  // Hand off to the per-user batch buffer. Fires for EVERY working→idle
+  // cycle — dispatch-armed or not — so the workers sidebar lifecycle
+  // (manually-typed prompts as well as dispatched ones) produces the
+  // pointer line in spar chat. The label uses the human-readable
+  // project name plus a "#N" suffix when multiple sessions exist for
+  // the same project, so the operator can pick the right terminal.
   const sessionLabel =
     projectSessionCount > 1 && sessionOrdinal > 0
-      ? `${projectId} session #${sessionOrdinal}`
-      : projectId;
+      ? `${name} #${sessionOrdinal}`
+      : name;
   queueNudge(userId, {
     projectId,
     sessionId,
     completedDispatchId,
     sessionLabel,
-    prompt: completedPrompt,
   });
 }
