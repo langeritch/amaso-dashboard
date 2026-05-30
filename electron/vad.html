@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; media-src 'self' blob: mediastream:;"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:;"
     />
     <title>Amaso VAD</title>
   </head>
@@ -43,6 +43,11 @@
           window.amasoVad.sendError(err && err.message ? err.message : err);
           return;
         }
+
+        // Tell main we're ready. tick() only emits on speech edges, so
+        // without this the popover sits on "Starting mic…" forever
+        // when the user happens to be silent at boot.
+        window.amasoVad.sendState({ speaking: false, rms: 0 });
 
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const src = ctx.createMediaStreamSource(stream);
