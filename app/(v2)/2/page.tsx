@@ -1,2 +1,7 @@
-// Homepage is now the spar chat
-export { default } from "../../../client/page";
+import SparChatClient from '@/components/v2/SparChatClient'
+
+export const dynamic = 'force-dynamic'
+
+export default function V2Page() {
+  return <SparChatClient />
+}
