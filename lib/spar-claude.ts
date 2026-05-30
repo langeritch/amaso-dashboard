@@ -126,9 +126,49 @@ export interface SparStreamHandlers {
   onToolUse?: (e: SparToolUseEvent) => void;
   /** The executor returned a result for an earlier tool_use. */
   onToolResult?: (e: SparToolResultEvent) => void;
+  /** Fires once per top-level assistant event from the CLI — i.e.
+   *  after one full agent turn (its text + tool_use blocks) has been
+   *  delivered. Lets persistence-oriented callers flush their
+   *  per-turn buffer instead of accumulating across the whole run.
+   *  Optional — pass-through callers (the main spar route) ignore
+   *  this and continue to handle text/tool events directly. */
+  onTurnEnd?: () => void;
+  /** Fires once per assistant turn with the token counts the CLI
+   *  reports alongside each message. Callers forward these into the
+   *  NDJSON usage event so the per-message token badge shows real
+   *  numbers (input / output / cache_read / cache_creation). */
+  onUsage?: (e: SparUsageEvent) => void;
 }
 
-function buildPrompt(opts: SparOptions): string {
+/** Token usage extracted from a backend stream. Cumulative across the
+ *  whole run — i.e. the values grow monotonically as the agent loop
+ *  progresses, and the last emission for a given stream is the final
+ *  total for the turn. Both backends (CLI + SDK) handle the per-event
+ *  bookkeeping internally so route-level callers can just forward each
+ *  emission to the client and trust the latest value.
+ *
+ *  Camel-case mirrors the Anthropic API shape (input_tokens, etc.) but
+ *  is uniform across both backends so the NDJSON payload doesn't have
+ *  to branch on the source. */
+export interface SparUsageEvent {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}
+
+/** Internal shape used by dispatchCliEvent to tell the streamFromClaudeCli
+ *  wrapper whether a given emission is a per-turn delta (assistant event)
+ *  or a final cumulative total (result event). The wrapper turns both
+ *  into a single monotonic cumulative emission for the caller. */
+interface CliUsageEmit extends SparUsageEvent {
+  /** True when the values represent the total for the whole run (from
+   *  the CLI's `result` event). False / undefined when they're a single
+   *  assistant turn's delta. */
+  isFinal?: boolean;
+}
+
+function buildPrompt(opts: SparOptions, inlineImages = false): string {
   const lines: string[] = [];
   lines.push(opts.systemPrompt.trim());
   lines.push("");
@@ -189,25 +229,86 @@ function buildPrompt(opts: SparOptions): string {
   for (const m of opts.history) {
     lines.push(`${m.role === "user" ? "User" : "Assistant"}: ${m.content}`);
   }
-  // Attachments live on disk; the CLI has full file access, so the
-  // simplest reliable handoff is just naming the paths in the prompt
-  // and letting the model open them itself.
   const images = opts.images ?? [];
   if (images.length > 0) {
     lines.push("");
-    lines.push("=== ATTACHED FILES ===");
-    lines.push(
-      "The user attached the following files. You can view images directly by reading the file path.",
-    );
-    for (const img of images) {
-      lines.push(`- ${img.path} (${img.type})`);
+    if (inlineImages) {
+      // The image bytes are delivered natively as base64 image content
+      // blocks alongside this text (CLI --input-format stream-json), so
+      // the model sees them directly — no Read tool needed. This is the
+      // reliable path. The old "Read the temp path" handoff depended on
+      // the model voluntarily calling Read, which it skipped under the
+      // voice-first persona — the root cause of "image upload, no reply".
+      lines.push("=== ATTACHED IMAGES ===");
+      lines.push(
+        "The user attached the following image(s), included inline with",
+        "this message. Look at them directly and refer to their contents",
+        "naturally in your reply.",
+      );
+      for (const img of images) {
+        lines.push(`- ${img.name} (${img.type})`);
+      }
+      lines.push("=== END ATTACHED IMAGES ===");
+    } else {
+      // Fallback: the bytes couldn't be inlined, so name the on-disk
+      // paths and let the model open them with its built-in Read tool.
+      lines.push("=== ATTACHED FILES ===");
+      lines.push(
+        "The user attached the following image(s). Use the Read tool on",
+        "each path BEFORE composing your reply so you can actually see",
+        "what they sent — the path alone tells you nothing. Refer to the",
+        "image contents naturally in your response.",
+      );
+      for (const img of images) {
+        lines.push(`- ${img.path} (${img.type})`);
+      }
+      lines.push("=== END ATTACHED FILES ===");
     }
-    lines.push("=== END ATTACHED FILES ===");
   }
   // Prompt the model to produce only the next assistant turn.
   lines.push("");
   lines.push("Reply as Assistant with spoken-style prose only. No role prefix.");
   return lines.join("\n");
+}
+
+/** Read attached images off disk into Anthropic-style base64 image
+ *  content blocks for the CLI's `--input-format stream-json` input.
+ *  Mirrors lib/spar-sdk.ts so the model receives the real bytes
+ *  natively instead of relying on a Read tool call against a temp
+ *  path. Unreadable files are skipped; an empty result makes the
+ *  caller fall back to the legacy path+Read prompt. */
+function buildImageInputBlocks(
+  images: NonNullable<SparOptions["images"]>,
+): Array<{
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string };
+}> {
+  const allowed = new Set([
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+  ]);
+  const blocks: Array<{
+    type: "image";
+    source: { type: "base64"; media_type: string; data: string };
+  }> = [];
+  for (const img of images) {
+    try {
+      const data = fs.readFileSync(img.path).toString("base64");
+      const media_type = allowed.has(img.type) ? img.type : "image/png";
+      blocks.push({
+        type: "image",
+        source: { type: "base64", media_type, data },
+      });
+    } catch (err) {
+      console.warn(
+        `[spar-claude] failed to read image ${img.path} for inline CLI input:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  return blocks;
 }
 
 /** Write a one-shot MCP config file wired to our local spar-mcp-server,
@@ -340,6 +441,11 @@ function flattenToolResultContent(content: unknown): string {
 function dispatchCliEvent(
   raw: string,
   handlers: SparStreamHandlers,
+  /** Internal hook the streamFromClaudeCli wrapper passes in so it can
+   *  distinguish per-turn (assistant) usage from the cumulative total
+   *  on the `result` event. External callers don't need this — they
+   *  see only the normalised cumulative emission via handlers.onUsage. */
+  emitUsageInternal?: (e: CliUsageEmit) => void,
 ): void {
   let evt: unknown;
   try {
@@ -360,7 +466,9 @@ function dispatchCliEvent(
   }
 
   if (type === "assistant") {
-    const message = e.message as { content?: unknown } | undefined;
+    const message = e.message as
+      | { content?: unknown; usage?: unknown }
+      | undefined;
     const blocks = Array.isArray(message?.content) ? message!.content : [];
     for (const block of blocks as Array<Record<string, unknown>>) {
       if (block?.type === "text" && typeof block.text === "string") {
@@ -377,6 +485,32 @@ function dispatchCliEvent(
         });
       }
     }
+    // Token usage piggy-backs on the assistant message. The CLI mirrors
+    // the Anthropic API shape: input_tokens + output_tokens plus the
+    // two cache fields when prompt caching is in play. Forward all four
+    // so the per-message badge can render the real numbers (not zeros
+    // like the old fallback emitted).
+    const usage = message?.usage as
+      | {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        }
+      | undefined;
+    if (usage && emitUsageInternal) {
+      emitUsageInternal({
+        inputTokens: Number(usage.input_tokens ?? 0),
+        outputTokens: Number(usage.output_tokens ?? 0),
+        cacheCreationTokens: Number(usage.cache_creation_input_tokens ?? 0),
+        cacheReadTokens: Number(usage.cache_read_input_tokens ?? 0),
+      });
+    }
+    // One assistant event === one top-level agent turn. Persistence-
+    // oriented callers (the per-task agent runner) use this hook to
+    // flush their buffer so each turn lands in the chat as it
+    // completes instead of waiting for the whole run to finish.
+    handlers.onTurnEnd?.();
     return;
   }
 
@@ -400,11 +534,38 @@ function dispatchCliEvent(
     return;
   }
 
-  // `result` and `system` events carry session metadata. We don't need
-  // to surface them in the chat — the `assistant` events above already
-  // streamed everything visible. Errors flagged in `result` (subtype !=
-  // "success") still propagate via the CLI's exit code, which the
-  // stream wrapper turns into a rejection at process close.
+  // `result` carries session metadata including the cumulative usage
+  // total for the whole run. Some CLI builds don't populate usage on
+  // individual assistant events (or omit cache fields there) but always
+  // emit the totals on the final result event — so we treat the result
+  // event as authoritative when present. The wrapper that owns
+  // emitUsageInternal handles the per-turn-delta vs. final-total
+  // accounting so callers see one monotonic cumulative emission.
+  if (type === "result") {
+    const usage = (e as { usage?: unknown }).usage as
+      | {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        }
+      | undefined;
+    if (usage && emitUsageInternal) {
+      emitUsageInternal({
+        inputTokens: Number(usage.input_tokens ?? 0),
+        outputTokens: Number(usage.output_tokens ?? 0),
+        cacheCreationTokens: Number(usage.cache_creation_input_tokens ?? 0),
+        cacheReadTokens: Number(usage.cache_read_input_tokens ?? 0),
+        isFinal: true,
+      });
+    }
+    return;
+  }
+
+  // `system` events carry session metadata we don't surface. Errors
+  // flagged in `result` (subtype != "success") still propagate via the
+  // CLI's exit code, which the stream wrapper turns into a rejection at
+  // process close.
 }
 
 /** Streams text + tool events from the local Claude CLI. The agent
@@ -421,6 +582,46 @@ export async function streamFromClaudeCli(
 ): Promise<void> {
   const h: SparStreamHandlers =
     typeof handlers === "function" ? { onText: handlers } : handlers;
+
+  // Per-stream usage accumulator. dispatchCliEvent surfaces both
+  // assistant-event deltas and the result-event total via
+  // emitUsageInternal; this closure normalises both into a single
+  // monotonic cumulative emission so the route just forwards each
+  // update verbatim. The `result` event takes priority once it
+  // arrives because the CLI populates that field as the authoritative
+  // total (including cache fields even on builds that omit them on
+  // per-turn messages — the original source of the badge-shows-zero
+  // bug).
+  const accum: SparUsageEvent = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+  };
+  let finalSeen = false;
+  const emitUsageInternal = (e: CliUsageEmit) => {
+    if (e.isFinal) {
+      // Authoritative total. Replace and lock out further additive
+      // updates so a stray follow-on assistant event can't double-count.
+      accum.inputTokens = e.inputTokens;
+      accum.outputTokens = e.outputTokens;
+      accum.cacheCreationTokens = e.cacheCreationTokens;
+      accum.cacheReadTokens = e.cacheReadTokens;
+      finalSeen = true;
+    } else if (!finalSeen) {
+      accum.inputTokens += e.inputTokens;
+      accum.outputTokens += e.outputTokens;
+      accum.cacheCreationTokens += e.cacheCreationTokens;
+      accum.cacheReadTokens += e.cacheReadTokens;
+    }
+    h.onUsage?.({
+      inputTokens: accum.inputTokens,
+      outputTokens: accum.outputTokens,
+      cacheCreationTokens: accum.cacheCreationTokens,
+      cacheReadTokens: accum.cacheReadTokens,
+    });
+  };
+
   const bin = findClaudeBinary();
   // stream-json output requires --verbose; --include-partial-messages
   // is intentionally OFF — we get one assistant event per turn (with
@@ -441,6 +642,21 @@ export async function streamFromClaudeCli(
   // tools and don't expect a loop). Caller can override either way.
   const maxTurns = opts.maxTurns ?? (opts.tools ? 10 : 1);
   args.push("--max-turns", String(maxTurns));
+
+  // Image delivery: inline the bytes as base64 image blocks via
+  // stream-json input when we can read them (reliable — the model sees
+  // them natively). Fall back to the legacy path+Read prompt when no
+  // image bytes could be read. Text-only turns are unaffected here:
+  // imageBlocks is empty, inlineImages is false, and the plain-text
+  // stdin path below runs exactly as before.
+  const imageBlocks =
+    opts.images && opts.images.length > 0
+      ? buildImageInputBlocks(opts.images)
+      : [];
+  const inlineImages = imageBlocks.length > 0;
+  if (inlineImages) {
+    args.push("--input-format", "stream-json");
+  }
 
   let mcpConfigPath: string | null = null;
   if (opts.tools) {
@@ -466,6 +682,18 @@ export async function streamFromClaudeCli(
         (n) => `${browserPrefix}${n}`,
       ),
     ];
+    // Images: the model needs Claude Code's built-in Read tool to
+    // decode the PNG/JPEG content from the temp file path the route
+    // wrote it to. Without this, the prompt's "=== ATTACHED FILES ==="
+    // block is just a text reference to a path the model can't open,
+    // and the screenshot is invisible to the model — manifesting as
+    // "the assistant didn't see my screenshot" / no useful reply.
+    // Only need the built-in Read tool for the legacy fallback (image
+    // bytes couldn't be inlined). Inlined images are seen natively, so
+    // we don't widen the tool surface unnecessarily.
+    if (opts.images && opts.images.length > 0 && !inlineImages) {
+      allow.push("Read");
+    }
     args.push("--allowedTools", allow.join(","));
     // bypassPermissions auto-approves anything on the allow list. The
     // older `acceptEdits` value only auto-approves Edit-class tools,
@@ -497,7 +725,24 @@ export async function streamFromClaudeCli(
   };
   if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
 
-  proc.stdin?.write(buildPrompt(opts));
+  if (inlineImages) {
+    // stream-json input: one user message carrying the prompt text plus
+    // the base64 image blocks. The CLI feeds this to the model as a
+    // normal user turn with native image content — no Read round-trip.
+    const userMessage = {
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: buildPrompt(opts, true) },
+          ...imageBlocks,
+        ],
+      },
+    };
+    proc.stdin?.write(JSON.stringify(userMessage) + "\n");
+  } else {
+    proc.stdin?.write(buildPrompt(opts));
+  }
   proc.stdin?.end();
 
   // Line-buffer stdout — stream-json emits one JSON object per line and
@@ -511,7 +756,7 @@ export async function streamFromClaudeCli(
       const line = stdoutBuf.slice(0, nl).trim();
       stdoutBuf = stdoutBuf.slice(nl + 1);
       if (!line) continue;
-      dispatchCliEvent(line, h);
+      dispatchCliEvent(line, h, emitUsageInternal);
     }
   });
 
@@ -545,7 +790,7 @@ export async function streamFromClaudeCli(
       // tolerate a CLI that flushes without one.
       const tail = stdoutBuf.trim();
       stdoutBuf = "";
-      if (tail) dispatchCliEvent(tail, h);
+      if (tail) dispatchCliEvent(tail, h, emitUsageInternal);
       if (opts.signal?.aborted) {
         resolve();
         return;
