@@ -28,6 +28,7 @@ import {
 } from "./terminal-backend";
 import { getDb, type User } from "./db";
 import { dispatchToProject } from "./spar-dispatch";
+import { verifyDispatch } from "./dispatch-verifier";
 import { readGraph, writeGraph, type SparGraph } from "./spar-graph";
 import {
   broadcastRemark,
@@ -885,7 +886,7 @@ export function sendKeysToProjectTool(
   return { ok: true, sent: keys, bytes: translated.length };
 }
 
-export function dispatchToProjectTool(
+export async function dispatchToProjectTool(
   ctx: SparContext,
   args: Record<string, unknown>,
 ) {
@@ -898,11 +899,42 @@ export function dispatchToProjectTool(
   if (entry.status === "failed") {
     throw new Error(entry.error ?? "dispatch failed");
   }
+  // Run the verifier inline so the spar AI gets a truthful tool result.
+  // verifyDispatch never throws — failures default to landed:true so the
+  // verifier can't block a real dispatch. See lib/dispatch-verifier.ts.
+  const verdict = await verifyDispatch(
+    {
+      dispatchId: entry.id,
+      projectId: entry.projectId,
+      prompt: entry.prompt,
+      userId: ctx.user.id,
+    },
+    {
+      readScrollback: (pid, tailChars) => {
+        const session = getSession(pid);
+        if (!session) return "";
+        const sb = session.scrollback;
+        const tail = Math.min(Math.max(500, Math.floor(tailChars)), sb.length);
+        return cleanScrollback(sb.slice(Math.max(0, sb.length - tail)));
+      },
+      redispatch: (userId, pid, promptText) => {
+        const retry = dispatchToProject(userId, pid, promptText);
+        return retry.status === "sent";
+      },
+    },
+  );
   return {
     id: entry.id,
     projectId: entry.projectId,
     confirmedAt: entry.confirmedAt,
     bytes: entry.prompt.length,
+    verifier: {
+      landed: verdict.landed,
+      action: verdict.action,
+      evidence: verdict.evidence,
+      attempts: verdict.attempts,
+      durationMs: verdict.durationMs,
+    },
   };
 }
 
@@ -3145,6 +3177,15 @@ export async function listTopicsToolImpl(
   ctx: SparContext,
   args: Record<string, unknown>,
 ) {
+  // SMART_TOPICS_ENABLED master flag (default off). The tool is already
+  // filtered out of the model's tool list while off (see the allowedTools
+  // filter in app/api/spar/route.ts); this guards the handler too so any
+  // stray invocation returns a clean disabled marker instead of doing
+  // work. Read the env directly to avoid an extra import — mirrors
+  // lib/config.ts isSmartTopicsEnabled().
+  if (process.env.SMART_TOPICS_ENABLED !== "true") {
+    return { error: "smart topics disabled" };
+  }
   const scopeRaw = typeof args.scope === "string" ? args.scope : "today";
   const scope =
     scopeRaw === "today" || scopeRaw === "week" || scopeRaw === "all"

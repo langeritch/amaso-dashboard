@@ -54,6 +54,18 @@ export interface AmasoConfig {
    * PTY_SERVICE_URL env var (env wins). Example: "http://127.0.0.1:7850".
    */
   ptyServiceUrl?: string;
+  /**
+   * Toggle for the "project terminal went idle" auto-report chat
+   * message (lib/terminal-idle.ts → queueNudge). When false / missing,
+   * project-terminal idles still mark the dispatch complete and push
+   * to the user's phone, but the "Check the output of terminal for X"
+   * row no longer lands in the spar transcript. Task-agent completion
+   * summaries, browser-job acks, and dispatch acknowledgements use
+   * separate paths and are unaffected. Override via env var
+   * AMASO_PROJECT_TERMINAL_AUTOREPORT=1 (env wins). Default OFF — flip
+   * to true to re-enable.
+   */
+  projectTerminalAutoReport?: boolean;
 }
 
 /**
@@ -69,6 +81,45 @@ export function getPtyServiceUrl(): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Whether project-terminal idle should still emit the auto-report
+ * chat message. Env var wins so the toggle can be flipped without a
+ * config rewrite + restart cycle; falls back to amaso.config.json's
+ * `projectTerminalAutoReport`. Defaults to FALSE — the chat message
+ * is off until explicitly turned back on. Only gates the chat-message
+ * path; markDispatchCompleted + push notifications still run.
+ */
+export function projectTerminalAutoReportEnabled(): boolean {
+  const fromEnv = process.env.AMASO_PROJECT_TERMINAL_AUTOREPORT?.trim();
+  if (fromEnv != null && fromEnv !== "") {
+    return fromEnv === "1" || fromEnv.toLowerCase() === "true";
+  }
+  try {
+    return loadConfig().projectTerminalAutoReport === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Master kill-switch for the Smart Topic System's PROMPT INJECTION.
+ *
+ * When false (the default after this change), the spar route adds NO
+ * topic-derived context to the system prompt or message window:
+ *   - no "Active topics today" header
+ *   - no per-message `[topics: ...]` inline annotations
+ *   - no "=== TOPIC SCOPE ===" block from the composer pill
+ *   - the `list_topics` tool is not offered to the model
+ *
+ * This ONLY gates prompt injection. The daily-extraction job and all
+ * stored facts/topics/rollups are untouched, and the mobile history
+ * topic UI keeps working. Flip SMART_TOPICS_ENABLED=true (env wins) to
+ * turn the whole feature back on without any data migration.
+ */
+export function isSmartTopicsEnabled(): boolean {
+  return process.env.SMART_TOPICS_ENABLED === "true";
 }
 
 const CONFIG_PATH = path.resolve(process.cwd(), "amaso.config.json");

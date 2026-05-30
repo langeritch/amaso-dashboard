@@ -93,3 +93,30 @@ When working on any of these, link the implementation back to the corresponding 
 - **Dispatch + remarks:** primary I/O for Santi. Prefer `dispatch_to_project` and `create_remark` over inline shell tasks.
 - **Voice-first:** any user-facing reply is played through Kokoro TTS. Plain prose, English, no markdown / lists / headings / code in spoken output.
 - **No filler narration.** Just outcomes.
+
+## Feature flags
+
+- **`SMART_TOPICS_ENABLED`** (`lib/config.ts` → `isSmartTopicsEnabled()`, env-only, default **`false`**) — master kill-switch for all Smart Topic System **prompt injection** into the spar AI: the "Active topics today" header, inline `[topics: ...]` message tags, the `=== TOPIC SCOPE ===` composer-pill block, and the `list_topics` tool. Off by default because topic context was confusing the spar AI and pulling in wrong context. Only gates prompt injection — the daily-extraction job (`AmasoDashboard-DailyExtraction`) and all stored topics/facts/rollups keep running, and the mobile history topic UI is unaffected. Re-enable with `SMART_TOPICS_ENABLED=true` in `.env.local` + restart (no data migration).
+
+## Security primitives (added during productization pass)
+
+Before touching auth, sessions, or API routes, read [SECURITY.md](SECURITY.md). The dashboard has structured primitives — use them, don't reinvent.
+
+- **Rate limiting:** `lib/rate-limit.ts` — `rateLimit({ name, key, max, windowMs })` + `rateLimitClear`. Use `ipFromRequest(req)` for the key.
+- **SSRF guard:** `lib/url-guard.ts` — `await guardOutboundUrl(url)` before any `fetch()` driven by user input.
+- **Audit log:** `lib/audit.ts` — `recordAudit({ action, actorId, actorEmail, actorIp, targetKind, targetId, meta })`. Action is a typed union; add to `AuditAction` if you need a new one. Append-only.
+- **Error reporting:** `lib/observability.ts` — `reportError({ event, severity, cause, context })` or wrappers `withErrorReport()` / `withErrorReportAsync()`. Writes to `logs/errors.jsonl`.
+- **Body limits:** `lib/body-limit.ts` per-route; global 50 MB ceiling in `middleware.ts`.
+- **Middleware (`middleware.ts`):** same-origin check on state-changing API requests, security headers, CSP, HSTS in prod. Exempt routes MUST have their own auth (only `/api/telegram/*` today, gated by `X-Auth: TELEGRAM_VOICE_TOKEN`).
+
+Wired hot-paths to know about:
+
+- Auth flows audit success/fail. Login is rate-limited 5/15min per `(email, ip)`. Setup is rate-limited 10/1h per IP and race-safe via `db.transaction`.
+- Session TTL is 7 days, not 30. Role change or password reset on a user **kills all their sessions** (admin route).
+- `DELETE /api/account/sessions` lets a user log out everywhere; wired into the Settings panel.
+- `GET /api/health` is the watchdog probe (200/503 + db check).
+- `/admin/audit` is the audit log viewer (admin-only).
+- `AUDIT_RETENTION_DAYS` env var controls log retention (default 365, 0 disables).
+- `ERROR_WEBHOOK_URL` enables external sink for `reportError`.
+
+Test coverage for the primitives lives in `tests/rate-limit.test.ts`, `tests/url-guard.test.ts`, `tests/audit.test.ts`, `tests/observability.test.ts`. Run before any change to the security-critical paths.

@@ -7,10 +7,11 @@ import { readHeartbeat } from "@/lib/heartbeat";
 import { readProfile } from "@/lib/user-profile";
 import { loadBrainContext } from "@/lib/spar-brain";
 import { streamFromClaudeCli, type SparMessage } from "@/lib/spar-claude";
+import { streamFromAnthropicSdk } from "@/lib/spar-sdk";
+import { streamFromGeminiCli } from "@/lib/spar-gemini";
 import { mintToken, revokeToken } from "@/lib/spar-token";
 import {
   SPAR_AUTOPILOT_SUFFIX,
-  SPAR_MODEL,
   PLAYWRIGHT_TOOLS,
   SPAR_TOOLS,
   buildSparSystemPrompt,
@@ -26,16 +27,27 @@ import {
   countAssistantMessages,
   createConversation as createSparConversation,
   getConversation as getSparConversation,
+  getDailyConversation,
+  getOrCreateDailyChat,
   getRecentMessages,
   setConversationTitle,
   setDriftNotice,
+  smartDailyChatEnabled,
 } from "@/lib/spar-conversations";
 import {
   detectDrift,
   generateTitle,
   namingTrigger,
 } from "@/lib/spar-conversation-naming";
-import { broadcastSparConversation, broadcastSparMessage } from "@/lib/ws";
+import {
+  attachAssistantInheritingFromUser,
+  detectAndAttach as detectAndAttachTopic,
+} from "@/lib/topic-detect";
+import {
+  buildTopicAwareWindow,
+  smartTopicContextEnabled,
+} from "@/lib/spar-topic-context";
+import { broadcastSparConversation, broadcastSparMessage, broadcastSparStream } from "@/lib/ws";
 import {
   activateChannel,
   appendTurn,
@@ -45,6 +57,8 @@ import {
   unregisterStreamAbort,
 } from "@/lib/voice-session";
 import { speak as telegramSpeak, TelegramVoiceUnavailable } from "@/lib/telegram-voice";
+import { getCurrentDestination } from "@/lib/audio-router";
+import { streamTtsToCompanionUser } from "@/lib/companion-spar-relay";
 import { matchSkillsForQuestion, formatSkillsForPrompt } from "@/lib/spar-skills";
 import {
   BASELINE_SPAR_SOURCES,
@@ -52,6 +66,9 @@ import {
   sourceForToolUse,
   summariseToolResult,
 } from "@/lib/spar-tool-labels";
+import { routeBrainUpdate } from "@/lib/spar-brain-autorouter";
+import { routeAndLog } from "@/lib/spar-model-router";
+import { isSmartTopicsEnabled } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -103,6 +120,25 @@ export async function POST(req: NextRequest) {
      *  Skips the user-turn appendMessage block so we don't end up
      *  with two identical user rows in the conversation. */
     skipPersistLastUser?: boolean;
+    /** Mobile-driven tweaks */
+    model?: string;
+    tone?: string;
+    memory?: boolean;
+    /** Topic scope for this turn. When set, the route fetches the
+     *  topic's summary + last 5–10 tagged messages (owned by the
+     *  calling user) and prepends them to the system prompt as a
+     *  TOPIC SCOPE block. Mismatch on user ownership is silently
+     *  ignored — the rest of the turn proceeds without the scope. */
+    topicId?: number;
+    /** Stable per-tab / per-installed-PWA id of the client that
+     *  posted this request. Echoed back on every spar:stream WS
+     *  broadcast so OTHER tabs of the same user know to mirror the
+     *  stream live, while the originating client knows to ignore
+     *  the mirror (it's already rendering locally from its own
+     *  fetch). Optional for backwards compatibility — when absent
+     *  no broadcasts go out and the request behaves like the
+     *  pre-mirror single-client path. */
+    originDeviceId?: string;
   } | null = null;
   try {
     body = await req.json();
@@ -112,9 +148,59 @@ export async function POST(req: NextRequest) {
   const history = Array.isArray(body?.messages) ? body!.messages : [];
   const autopilot = body?.autopilot === true;
   const rawAttachments = Array.isArray(body?.attachments) ? body!.attachments : [];
+
+  // Empty-caption image-only sends: when the user uploaded a screenshot
+  // without typing anything, the client's optimistic bubble has empty
+  // content. Both the client-side historySnap filter and the msgs filter
+  // below drop empty-content turns, which would silently strip the user
+  // turn entirely — leaving the model with no fresh user message to
+  // respond to and the screenshot anchored to nothing. Synthesize a
+  // placeholder caption so the turn survives the filter, persists to
+  // the conversation, and gives the model a clear instruction to look
+  // at the image. Images are processed further down into temp files and
+  // passed alongside via opts.images.
+  if (rawAttachments.length > 0) {
+    const hasImage = rawAttachments.some(
+      (a) => typeof a?.type === "string" && a.type.startsWith("image/"),
+    );
+    if (hasImage) {
+      const latest = history[history.length - 1];
+      const latestIsEmptyUser =
+        latest &&
+        latest.role === "user" &&
+        (typeof latest.content !== "string" || latest.content.trim().length === 0);
+      if (!latest || latest.role !== "user") {
+        history.push({
+          role: "user",
+          content: "Please look at the attached image(s).",
+        });
+      } else if (latestIsEmptyUser) {
+        history[history.length - 1] = {
+          ...latest,
+          content: "Please look at the attached image(s).",
+        };
+      }
+    }
+  }
   const systemInjection =
     typeof body?.systemInjection === "string" ? body.systemInjection.trim() : "";
   const skipPersistLastUser = body?.skipPersistLastUser === true;
+  const requestedTone = body?.tone;
+  const requestedMemory = body?.memory !== false;
+  const requestedModel = body?.model;
+  // Live mirror identifiers. originDeviceId is the posting client's
+  // stable tab id (browser sessionStorage for the dashboard,
+  // localStorage for the PWA, the companion deviceId for the menu-bar
+  // app). streamId is freshly minted per request so every NDJSON event
+  // on this turn carries the same correlation key; mirror clients use
+  // it to group events into a single assistant bubble even though the
+  // mirrored content arrives interleaved with other ws traffic.
+  const originDeviceId =
+    typeof body?.originDeviceId === "string" && body.originDeviceId.length > 0
+      ? body.originDeviceId.slice(0, 128)
+      : null;
+  const streamId =
+    Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
 
   // Resolve / create the active conversation. The body's id is trusted
   // only after a per-user ownership check — otherwise a malicious
@@ -129,7 +215,12 @@ export async function POST(req: NextRequest) {
   let conversationId: number | null = null;
   if (requestedConvId !== null) {
     const owned = getSparConversation(user.id, requestedConvId);
-    if (owned) conversationId = owned.id;
+    // Reject task-owned conversations: those belong to the per-task
+    // chat panel, not the main spar route. The main client never
+    // sends those ids; this guard just makes sure a stale or
+    // hand-rolled request can't append a main-chat turn into a
+    // task thread.
+    if (owned && owned.taskId == null) conversationId = owned.id;
   }
   let msgs: SparMessage[] = history
     .filter(
@@ -152,17 +243,72 @@ export async function POST(req: NextRequest) {
   // list_topics. The block is empty (and therefore costs zero tokens)
   // when nothing has been tagged today — covers fresh days and
   // detector cold starts.
-  try {
-    const { formatActiveTopicsBlock } = await import("@/lib/daily-topic-rollup");
-    const topicsBlock = formatActiveTopicsBlock(user.id);
-    if (topicsBlock) {
-      baseSystemPrompt += "\n\n" + topicsBlock;
+  //
+  // Gated behind SMART_TOPICS_ENABLED (default off): when the flag is
+  // off we add nothing to the prompt. The rollup data still exists in
+  // the db — we just don't inject it. See isSmartTopicsEnabled().
+  if (isSmartTopicsEnabled()) {
+    try {
+      const { formatActiveTopicsBlock } = await import("@/lib/daily-topic-rollup");
+      const topicsBlock = formatActiveTopicsBlock(user.id);
+      if (topicsBlock) {
+        baseSystemPrompt += "\n\n" + topicsBlock;
+      }
+    } catch (err) {
+      console.warn(
+        "[spar] active-topics injection failed:",
+        err instanceof Error ? err.message : String(err),
+      );
     }
-  } catch (err) {
-    console.warn(
-      "[spar] active-topics injection failed:",
-      err instanceof Error ? err.message : String(err),
-    );
+  }
+
+  // Topic-pill scope (from the composer's active topic). When the
+  // client posts `topicId`, we fetch the topic + last ~10 tagged
+  // messages and render a dedicated TOPIC SCOPE block so the model
+  // can ground the turn against past conversation about exactly
+  // that topic. Silently no-ops when the topic doesn't belong to
+  // the calling user — the rest of the turn still goes through.
+  const requestedTopicId =
+    typeof body?.topicId === "number" && Number.isFinite(body.topicId) && body.topicId > 0
+      ? body.topicId
+      : null;
+  // Gated behind SMART_TOPICS_ENABLED (default off): even when the
+  // composer posts an active topic pill, skip the TOPIC SCOPE block
+  // entirely while the flag is off. See isSmartTopicsEnabled().
+  if (isSmartTopicsEnabled() && requestedTopicId !== null) {
+    try {
+      const { getTopicById, listMessagesForTopic } = await import("@/lib/topics");
+      const topic = getTopicById(requestedTopicId);
+      if (topic && topic.user_id === user.id) {
+        const rows = listMessagesForTopic(topic.id, { limit: 10 });
+        // listMessagesForTopic returns DESC; reverse to chronological.
+        const chrono = rows.slice().reverse();
+        const lines: string[] = [
+          "=== TOPIC SCOPE ===",
+          `The user has scoped this turn to topic: "${topic.title}" (slug: ${topic.slug}).`,
+          `Topic summary: ${topic.summary ? topic.summary : "(none yet)"}`,
+        ];
+        if (chrono.length > 0) {
+          lines.push("");
+          lines.push("Recent messages tied to this topic (oldest first):");
+          for (const m of chrono) {
+            if (m.role !== "user" && m.role !== "assistant") continue;
+            const stamp = new Date(m.created_at).toISOString().slice(0, 16).replace("T", " ");
+            const body = m.content.length > 600
+              ? m.content.slice(0, 600) + " …[truncated]"
+              : m.content;
+            lines.push(`[${m.role} ${stamp}] ${body.replace(/\s+/g, " ").trim()}`);
+          }
+        }
+        lines.push("=== END TOPIC SCOPE ===");
+        baseSystemPrompt += "\n\n" + lines.join("\n");
+      }
+    } catch (err) {
+      console.warn(
+        "[spar] topic-scope injection failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   }
 
   if (requestedTone === "terse · honest") {
@@ -171,10 +317,86 @@ export async function POST(req: NextRequest) {
     baseSystemPrompt += "\n\nTONE: Be proactive, detailed, and highly helpful. Think ahead for the user.";
   }
 
-  // Auto-report turn detection. flushNudgeBatch (lib/terminal-idle.ts)
-  // and buildMergedAutoReportContent (components/SparProvider.tsx) both
-  // emit a synthetic user turn that always starts with "Check the
-  // output of terminal for X[, Y, Z]." — that prefix is the contract.
+  // Layer 6.5 — tense-aware recall hint. Conservative regex over the
+  // latest user message; if it fires AND the gates pass (prior day
+  // exists in daily_chats, message isn't already topic-tagged
+  // inline, the recall trigger is genuine), we append a soft hint to
+  // the system prompt for THIS TURN ONLY. The model still decides
+  // whether to actually call recall — the hint nudges, doesn't
+  // execute. Audit row captures every fire so we can measure usefulness
+  // later by joining model_called_recall.
+  let tenseHintRowId: number | null = null;
+  let modelCalledRecall = false;
+  try {
+    const latestUserText = (() => {
+      for (let i = history.length - 1; i >= 0; i--) {
+        const m = history[i];
+        if (m && m.role === "user" && typeof m.content === "string") return m.content;
+      }
+      return "";
+    })();
+    // Gate 1: don't double-up with the inline topic tagger.
+    if (latestUserText && !/\[topics:\s*[\w-]/i.test(latestUserText)) {
+      const { detectTenseHint, buildTenseHintBlock } = await import(
+        "@/lib/spar-tense-hints"
+      );
+      const hint = detectTenseHint(latestUserText);
+      if (hint) {
+        // Gate 2: the user needs at least one prior day's chat for
+        // recall to find anything. Day-1 users skip the hint.
+        const { getDb } = await import("@/lib/db");
+        const { todayLocalDate } = await import("@/lib/local-date");
+        const priorDay = getDb()
+          .prepare(
+            `SELECT 1 FROM daily_chats
+              WHERE user_id = ? AND date_local < ?
+              LIMIT 1`,
+          )
+          .get(user.id, todayLocalDate());
+        if (priorDay) {
+          baseSystemPrompt += "\n\n" + buildTenseHintBlock(hint);
+          try {
+            const info = getDb()
+              .prepare(
+                `INSERT INTO tense_hint_invocations
+                   (user_id, ts, matched_phrase, suggested_keyword, conversation_id, model_called_recall)
+                 VALUES (?, ?, ?, ?, ?, 0)`,
+              )
+              .run(
+                user.id,
+                Date.now(),
+                hint.matchedPhrase,
+                hint.suggestedKeyword,
+                conversationId ?? null,
+              );
+            tenseHintRowId = Number(info.lastInsertRowid);
+          } catch (auditErr) {
+            console.warn(
+              "[spar] tense-hint audit insert failed:",
+              auditErr instanceof Error ? auditErr.message : String(auditErr),
+            );
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[spar] tense-hint injection failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Auto-report turn detection. flushNudgeBatch (lib/terminal-idle.ts),
+  // fireWorkerAutoReport (lib/worker-autoreport.ts), and
+  // buildMergedAutoReportContent (components/SparProvider.tsx) all emit
+  // synthetic user turns with one of these contract prefixes:
+  //   • `Check terminal "<name>"…`   — autopilot ON nudge + worker
+  //                                    autoreport pointer
+  //   • `<name> is done. Autopilot is off — waiting on you.`
+  //                                  — autopilot OFF nudge
+  //   • `Check the output of terminal for …` — legacy wording, still
+  //                                  matched so any in-flight bubbles
+  //                                  from a pre-f72e45e build resolve.
   // When this turn fires UNDER AUTOPILOT, swap the generic suffix for
   // the rich autonomous-loop block (lib/autopilot-prompt.ts): tells
   // the model to evaluate each terminal, resolve any matching remark,
@@ -185,8 +407,15 @@ export async function POST(req: NextRequest) {
   // the auto-report case so it doesn't bombard every regular reply.
   const latestUserContent =
     [...history].reverse().find((m) => m?.role === "user")?.content ?? "";
-  const isAutoReportTurn = /^check\s+(?:the\s+)?output\s+of\s+terminal[s]?\s+for\s+/i.test(
-    latestUserContent.trim(),
+  const trimmedLatestUser = latestUserContent.trim();
+  const isAutoReportTurn =
+    /^check\s+terminal\s+"/i.test(trimmedLatestUser) ||
+    /\bis done\.\s+autopilot is off\b/i.test(latestUserContent) ||
+    /^check\s+(?:the\s+)?output\s+of\s+terminal[s]?\s+for\s+/i.test(trimmedLatestUser);
+  console.log(
+    `[spar] auto-report detection user=${user.id} autopilot=${autopilot} ` +
+      `isAutoReportTurn=${isAutoReportTurn} ` +
+      `latestUserHead=${JSON.stringify(trimmedLatestUser.slice(0, 80))}`,
   );
   const autopilotDirective =
     autopilot && isAutoReportTurn ? readAutopilotDirective(user.id) : "";
@@ -329,9 +558,22 @@ export async function POST(req: NextRequest) {
     !latestForPersist.content.startsWith("[kickoff]") &&
     !latestForPersist.content.startsWith("[system]");
   if (persistableUser) {
-    if (conversationId === null) {
-      const conv = createSparConversation(user.id, null);
-      conversationId = conv.id;
+    // Layer 3 (SMART_DAILY_CHAT): a new turn always lands in today's
+    // active daily chat regardless of which conversation the client
+    // had selected. The client receives the canonical id back via the
+    // `{t:"conversation",id}` event below and re-hydrates if needed.
+    // Legacy mode keeps the per-session create-on-first-message path.
+    if (smartDailyChatEnabled()) {
+      const daily = getOrCreateDailyChat(user.id);
+      conversationId = daily.id;
+    } else if (conversationId === null) {
+      const daily = getDailyConversation(user.id);
+      if (daily) {
+        conversationId = daily.id;
+      } else {
+        const conv = createSparConversation(user.id, null);
+        conversationId = conv.id;
+      }
     }
     const userRow = appendSparMessage({
       conversationId,
@@ -354,6 +596,12 @@ export async function POST(req: NextRequest) {
       } catch {
         /* broadcast failure is non-fatal */
       }
+      // Layer 1 topic detection — fire-and-forget so a slow Haiku call
+      // can't delay the streaming response. Failures are swallowed
+      // inside detectAndAttach.
+      void detectAndAttachTopic(user.id, userRow.id, userRow.content).catch(() => {
+        /* swallow */
+      });
     }
   }
 
@@ -479,6 +727,27 @@ export async function POST(req: NextRequest) {
         } catch {
           /* stream closed */
         }
+        // Live mirror: fan out the same NDJSON event to every other
+        // socket the user has open so passive clients can follow the
+        // turn token-by-token. Only fires when the caller identified
+        // itself with an originDeviceId — legacy callers (no device
+        // id) keep the pre-mirror single-client behaviour. Ping
+        // events are kept out of the mirror to avoid burning ws
+        // bandwidth on 1Hz keepalives that have no visual effect on
+        // the receiver.
+        if (originDeviceId && evt.t !== "ping") {
+          try {
+            broadcastSparStream(user.id, {
+              conversationId,
+              originDeviceId,
+              streamId,
+              event: evt,
+            });
+          } catch {
+            /* broadcast is best-effort — never let a ws hiccup block
+               the actual stream to the requesting client */
+          }
+        }
       };
       // Open with a ping so Cloudflare gets bytes immediately and the
       // client knows the stream is alive even before the CLI warms up.
@@ -532,6 +801,51 @@ export async function POST(req: NextRequest) {
       const RETRY_DELAYS_MS = [0, 400, 1200];
       let realEventsEmitted = false;
 
+      // Layer 2 (Smart Topic System): augment the LLM window with older
+      // messages from the same topic as the latest user turn. Cheap-
+      // only matcher — no model round-trip on the request path. When
+      // disabled or when no topic matches cleanly, `effectiveMsgs`
+      // collapses to the recency-only `msgs` we'd have sent before —
+      // a plain message window with no inline `[topics: ...]` tags.
+      //
+      // Gated behind the SMART_TOPICS_ENABLED master flag (default
+      // off): when off, layer2 is null and effectiveMsgs === msgs, so
+      // no topic annotations and no topic-linked brain block are added.
+      const layer2Enabled = isSmartTopicsEnabled() && smartTopicContextEnabled();
+      const layer2 = layer2Enabled
+        ? buildTopicAwareWindow({
+            userId: user.id,
+            conversationId,
+            currentMessageText: latestUserContent,
+            recentMessages: msgs,
+            maxMessages: 50,
+          })
+        : null;
+      const effectiveMsgs = layer2?.messages ?? msgs;
+      if (layer2?.fired) {
+        console.log(
+          `[spar-topic-context] topic=${layer2.topicSlug ?? "?"} ` +
+            `topic-pulled=${layer2.topicMessages} recency=${layer2.recencyMessages} ` +
+            `final=${layer2.messages.length}`,
+        );
+      }
+      // Layer 7: append topic-linked brain sections to the existing
+      // brain block so they ride in under the same BRAIN / MEMORY
+      // header in the prompt. Empty string when the flag is off or the
+      // matched topic has no refs that resolved.
+      const layer7Block = layer2?.brainBlock ?? "";
+      if (layer2?.brainRefsInjected) {
+        console.log(
+          `[spar-topic-brain] topic=${layer2.topicSlug ?? "?"} ` +
+            `refs=${layer2.brainRefsInjected} chars=${layer2.brainCharsInjected}`,
+        );
+      }
+      const effectiveBrainBlock = layer7Block
+        ? brain.block
+          ? `${brain.block}\n\n${layer7Block}`
+          : layer7Block
+        : brain.block;
+
       try {
         let lastError: unknown = null;
         for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
@@ -551,85 +865,190 @@ export async function POST(req: NextRequest) {
           }
           try {
             const historyWithAttachments = textAttachmentBlock
-              ? [...msgs.slice(0, -1), { ...msgs[msgs.length - 1], content: msgs[msgs.length - 1].content + "\n\n" + textAttachmentBlock }]
-              : msgs;
-            await streamFromClaudeCli(
-              {
-                systemPrompt: autopilot
-                  ? autopilotPromptAddon
-                    ? baseSystemPrompt +
-                      SPAR_AUTOPILOT_SUFFIX +
+              ? [
+                  ...effectiveMsgs.slice(0, -1),
+                  {
+                    ...effectiveMsgs[effectiveMsgs.length - 1],
+                    content:
+                      effectiveMsgs[effectiveMsgs.length - 1].content +
                       "\n\n" +
-                      autopilotPromptAddon
-                    : baseSystemPrompt + SPAR_AUTOPILOT_SUFFIX
-                  : baseSystemPrompt,
-                heartbeat,
-                profile,
-                userProfile,
-                skills: skillsBlock,
-                brain: brain.block,
-                history: historyWithAttachments,
-                model: SPAR_MODEL,
-                signal: abort.signal,
-                images: imageAttachments.length > 0 ? imageAttachments : undefined,
-                tools: {
-                  token,
-                  dashboardUrl,
-                  allowedTools: SPAR_TOOLS,
-                  allowedPlaywrightTools: PLAYWRIGHT_TOOLS,
-                },
+                      textAttachmentBlock,
+                  },
+                ]
+              : effectiveMsgs;
+
+            // Layer 2 routing. The router inspects only the latest
+            // user message (autopilot flag + auto-report detection
+            // come from this turn). Decision is logged on every
+            // attempt so the audit jsonl shows retries too.
+            const routeDecision = routeAndLog({
+              source: "api/spar",
+              message: latestUserContent,
+              autopilot,
+              requestedModel,
+              conversationId,
+              userId: user.id,
+              hasImages: imageAttachments.length > 0,
+            });
+
+            const sparOpts = {
+              systemPrompt: autopilot
+                ? autopilotPromptAddon
+                  ? baseSystemPrompt +
+                    SPAR_AUTOPILOT_SUFFIX +
+                    "\n\n" + autopilotPromptAddon
+                  : baseSystemPrompt + SPAR_AUTOPILOT_SUFFIX
+                : baseSystemPrompt,
+              heartbeat,
+              profile,
+              userProfile,
+              skills: skillsBlock,
+              brain: effectiveBrainBlock,
+              history: historyWithAttachments,
+              model: routeDecision.model,
+              signal: abort.signal,
+              images: imageAttachments.length > 0 ? imageAttachments : undefined,
+              tools: {
+                token,
+                dashboardUrl,
+                // SMART_TOPICS_ENABLED master flag (default off): when
+                // off, drop `list_topics` from the tool list sent to the
+                // model so it isn't offered the topic-listing tool. The
+                // canonical SPAR_TOOLS list is left intact; we only
+                // filter at the point of use. Handler is also guarded.
+                allowedTools: isSmartTopicsEnabled()
+                  ? SPAR_TOOLS
+                  : SPAR_TOOLS.filter((t) => t !== "list_topics"),
+                allowedPlaywrightTools: PLAYWRIGHT_TOOLS,
               },
-              {
-                onText: (chunk) => {
-                  realEventsEmitted = true;
-                  replyBuffer += chunk;
-                  sendEvent({ t: "text", v: chunk });
-                },
-                onToolUse: (e) => {
-                  realEventsEmitted = true;
-                  const { label, detail } = labelForToolUse(e.name, e.input);
-                  // Read-shape tools also contribute to the sources
-                  // strip on the assistant bubble. Action tools (write,
-                  // dispatch, send, …) return null and don't show up.
-                  const source = sourceForToolUse(e.name, e.input);
-                  toolSteps.push({
-                    id: e.id,
-                    name: e.name,
-                    label,
-                    detail,
-                    source,
-                    status: "running",
-                    summary: "",
-                  });
-                  sendEvent({
-                    t: "tool_use",
-                    id: e.id,
-                    name: e.name,
-                    label,
-                    detail,
-                    source,
-                  });
-                },
-                onToolResult: (e) => {
-                  realEventsEmitted = true;
-                  const summary = summariseToolResult(e.content, e.ok);
-                  const idx = toolSteps.findIndex((s) => s.id === e.id);
-                  if (idx >= 0) {
-                    toolSteps[idx] = {
-                      ...toolSteps[idx],
-                      status: e.ok ? "ok" : "error",
-                      summary,
-                    };
-                  }
-                  sendEvent({
-                    t: "tool_result",
-                    id: e.id,
-                    ok: e.ok,
+            };
+
+            const useAnthropicSdk =
+              !sparOpts.model.startsWith("gemini") &&
+              !!process.env.AMASO_SPAR_ANTHROPIC_KEY;
+
+            const streamFn = sparOpts.model.startsWith("gemini")
+              ? streamFromGeminiCli
+              : useAnthropicSdk
+                ? null
+                : streamFromClaudeCli;
+
+            const streamHandlers = {
+              onText: (chunk: string) => {
+                realEventsEmitted = true;
+                replyBuffer += chunk;
+                sendEvent({ t: "text", v: chunk });
+              },
+              onToolUse: (e: { id: string; name: string; input: unknown }) => {
+                realEventsEmitted = true;
+                // Layer 6.5: flag the in-flight tense-hint audit row
+                // when the model actually decides to invoke recall.
+                // Wire is local-scope so this matches the hint that
+                // was injected at the top of this very turn.
+                if (e.name === "recall" || e.name === "mcp__spar__recall") {
+                  modelCalledRecall = true;
+                }
+                const { label, detail } = labelForToolUse(e.name, e.input);
+                const source = sourceForToolUse(e.name, e.input);
+                toolSteps.push({
+                  id: e.id,
+                  name: e.name,
+                  label,
+                  detail,
+                  source,
+                  status: "running",
+                  summary: "",
+                });
+                sendEvent({
+                  t: "tool_use",
+                  id: e.id,
+                  name: e.name,
+                  label,
+                  detail,
+                  source,
+                });
+              },
+              onToolResult: (e: { id: string; ok: boolean; content: string }) => {
+                realEventsEmitted = true;
+                const summary = summariseToolResult(e.content, e.ok);
+                const idx = toolSteps.findIndex((s) => s.id === e.id);
+                if (idx >= 0) {
+                  toolSteps[idx] = {
+                    ...toolSteps[idx],
+                    status: e.ok ? "ok" : "error",
                     summary,
-                  });
-                },
+                  };
+                }
+                sendEvent({
+                  t: "tool_result",
+                  id: e.id,
+                  ok: e.ok,
+                  summary,
+                });
               },
-            );
+            };
+
+            // Both backends emit CUMULATIVE running totals on every
+            // onUsage call (CLI: closure-wrapped in lib/spar-claude.ts;
+            // SDK: accumulated across turns in lib/spar-sdk.ts). The
+            // route just forwards each snapshot to the client so the
+            // badge shows the latest values without us doing math here.
+            let lastUsageSeen = {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 0,
+            };
+            const emitUsage = (u: {
+              inputTokens: number;
+              outputTokens: number;
+              cacheCreationTokens: number;
+              cacheReadTokens: number;
+            }) => {
+              lastUsageSeen = u;
+              sendEvent({
+                t: "usage",
+                v: {
+                  input: u.inputTokens,
+                  output: u.outputTokens,
+                  cacheCreation: u.cacheCreationTokens,
+                  cacheRead: u.cacheReadTokens,
+                  model: routeDecision.model,
+                  tier: routeDecision.tier,
+                },
+              });
+            };
+
+            if (useAnthropicSdk) {
+              await streamFromAnthropicSdk(sparOpts, streamHandlers, emitUsage);
+            } else {
+              await streamFn!(
+                sparOpts,
+                { ...streamHandlers, onUsage: emitUsage },
+              );
+              // Guarantee at least one usage event even when the
+              // backend emitted nothing parseable (e.g. Gemini, or an
+              // older Claude CLI with no usage in the stream): the
+              // badge still needs to know which tier handled the turn.
+              if (
+                lastUsageSeen.inputTokens === 0 &&
+                lastUsageSeen.outputTokens === 0 &&
+                lastUsageSeen.cacheCreationTokens === 0 &&
+                lastUsageSeen.cacheReadTokens === 0
+              ) {
+                sendEvent({
+                  t: "usage",
+                  v: {
+                    input: 0,
+                    output: 0,
+                    cacheCreation: 0,
+                    cacheRead: 0,
+                    model: routeDecision.model,
+                    tier: routeDecision.tier,
+                  },
+                });
+              }
+            }
             lastError = null;
             break;
           } catch (err) {
@@ -664,7 +1083,33 @@ export async function POST(req: NextRequest) {
         cleanupAttachments();
         req.signal.removeEventListener("abort", onReqAbort);
         unregisterStreamAbort(user.id, "spar", abort);
+        // Finish sentinel — mirror clients use this to flip their
+        // streaming bubble's `streaming:false` flag. The originating
+        // client also receives it (no-op on its side; its existing
+        // reader.read()→done flow already finalises the bubble).
+        // Wrapped in try/catch because the controller may already be
+        // closed if the originating client disconnected mid-stream.
+        try { sendEvent({ t: "finish" }); } catch { /* already closed */ }
         controller.close();
+        // Layer 6.5 — back-fill the tense-hint audit row with the
+        // model's actual recall behaviour for this turn. Lets us
+        // measure whether the hint pulled its weight by joining
+        // tense_hint_invocations WHERE model_called_recall = 1.
+        if (tenseHintRowId !== null && modelCalledRecall) {
+          try {
+            const { getDb } = await import("@/lib/db");
+            getDb()
+              .prepare(
+                "UPDATE tense_hint_invocations SET model_called_recall = 1 WHERE id = ?",
+              )
+              .run(tenseHintRowId);
+          } catch (err) {
+            console.warn(
+              "[spar] tense-hint backfill failed:",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
         // Always record the assistant turn so the dashboard transcript
         // and any future channel see the full reply. Even when the
         // phone took over mid-generation, the user wants the answer
@@ -693,6 +1138,12 @@ export async function POST(req: NextRequest) {
               if (assistantRow) {
                 broadcastSparMessage(user.id, {
                   conversationId: assistantRow.conversationId,
+                  // Tag the persisted-row broadcast with the same
+                  // streamId the live mirror events used so passive
+                  // clients can adopt the assistant id onto the
+                  // streaming bubble they already rendered instead
+                  // of inserting a duplicate.
+                  streamId: originDeviceId ? streamId : undefined,
                   message: {
                     id: assistantRow.id,
                     role: assistantRow.role,
@@ -701,6 +1152,30 @@ export async function POST(req: NextRequest) {
                     createdAt: assistantRow.createdAt,
                   },
                 });
+                // Layer 5 fix: copy the prior user message's topic
+                // attachments onto this assistant row so the topic
+                // detail view shows the full thread. Idempotent and
+                // silent on failure. The reverse race (user-detection
+                // finishes after assistant persists) is covered by
+                // mirrorTopicsToFollowingAssistant inside detectAndAttach.
+                attachAssistantInheritingFromUser(assistantRow.id);
+                // Fire-and-forget brain auto-router: scan the assistant
+                // reply for structured facts (decisions, lessons, shipped
+                // items, goal statements) and append them to the appropriate
+                // brain markdown files. Never blocks the response.
+                void routeBrainUpdate(
+                  user.id,
+                  (Array.isArray(assistantRow.content)
+                    ? assistantRow.content
+                        .map((b: unknown) =>
+                          typeof b === "string"
+                            ? b
+                            : (b as { text?: string })?.text ?? "",
+                        )
+                        .join("")
+                    : String(assistantRow.content ?? "")),
+                  assistantRow.conversationId,
+                ).catch(() => {});
                 // Fire-and-forget auto-naming. Lives entirely outside
                 // the request lifecycle: the stream has already
                 // closed at this point, so a slow Haiku turn here
@@ -723,25 +1198,36 @@ export async function POST(req: NextRequest) {
             }
           }
         }
-        if (tookOver && reply) {
-          // Best-effort: the phone is the active output, but the
-          // service may not be running (dev box without Python) or
-          // may already be playing another utterance. Either way the
-          // turn is in the session, so a future poll picks it up.
-          // Don't await — finally must not block stream teardown,
-          // and /speak's playback can take many seconds.
-          void telegramSpeak({ text: reply }).catch((err: unknown) => {
-            if (err instanceof TelegramVoiceUnavailable) {
-              console.info(
-                "[spar] handoff to telegram /speak skipped — service unreachable",
-              );
-            } else {
+        if (reply) {
+          // Audio-router-driven TTS routing. Resolve the destination
+          // at finally-time so a mid-turn flip (telegram acquired
+          // while we were thinking) lands the spoken reply on the
+          // correct transport.
+          const dest = getCurrentDestination(user.id);
+          if (dest === "telegram") {
+            void telegramSpeak({ text: reply }).catch((err: unknown) => {
+              if (err instanceof TelegramVoiceUnavailable) {
+                console.info(
+                  "[spar] handoff to telegram /speak skipped — service unreachable",
+                );
+              } else {
+                console.warn(
+                  "[spar] handoff to telegram /speak failed:",
+                  err instanceof Error ? err.message : String(err),
+                );
+              }
+            });
+          } else if (dest === "companion") {
+            void streamTtsToCompanionUser(user.id, reply).catch((err: unknown) => {
               console.warn(
-                "[spar] handoff to telegram /speak failed:",
+                "[spar] handoff to companion TTS failed:",
                 err instanceof Error ? err.message : String(err),
               );
-            }
-          });
+            });
+          }
+          // dashboard: NDJSON text events already streamed to the
+          // browser; the browser plays its own TTS.
+          void tookOver;
         }
         // Don't release if Telegram is now holding the line — the
         // phone owns the audio until /api/telegram/release flips it.
