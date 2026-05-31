@@ -187,6 +187,32 @@ function migrate(d: Database.Database) {
     d.exec("ALTER TABLE remarks ADD COLUMN due_at INTEGER");
   }
 
+  // Item 9 — per-turn Claude API cost tracking. One row per spar model
+  // turn, keyed by stream_id (the route upserts cumulative usage as the
+  // turn streams). project_id is nullable: today we capture the sparring
+  // partner's own spend (NULL ≡ plain spar chat); per-project dispatch
+  // attribution can populate it later. See lib/cost-events.ts.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS cost_events (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      stream_id             TEXT    NOT NULL UNIQUE,
+      user_id               INTEGER NOT NULL,
+      project_id            TEXT,
+      model                 TEXT    NOT NULL,
+      tier                  TEXT,
+      input_tokens          INTEGER NOT NULL DEFAULT 0,
+      output_tokens         INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      cost_usd              REAL    NOT NULL DEFAULT 0,
+      created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cost_events_created
+      ON cost_events (created_at);
+    CREATE INDEX IF NOT EXISTS idx_cost_events_project
+      ON cost_events (project_id, created_at);
+  `);
+
   d.exec(`
     CREATE TABLE IF NOT EXISTS chat_channels (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,

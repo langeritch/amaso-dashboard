@@ -69,6 +69,7 @@ import {
 import { routeBrainUpdate } from "@/lib/spar-brain-autorouter";
 import { routeAndLog } from "@/lib/spar-model-router";
 import { isSmartTopicsEnabled } from "@/lib/config";
+import { recordCostEvent } from "@/lib/cost-events";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -1016,6 +1017,19 @@ export async function POST(req: NextRequest) {
                   model: routeDecision.model,
                   tier: routeDecision.tier,
                 },
+              });
+              // Item 9 — persist cost. Upsert keyed by streamId, so the
+              // repeated cumulative emits collapse to one final row per
+              // turn. Never throws (recordCostEvent swallows). project_id
+              // stays null: this is the spar partner's own spend, not the
+              // separate per-project CLI processes it dispatches into.
+              recordCostEvent({
+                streamId,
+                userId: user.id,
+                projectId: null,
+                model: routeDecision.model,
+                tier: routeDecision.tier,
+                usage: u,
               });
             };
 
