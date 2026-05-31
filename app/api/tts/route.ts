@@ -1,10 +1,35 @@
 import { NextRequest } from "next/server";
 import { getKokoroPort } from "@/lib/kokoro";
+import { stripEmDashes } from "@/lib/copy-sanitize";
 import { getCurrentUser } from "@/lib/auth";
 import { getSession } from "@/lib/voice-session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Light markdown is allowed in chat for readability, but the speech
+// engine should never speak the syntax characters. Strip the common
+// inline + block markers before handing text to Kokoro.
+function stripMarkdownForTts(input: string): string {
+  let s = input;
+  s = s.replace(/```[\s\S]*?```/g, " ");
+  s = s.replace(/`([^`]*)`/g, "$1");
+  s = s.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+  s = s.replace(/^\s*[-*+]\s+/gm, "");
+  s = s.replace(/^\s*\d+\.\s+/gm, "");
+  s = s.replace(/^\s*>\s?/gm, "");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/__([^_]+)__/g, "$1");
+  s = s.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, "$1$2");
+  s = s.replace(/(^|[^_])_([^_\s][^_]*?)_/g, "$1$2");
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+  s = s.replace(/[ \t]+\n/g, "\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  // Hard rule (#524): never speak em/en-dashes — collapse them to " - ".
+  s = stripEmDashes(s);
+  return s.trim();
+}
 
 export async function POST(req: NextRequest) {
   let body: { text?: unknown; voice?: unknown; speed?: unknown; lang?: unknown } | null = null;
@@ -13,7 +38,9 @@ export async function POST(req: NextRequest) {
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  const text = typeof body?.text === "string" ? body.text.trim() : "";
+  const rawText = typeof body?.text === "string" ? body.text.trim() : "";
+  if (!rawText) return new Response("empty text", { status: 400 });
+  const text = stripMarkdownForTts(rawText);
   if (!text) return new Response("empty text", { status: 400 });
 
   // Audio-routing guard: if the caller's voice session is currently

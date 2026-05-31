@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnEnvOverrides } from "./claude-accounts";
+import { stripEmDashes } from "./copy-sanitize";
 
 function findClaudeBinary(): string {
   if (process.env.AMASO_CLAUDE_CMD) return process.env.AMASO_CLAUDE_CMD;
@@ -472,7 +473,7 @@ function dispatchCliEvent(
     const blocks = Array.isArray(message?.content) ? message!.content : [];
     for (const block of blocks as Array<Record<string, unknown>>) {
       if (block?.type === "text" && typeof block.text === "string") {
-        handlers.onText(block.text);
+        handlers.onText(stripEmDashes(block.text));
       } else if (
         block?.type === "tool_use" &&
         typeof block.id === "string" &&
