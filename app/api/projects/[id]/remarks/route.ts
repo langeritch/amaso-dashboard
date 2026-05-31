@@ -41,8 +41,20 @@ interface RemarkRow {
   body: string;
   created_at: number;
   resolved_at: number | null;
+  status: string | null;
+  priority: string | null;
+  assignee_id: number | null;
+  due_at: number | null;
+  updated_at: number | null;
   user_name: string;
 }
+
+// Item 6 — task-field vocab. Kept here + validated server-side since
+// SQLite ALTER can't add CHECK constraints to the existing table.
+const REMARK_STATUSES = ["open", "in-progress", "blocked", "done"] as const;
+const REMARK_PRIORITIES = ["low", "med", "high"] as const;
+type RemarkStatus = (typeof REMARK_STATUSES)[number];
+type RemarkPriority = (typeof REMARK_PRIORITIES)[number];
 
 export async function GET(
   req: Request,
@@ -63,7 +75,7 @@ export async function GET(
   if (scope === "project") {
     rows = db
       .prepare(
-        `SELECT r.id, r.user_id, r.project_id, r.path, r.line, r."column", r.context, r.category, r.body, r.created_at, r.resolved_at, u.name AS user_name
+        `SELECT r.id, r.user_id, r.project_id, r.path, r.line, r."column", r.context, r.category, r.body, r.created_at, r.resolved_at, r.status, r.priority, r.assignee_id, r.due_at, r.updated_at, u.name AS user_name
            FROM remarks r JOIN users u ON u.id = r.user_id
           WHERE r.project_id = ? AND r.path IS NULL
           ORDER BY r.created_at DESC`,
@@ -72,7 +84,7 @@ export async function GET(
   } else if (pathFilter) {
     rows = db
       .prepare(
-        `SELECT r.id, r.user_id, r.project_id, r.path, r.line, r."column", r.context, r.category, r.body, r.created_at, r.resolved_at, u.name AS user_name
+        `SELECT r.id, r.user_id, r.project_id, r.path, r.line, r."column", r.context, r.category, r.body, r.created_at, r.resolved_at, r.status, r.priority, r.assignee_id, r.due_at, r.updated_at, u.name AS user_name
            FROM remarks r JOIN users u ON u.id = r.user_id
           WHERE r.project_id = ? AND r.path = ?
           ORDER BY r.created_at ASC`,
@@ -81,7 +93,7 @@ export async function GET(
   } else {
     rows = db
       .prepare(
-        `SELECT r.id, r.user_id, r.project_id, r.path, r.line, r."column", r.context, r.category, r.body, r.created_at, r.resolved_at, u.name AS user_name
+        `SELECT r.id, r.user_id, r.project_id, r.path, r.line, r."column", r.context, r.category, r.body, r.created_at, r.resolved_at, r.status, r.priority, r.assignee_id, r.due_at, r.updated_at, u.name AS user_name
            FROM remarks r JOIN users u ON u.id = r.user_id
           WHERE r.project_id = ?
           ORDER BY r.created_at DESC`,
@@ -104,6 +116,13 @@ export async function GET(
       body: r.body,
       createdAt: r.created_at,
       resolvedAt: r.resolved_at,
+      // Item 6 task fields — defaults applied on read so legacy rows
+      // (all-NULL) surface as open/med with no assignee or due date.
+      status: (r.status as RemarkStatus | null) ?? "open",
+      priority: (r.priority as RemarkPriority | null) ?? "med",
+      assigneeId: r.assignee_id,
+      dueAt: r.due_at,
+      updatedAt: r.updated_at,
       attachments: attachments.get(r.id) ?? [],
     })),
   });

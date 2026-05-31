@@ -13,6 +13,24 @@ export function getDb(): Database.Database {
   db = new Database(DB_PATH);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // Cap WAL growth at 100 MB so a long-running write storm (heartbeat
+  // ticks, daily extraction, chat bursts) can't fill the disk with
+  // uncommitted journal pages. SQLite auto-truncates back to this on
+  // the next checkpoint.
+  db.pragma("journal_size_limit = 100000000");
+  // 5s busy timeout. With WAL, readers don't block writers, but a long
+  // write or vacuum can still make a concurrent writer wait — better
+  // to wait briefly than to throw SQLITE_BUSY at the API caller.
+  db.pragma("busy_timeout = 5000");
+  // NORMAL is the right durability/perf tradeoff under WAL: writes
+  // survive process crash, but not a hard power loss between commit
+  // and the next fsync. For a single-box dashboard with a watchdog
+  // restart, that's the right point on the curve.
+  db.pragma("synchronous = NORMAL");
+  // Tombstone deleted rows on disk. Costs a small write amplification;
+  // gains: a leaked DB backup doesn't carry old session tokens, deleted
+  // user records, etc. in free-space pages.
+  db.pragma("secure_delete = ON");
   migrate(db);
   return db;
 }
@@ -28,6 +46,20 @@ function migrate(d: Database.Database) {
       created_at   INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS magic_links (
+      id         TEXT    PRIMARY KEY,              -- signed token
+      user_id    INTEGER NOT NULL,
+      email      TEXT    NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      used_at    INTEGER,                         -- NULL until consumed
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_magic_links_email_active
+      ON magic_links (email) WHERE used_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_magic_links_user
+      ON magic_links (user_id);
+
     CREATE TABLE IF NOT EXISTS project_access (
       user_id    INTEGER NOT NULL,
       project_id TEXT    NOT NULL,
@@ -42,6 +74,25 @@ function migrate(d: Database.Database) {
       expires_at INTEGER NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    -- Append-only audit trail for security-relevant admin actions.
+    -- Never updated, never deleted from app code. Schema is deliberately
+    -- denormalized (actor_email, target_email captured at write time)
+    -- so retiring or renaming a user doesn't rewrite their history.
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts            INTEGER NOT NULL,
+      actor_id      INTEGER,
+      actor_email   TEXT,
+      actor_ip      TEXT,
+      action        TEXT    NOT NULL,
+      target_kind   TEXT,
+      target_id     TEXT,
+      target_email  TEXT,
+      meta_json     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts);
+    CREATE INDEX IF NOT EXISTS audit_log_action_idx ON audit_log (action);
   `);
 
   // Remarks: added nullable `path` (project-level) and required `category`
@@ -115,6 +166,25 @@ function migrate(d: Database.Database) {
   }
   if (!remarkCols.some((c) => c.name === "updated_at")) {
     d.exec("ALTER TABLE remarks ADD COLUMN updated_at INTEGER");
+  }
+  // Item 6 - remarks become lightweight tasks. All additive + nullable so
+  // existing rows keep working: on read, status defaults to 'open' and
+  // priority to 'med' (NULL ≡ default), assignee/due stay empty. No CHECK
+  // constraints (SQLite can't add them via ALTER) — the API validates the
+  // allowed values instead.
+  if (!remarkCols.some((c) => c.name === "status")) {
+    // open | in-progress | blocked | done
+    d.exec("ALTER TABLE remarks ADD COLUMN status TEXT");
+  }
+  if (!remarkCols.some((c) => c.name === "priority")) {
+    // low | med | high
+    d.exec("ALTER TABLE remarks ADD COLUMN priority TEXT");
+  }
+  if (!remarkCols.some((c) => c.name === "assignee_id")) {
+    d.exec("ALTER TABLE remarks ADD COLUMN assignee_id INTEGER");
+  }
+  if (!remarkCols.some((c) => c.name === "due_at")) {
+    d.exec("ALTER TABLE remarks ADD COLUMN due_at INTEGER");
   }
 
   d.exec(`
@@ -265,6 +335,39 @@ function migrate(d: Database.Database) {
       "INSERT INTO chat_channels (kind, project_id, name, created_at) VALUES ('general', NULL, ?, ?)",
     ).run("General", Date.now());
   }
+
+  d.exec(`
+    -- Editor documents with Git commit history.
+    CREATE TABLE IF NOT EXISTS editor_documents (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT    NOT NULL,                 -- filename or title
+      path       TEXT    NOT NULL UNIQUE,          -- relative path in Git repo
+      language   TEXT    NOT NULL DEFAULT 'plain', -- programming language hint
+      created_by INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_editor_documents_updated
+      ON editor_documents (updated_at);
+
+    CREATE TABLE IF NOT EXISTS editor_commits (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id   INTEGER NOT NULL,
+      commit_hash   TEXT    NOT NULL UNIQUE,      -- git object hash
+      author_id     INTEGER NOT NULL,
+      message       TEXT    NOT NULL,
+      content       TEXT    NOT NULL,             -- full document content at this commit
+      diff_from_parent TEXT,                      -- optional unified diff
+      created_at    INTEGER NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES editor_documents(id) ON DELETE CASCADE,
+      FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_editor_commits_document
+      ON editor_commits (document_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_editor_commits_author
+      ON editor_commits (author_id);
+  `);
 
   d.exec(`
     -- Quick-action launcher entries shown on /automations. Each row is a
@@ -549,6 +652,17 @@ function migrate(d: Database.Database) {
       "ALTER TABLE spar_conversations ADD COLUMN last_named_at_count INTEGER NOT NULL DEFAULT 0",
     );
   }
+  // Per-task conversation linkage. When non-null, the conversation
+  // belongs to a task and is rendered in the Tasks tab's chat view
+  // instead of the main spar chat sidebar. Index supports the
+  // `getConversationByTaskId` lookup the task agent uses on every
+  // message persist.
+  if (!sparConvCols.some((c) => c.name === "task_id")) {
+    d.exec("ALTER TABLE spar_conversations ADD COLUMN task_id TEXT");
+    d.exec(
+      "CREATE INDEX IF NOT EXISTS idx_spar_conversations_task ON spar_conversations (task_id)",
+    );
+  }
 
   // Additive: directive + enabled columns on autopilot_users. The old
   // schema treated row-presence as the on bit; the directive feature
@@ -589,7 +703,571 @@ function migrate(d: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_heartbeat_ticks_user_at
       ON heartbeat_ticks (user_id, at DESC);
+
+    CREATE TABLE IF NOT EXISTS app_migrations (
+      name       TEXT    PRIMARY KEY,
+      applied_at INTEGER NOT NULL
+    );
   `);
+
+  // Daily chat summaries: one per user per day, generated on first app
+  // open of a new day. topics is a JSON array of { name, description,
+  // projectId?, messageIds[] }. UNIQUE on (date, user_id) so concurrent
+  // triggers are safe.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS daily_summaries (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      date            TEXT    NOT NULL,
+      user_id         INTEGER NOT NULL,
+      conversation_id INTEGER NOT NULL,
+      summary         TEXT    NOT NULL,
+      topics          TEXT    NOT NULL,
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE (date, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_summaries_user
+      ON daily_summaries (user_id, date DESC);
+  `);
+
+  // Smart Topic System — Layer 0. Persistent, slug-addressable topics
+  // scoped per user, so every account gets its own brain. `topics` is
+  // the lightweight index row; `spar_message_topics` links a
+  // spar_messages row to one or more of that user's topics with a
+  // relevance score so post-day extraction can rank membership without
+  // rewriting history. Slugs are unique per user, not global, so two
+  // people can both have a "amaso-dashboard" topic. message_count and
+  // last_active_at are denormalized counters maintained by lib/topics.ts
+  // on attach so the sidebar can list topics without aggregate joins.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS topics (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id        INTEGER NOT NULL,
+      slug           TEXT    NOT NULL,
+      title          TEXT    NOT NULL,
+      summary        TEXT,
+      status         TEXT    NOT NULL DEFAULT 'active'
+                              CHECK (status IN ('active','archived')),
+      message_count  INTEGER NOT NULL DEFAULT 0,
+      created_at     INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL,
+      last_active_at INTEGER NOT NULL,
+      UNIQUE (user_id, slug),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_topics_user_last_active
+      ON topics (user_id, last_active_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_topics_user_status_last_active
+      ON topics (user_id, status, last_active_at DESC);
+
+    CREATE TABLE IF NOT EXISTS spar_message_topics (
+      topic_id   INTEGER NOT NULL,
+      message_id INTEGER NOT NULL,
+      relevance  REAL    NOT NULL DEFAULT 1.0,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (topic_id, message_id),
+      FOREIGN KEY (topic_id)   REFERENCES topics(id)        ON DELETE CASCADE,
+      FOREIGN KEY (message_id) REFERENCES spar_messages(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_spar_message_topics_message
+      ON spar_message_topics (message_id, topic_id);
+
+    -- Layer 1 detection: alternate strings the matcher will recognize as
+    -- the same topic ("meridian-app" / "meridian" / "the meridian
+    -- dashboard"). Aliases are scoped per topic; uniqueness is per
+    -- (topic_id, alias) so the same alias can theoretically point at
+    -- different users' topics — the detector always queries with
+    -- user_id joined in.
+    CREATE TABLE IF NOT EXISTS topic_aliases (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      topic_id   INTEGER NOT NULL,
+      alias      TEXT    NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE (topic_id, alias),
+      FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_topic_aliases_alias
+      ON topic_aliases (alias);
+
+    -- Layer 7: cross-references from a topic to brain files. file_path
+    -- is relative to BRAIN_ROOT (e.g. "projects.md",
+    -- "users/santi/profile.md"); section is the header slug within
+    -- that file (e.g. "woonklasse", "budget-tier-landing-pages") and
+    -- may be NULL when the ref points at the whole file. Uniqueness
+    -- is per (topic, file, section) — COALESCE(section,'') keeps the
+    -- whole-file ref from colliding with a section ref of the same
+    -- file. updated_at tracks the most recent extraction touch so the
+    -- 4000-char cap in the reader prefers freshly-refreshed sections.
+    CREATE TABLE IF NOT EXISTS topic_brain_refs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      topic_id   INTEGER NOT NULL,
+      file_path  TEXT    NOT NULL,
+      section    TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_brain_refs_unique
+      ON topic_brain_refs (topic_id, file_path, COALESCE(section, ''));
+    CREATE INDEX IF NOT EXISTS idx_topic_brain_refs_topic
+      ON topic_brain_refs (topic_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_topic_brain_refs_file
+      ON topic_brain_refs (file_path);
+  `);
+
+  // Layer 0 originally shipped without user_id. If the older shape is
+  // present, drop and recreate — the table was empty in production
+  // (Layer 0 has no writers yet), so we don't need a copy-migrate.
+  // Detection is one query per boot; the recreate runs at most once.
+  const topicsCols = d.prepare("PRAGMA table_info(topics)").all() as {
+    name: string;
+  }[];
+  if (topicsCols.length > 0 && !topicsCols.some((c) => c.name === "user_id")) {
+    d.exec("DROP TABLE IF EXISTS spar_message_topics");
+    d.exec("DROP TABLE topics");
+    d.exec(`
+      CREATE TABLE topics (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id        INTEGER NOT NULL,
+        slug           TEXT    NOT NULL,
+        title          TEXT    NOT NULL,
+        summary        TEXT,
+        status         TEXT    NOT NULL DEFAULT 'active'
+                                CHECK (status IN ('active','archived')),
+        message_count  INTEGER NOT NULL DEFAULT 0,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL,
+        last_active_at INTEGER NOT NULL,
+        UNIQUE (user_id, slug),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_topics_user_last_active
+        ON topics (user_id, last_active_at DESC);
+      CREATE INDEX idx_topics_user_status_last_active
+        ON topics (user_id, status, last_active_at DESC);
+      CREATE TABLE spar_message_topics (
+        topic_id   INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        relevance  REAL    NOT NULL DEFAULT 1.0,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (topic_id, message_id),
+        FOREIGN KEY (topic_id)   REFERENCES topics(id)        ON DELETE CASCADE,
+        FOREIGN KEY (message_id) REFERENCES spar_messages(id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_spar_message_topics_message
+        ON spar_message_topics (message_id, topic_id);
+    `);
+  }
+
+  // Smart Topic System — Layer 3: per-user single rolling daily chat.
+  // `daily_chats` maps a (user, local-date) pair to the conversation
+  // row that owns that day's transcript. UNIQUE partial index pins
+  // exactly one *active* row per day; older same-day rows hang around
+  // with active=0 so legacy sessions stay visible in the sidebar but
+  // new turns always route to active=1. Date strings are computed in
+  // Europe/Amsterdam (see lib/local-date.ts) so a midnight roll lines
+  // up with Santi's local clock, not server UTC.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS daily_chats (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id         INTEGER NOT NULL,
+      date_local      TEXT    NOT NULL,
+      conversation_id INTEGER NOT NULL,
+      active          INTEGER NOT NULL DEFAULT 1,
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY (user_id)         REFERENCES users(id)              ON DELETE CASCADE,
+      FOREIGN KEY (conversation_id) REFERENCES spar_conversations(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_chats_active_unique
+      ON daily_chats (user_id, date_local) WHERE active = 1;
+    CREATE INDEX IF NOT EXISTS idx_daily_chats_user_date
+      ON daily_chats (user_id, date_local DESC);
+    CREATE INDEX IF NOT EXISTS idx_daily_chats_conversation
+      ON daily_chats (conversation_id);
+  `);
+  backfillDailyChats(d);
+  backfillAssistantTopicLinks(d);
+
+  // Post-day extraction tables.
+  // daily_subjects: one row per (user, date) produced by extractDaySubjects.
+  // Stores a JSON array of SubjectEntry objects consolidated from the day's
+  // messages and topics. UNIQUE on (user_id, date) so concurrent triggers
+  // are safe (INSERT OR REPLACE handles re-extraction).
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS daily_subjects (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id      INTEGER NOT NULL REFERENCES users(id),
+      date         TEXT    NOT NULL,
+      subjects     TEXT    NOT NULL,
+      generated_at INTEGER NOT NULL,
+      UNIQUE (user_id, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_subjects_user_date
+      ON daily_subjects (user_id, date);
+
+    CREATE TABLE IF NOT EXISTS topic_transitions (
+      id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id         INTEGER NOT NULL REFERENCES spar_conversations(id),
+      from_topic_id           INTEGER REFERENCES topics(id),
+      to_topic_id             INTEGER NOT NULL REFERENCES topics(id),
+      transition_type         TEXT    NOT NULL CHECK (transition_type IN ('new','return','merge')),
+      triggered_by_message_id INTEGER REFERENCES spar_messages(id),
+      timestamp               INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_topic_transitions_conv
+      ON topic_transitions (conversation_id, timestamp);
+
+    -- Layer 4 (post-day extraction): audit row per (user, date) that
+    -- captures the outcome of the nightly Haiku-driven extraction
+    -- pass. status flips through pending → success | failed | skipped
+    -- as the pipeline runs. fact_count + classifications_json power
+    -- the admin dashboard; source_message_ids lets us trace a
+    -- specific brain-file write back to the spar messages that
+    -- produced it.
+    CREATE TABLE IF NOT EXISTS daily_extractions (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      date                  TEXT    NOT NULL,
+      run_at                INTEGER NOT NULL,
+      status                TEXT    NOT NULL CHECK (status IN ('pending','success','failed','skipped')),
+      fact_count            INTEGER NOT NULL DEFAULT 0,
+      classifications_json  TEXT    NOT NULL DEFAULT '{}',
+      source_message_ids    TEXT    NOT NULL DEFAULT '[]',
+      error_text            TEXT,
+      UNIQUE (user_id, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_extractions_user_date
+      ON daily_extractions (user_id, date DESC);
+    CREATE INDEX IF NOT EXISTS idx_daily_extractions_status
+      ON daily_extractions (status, run_at DESC);
+
+    -- Layer 5: per-fact detail rows produced by each extraction run.
+    -- The parent daily_extractions row keeps the aggregate (status,
+    -- counts, source ids); this child table holds each accepted fact
+    -- as its own row so the history-UI sidebar can list them and the
+    -- L6 recall(type='keyword') tool can LIKE-search across them.
+    --
+    -- ON DELETE CASCADE so re-extraction (which deletes the parent
+    -- and re-inserts) drops the stale child rows before the new ones
+    -- land — same idempotency posture as the brain-file fingerprint
+    -- guard in lib/daily-extraction.ts.
+    CREATE TABLE IF NOT EXISTS extracted_facts (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      extraction_id        INTEGER NOT NULL REFERENCES daily_extractions(id) ON DELETE CASCADE,
+      user_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      date                 TEXT    NOT NULL,
+      fact                 TEXT    NOT NULL,
+      classification       TEXT    NOT NULL,
+      brain_file           TEXT    NOT NULL,
+      section              TEXT    NOT NULL,
+      source_message_ids   TEXT    NOT NULL DEFAULT '[]',
+      created_at           INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_extracted_facts_user_date
+      ON extracted_facts (user_id, date DESC);
+    CREATE INDEX IF NOT EXISTS idx_extracted_facts_extraction
+      ON extracted_facts (extraction_id);
+    CREATE INDEX IF NOT EXISTS idx_extracted_facts_classification
+      ON extracted_facts (user_id, classification);
+
+    -- Layer 6: audit row per recall() tool invocation. Lets us tune
+    -- the trigger phrases later by inspecting which lookups the model
+    -- chose to fire and what they found. result_count is the number
+    -- of message+fact bundles returned, not the row count of the
+    -- underlying tables. Lightweight; no FK so a deleted user's
+    -- invocation rows stay around for analysis.
+    CREATE TABLE IF NOT EXISTS recall_invocations (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id         INTEGER NOT NULL,
+      ts              INTEGER NOT NULL,
+      type            TEXT    NOT NULL CHECK (type IN ('date','topic','keyword')),
+      value           TEXT    NOT NULL,
+      result_count    INTEGER NOT NULL DEFAULT 0,
+      total_messages  INTEGER NOT NULL DEFAULT 0,
+      total_facts     INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_recall_invocations_user_ts
+      ON recall_invocations (user_id, ts DESC);
+
+    -- Smart Topic System — final pass (2026-05-14): per-(user, date,
+    -- topic) rollup. Pure aggregate over spar_message_topics +
+    -- spar_messages + daily_chats. Recomputed by the nightly
+    -- extraction cron and lazily on history-UI reads; PK is the
+    -- natural key so an UPSERT pattern keeps it idempotent.
+    --
+    -- This is what the spar prompt's "Active topics today" block and
+    -- the list_topics tool read. Without this rollup every prompt
+    -- would have to re-join three tables; with it, the prompt cost
+    -- stays under a single indexed lookup.
+    CREATE TABLE IF NOT EXISTS daily_topic_stats (
+      user_id          INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      date             TEXT    NOT NULL,
+      topic_id         INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      message_count    INTEGER NOT NULL DEFAULT 0,
+      first_message_id INTEGER,
+      last_message_id  INTEGER,
+      first_ts         INTEGER,
+      last_ts          INTEGER,
+      computed_at      INTEGER NOT NULL,
+      PRIMARY KEY (user_id, date, topic_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_topic_stats_user_date
+      ON daily_topic_stats (user_id, date DESC, message_count DESC);
+    CREATE INDEX IF NOT EXISTS idx_daily_topic_stats_topic
+      ON daily_topic_stats (topic_id, date DESC);
+
+    -- Layer 6.5 (tense-aware recall hints): audit row per turn where
+    -- a perfect-tense match fired and a hint was injected into the
+    -- system prompt. model_called_recall is back-filled by the route
+    -- when the assistant turn that received the hint actually
+    -- invoked the recall tool — lets us measure whether the hint is
+    -- pulling its weight before we add more matchers.
+    CREATE TABLE IF NOT EXISTS tense_hint_invocations (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id             INTEGER NOT NULL,
+      ts                  INTEGER NOT NULL,
+      matched_phrase      TEXT    NOT NULL,
+      suggested_keyword   TEXT,
+      conversation_id     INTEGER,
+      model_called_recall INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_tense_hint_user_ts
+      ON tense_hint_invocations (user_id, ts DESC);
+
+    -- Remark #431: per-topic summary quality flag. NULL while
+    -- the summary is fresh / unvalidated, 'pass' once the validator
+    -- has signed off, 'weak' when even the regenerate-once retry
+    -- failed. Readers that build context for recall / search filter
+    -- out 'weak' rows by default so noisy summaries don't poison
+    -- downstream prompts.
+    --
+    -- Subject-level quality (each subject inside daily_subjects.subjects
+    -- JSON) is stored inline on the SubjectEntry object as
+    -- 'quality_flag' so the per-entry granularity doesn't require a
+    -- whole side table.
+    CREATE TABLE IF NOT EXISTS summary_validation_log (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts                INTEGER NOT NULL,
+      source            TEXT    NOT NULL CHECK (source IN ('topic','subject','backfill')),
+      ref_id            INTEGER,
+      user_id           INTEGER,
+      total             INTEGER NOT NULL DEFAULT 0,
+      passed_first      INTEGER NOT NULL DEFAULT 0,
+      regenerated       INTEGER NOT NULL DEFAULT 0,
+      passed_after_regen INTEGER NOT NULL DEFAULT 0,
+      remained_weak     INTEGER NOT NULL DEFAULT 0,
+      notes             TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_summary_validation_log_ts
+      ON summary_validation_log (ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_summary_validation_log_source
+      ON summary_validation_log (source, ts DESC);
+  `);
+
+  // ALTER TABLE for the new topics.quality_flag column. SQLite ALTER
+  // is idempotent-via-probe; the migrate() function runs at startup
+  // on a connection that's already open, so PRAGMA table_info gives
+  // us the existing columns and we add the new one when missing.
+  const topicCols = d.prepare("PRAGMA table_info(topics)").all() as
+    | Array<{ name: string }>
+    | undefined;
+  if (Array.isArray(topicCols) && !topicCols.some((c) => c.name === "quality_flag")) {
+    d.exec("ALTER TABLE topics ADD COLUMN quality_flag TEXT");
+  }
+
+  // Companion activity: one row per heartbeat poll from a companion
+  // device. Records the frontmost app, idle time, screen state, and
+  // battery level so the dashboard can surface "what is Santi's Mac
+  // doing right now". Rolling window: we keep the last 288 rows per
+  // device (one per 5-min interval = 24 h); older rows are pruned in
+  // the WebSocket handler right after each insert.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS companion_activity (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id   TEXT NOT NULL,
+      user_id     INTEGER NOT NULL REFERENCES users(id),
+      active_app  TEXT,
+      idle_secs   INTEGER,
+      screen_on   INTEGER,
+      battery_pct INTEGER,
+      recorded_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_companion_activity_device
+      ON companion_activity (device_id, recorded_at DESC);
+  `);
+
+  backfillTeamProjectAccess(d);
+}
+
+/**
+ * Layer 5 topic detail view was showing user-only threads because
+ * Layer 1 detection only tags user messages. This backfill walks every
+ * assistant row in spar_messages and copies the immediately-preceding
+ * user message's topic attachments onto it. Idempotent on
+ * (topic_id, message_id) thanks to the join table's PK. Marker is
+ * recorded in app_migrations so the walk runs at most once per
+ * install.
+ */
+function backfillAssistantTopicLinks(d: Database.Database) {
+  const MIGRATION = "assistant_topic_links_backfill_v1";
+  const already = d
+    .prepare("SELECT 1 FROM app_migrations WHERE name = ?")
+    .get(MIGRATION);
+  if (already) return;
+
+  // For each assistant row, find the prior user row in the same
+  // conversation, then INSERT OR IGNORE every topic attachment of
+  // that user row onto the assistant row. Done in one SQL pass so the
+  // entire backfill stays inside a single transaction — no N+1.
+  const insertSql = `
+    INSERT OR IGNORE INTO spar_message_topics (topic_id, message_id, relevance, created_at)
+    SELECT mt.topic_id, a.id, mt.relevance, ?
+      FROM spar_messages a
+      JOIN spar_messages u
+        ON u.conversation_id = a.conversation_id
+       AND u.role = 'user'
+       AND u.id = (
+         SELECT MAX(u2.id) FROM spar_messages u2
+          WHERE u2.conversation_id = a.conversation_id
+            AND u2.role = 'user'
+            AND u2.id < a.id
+       )
+      JOIN spar_message_topics mt ON mt.message_id = u.id
+     WHERE a.role = 'assistant'
+  `;
+  const now = Date.now();
+  d.transaction(() => {
+    const info = d.prepare(insertSql).run(now);
+    d.prepare("INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)").run(
+      MIGRATION,
+      now,
+    );
+    console.log(
+      `[db] backfillAssistantTopicLinks: inserted ${info.changes} assistant→topic links`,
+    );
+  })();
+}
+
+/**
+ * One-shot backfill: every existing non-task conversation gets a
+ * daily_chats row keyed by its created_at date in Europe/Amsterdam.
+ * Within a single (user, date_local) bucket the most-recently-updated
+ * conversation is marked active=1; older same-day conversations get
+ * active=0 so they remain accessible from the sidebar without
+ * intercepting new writes. Idempotent via app_migrations marker —
+ * runs at most once per install.
+ *
+ * Edge case: if a date_local already has an active=1 row from a real
+ * (non-backfilled) write that landed before this migration ran, the
+ * partial UNIQUE index fires and the INSERT OR IGNORE keeps the
+ * pre-existing row. The losing row falls through and gets re-inserted
+ * with active=0 in the second pass below.
+ */
+function backfillDailyChats(d: Database.Database) {
+  const MIGRATION = "daily_chats_backfill_v1";
+  const already = d
+    .prepare("SELECT 1 FROM app_migrations WHERE name = ?")
+    .get(MIGRATION);
+  if (already) return;
+
+  // Local import to avoid module-load order issues — lib/local-date is
+  // pure JS and has no transitive deps on this file.
+  const { formatLocalDate } = require("./local-date") as typeof import("./local-date");
+
+  type Row = { id: number; user_id: number; created_at: number; updated_at: number };
+  const convs = d
+    .prepare(
+      "SELECT id, user_id, created_at, updated_at FROM spar_conversations WHERE task_id IS NULL",
+    )
+    .all() as Row[];
+
+  // Group by (user, date_local) and pick the most-recently-updated as active.
+  const groups = new Map<string, Row[]>();
+  for (const c of convs) {
+    const date = formatLocalDate(c.created_at);
+    const key = `${c.user_id} ${date}`;
+    const arr = groups.get(key) ?? [];
+    arr.push(c);
+    groups.set(key, arr);
+  }
+
+  const insertActive = d.prepare(
+    "INSERT OR IGNORE INTO daily_chats (user_id, date_local, conversation_id, active, created_at) VALUES (?, ?, ?, 1, ?)",
+  );
+  const insertInactive = d.prepare(
+    "INSERT OR IGNORE INTO daily_chats (user_id, date_local, conversation_id, active, created_at) VALUES (?, ?, ?, 0, ?)",
+  );
+  const mark = d.prepare(
+    "INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)",
+  );
+
+  d.transaction(() => {
+    for (const [key, list] of groups) {
+      const sep = key.indexOf(" ");
+      const userId = Number(key.slice(0, sep));
+      const date = key.slice(sep + 1);
+      list.sort((a, b) => b.updated_at - a.updated_at);
+      // First insert as active. If the partial UNIQUE index rejects
+      // (because something already wrote an active row for this
+      // bucket between feature deploy and migration), fall through.
+      insertActive.run(userId, date, list[0].id, list[0].created_at);
+      for (let i = 1; i < list.length; i++) {
+        insertInactive.run(userId, date, list[i].id, list[i].created_at);
+      }
+    }
+    mark.run(MIGRATION, Date.now());
+  })();
+}
+
+/**
+ * Until now, role='team' bypassed project_access entirely and saw every
+ * configured project. We now treat team like client (project-scoped via
+ * project_access). Without a backfill, every existing team member would
+ * suddenly see zero projects after this deploy. So on first boot under
+ * the new semantics, grant each existing team user access to every
+ * currently-configured project — preserving today's behavior. Admins
+ * can then narrow scope explicitly. Marker row in app_migrations
+ * makes this strictly one-shot; new team members created after the
+ * migration start with no access until an admin assigns projects
+ * (matches the new contract: empty rows = sees nothing).
+ */
+function backfillTeamProjectAccess(d: Database.Database) {
+  const MIGRATION = "team_project_access_backfill_v1";
+  const already = d
+    .prepare("SELECT 1 FROM app_migrations WHERE name = ?")
+    .get(MIGRATION);
+  if (already) return;
+
+  let projectIds: string[];
+  try {
+    projectIds = loadConfig().projects.map((p) => p.id);
+  } catch (err) {
+    // If the config can't be loaded right now (corrupt JSON, missing
+    // file), don't mark the migration done — try again next boot.
+    console.warn(
+      "[db] backfillTeamProjectAccess skipped: loadConfig failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return;
+  }
+
+  const teamUsers = d
+    .prepare("SELECT id FROM users WHERE role = 'team'")
+    .all() as { id: number }[];
+
+  const ins = d.prepare(
+    "INSERT OR IGNORE INTO project_access (user_id, project_id) VALUES (?, ?)",
+  );
+  const mark = d.prepare(
+    "INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)",
+  );
+
+  d.transaction(() => {
+    for (const u of teamUsers) {
+      for (const pid of projectIds) ins.run(u.id, pid);
+    }
+    mark.run(MIGRATION, Date.now());
+  })();
 }
 
 /** Seed the launcher with Outlook on first run so the page isn't empty
