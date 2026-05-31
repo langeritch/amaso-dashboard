@@ -212,7 +212,7 @@ const TOOLS = [
   {
     name: "dispatch_to_project",
     description:
-      "Send a crafted prompt directly into a project's Claude Code terminal. This fires immediately — there is no second-turn confirm step. Safety is on you: before calling this, describe the prompt to the user in plain spoken prose (what you're about to ask the project's Claude to do) and get a verbal yes. Only call this tool once the user has said go / yes / send it / do it. If you're unsure, don't call it — ask again. Craft the prompt carefully: it is the actual instruction Claude Code receives, so be specific, name the files, spell out constraints, reference prior discussion. Don't speak tool names, ids, or any of this machinery aloud to the user.",
+      "Send a crafted prompt directly into a project's Claude Code terminal. Outside autopilot this is a TWO-STEP tool: the first call (no confirm flag) returns a preview and sends nothing; after the user says yes you call again with confirm:true to actually send. In autopilot it fires immediately. Safety is on you: before confirming, describe the prompt to the user in plain spoken prose (what you're about to ask the project's Claude to do) and get a verbal yes. Only call this tool once the user has said go / yes / send it / do it. If you're unsure, don't call it — ask again. Craft the prompt carefully: it is the actual instruction Claude Code receives, so be specific, name the files, spell out constraints, reference prior discussion. Don't speak tool names, ids, or any of this machinery aloud to the user.",
     inputSchema: {
       type: "object",
       properties: {
@@ -221,6 +221,11 @@ const TOOLS = [
           type: "string",
           description:
             "Full instruction for the project's Claude Code terminal. Concrete, grounded in context you've already gathered, ready to run.",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "Leave false/omitted on the FIRST call: the tool returns a preview (project name + exact prompt) and sends NOTHING, so the user can catch a wrong project. After the user explicitly says yes, call again with the SAME project_id and prompt plus confirm: true to actually send. In autopilot this gate is skipped and the dispatch fires immediately.",
         },
       },
       required: ["project_id", "prompt"],
@@ -581,6 +586,26 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "web_search",
+    description:
+      "Search the web for current information. Fetches top results from DuckDuckGo and returns title, URL, snippet, and extracted page content for each. Use this when asked about recent events, current prices, today's news, or anything that requires up-to-date information not in your training data. Returns an array of up to 4 results.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query. Be specific. Max 200 chars.",
+        },
+        num_results: {
+          type: "number",
+          description: "Number of results to return. Default 4, max 8.",
+        },
+      },
+      required: ["query"],
       additionalProperties: false,
     },
   },
@@ -1128,6 +1153,287 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_task",
+    description:
+      "Create a goal-shaped task in the Tasks sidebar tab. Use this for any work the operator should be able to watch as it runs — opening apps, multi-step browser flows, companion shell sessions, anything with a verifiable success condition. Tasks are higher-level than browser jobs: the registry tracks the goal, the executing agent verifies it (up to max_checks times), and pause/resume/cancel are first-class. Returns a task id used by update_task / complete_task / fail_task. If a saved playbook applies, pass playbook (name) or playbook_id and the task starts pre-loaded with its known steps.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Short human label, max 200 chars. Examples: 'Open Outlook and check inbox', 'Refresh Vercel deploy status'.",
+        },
+        goal: {
+          type: "string",
+          description:
+            "What 'done' looks like in plain prose. The executing agent compares against this before flipping the row to completed. Max 2000 chars.",
+        },
+        instructions: {
+          type: "string",
+          description:
+            "Optional step-by-step playbook the agent should follow. Saved alongside the task so a replay reuses the same steps. Max 8000 chars.",
+        },
+        playbook: {
+          type: "string",
+          description:
+            "Optional playbook name. When set, the playbook's instructions are pre-loaded onto the task and its goal_template is used if goal is empty. Use list_playbooks first if you're not sure which one applies.",
+        },
+        playbook_id: {
+          type: "string",
+          description:
+            "Optional playbook id (from get_playbook / list_playbooks). Same effect as `playbook` but exact-id rather than name lookup.",
+        },
+        type: {
+          type: "string",
+          enum: ["browser", "companion", "mixed"],
+          description:
+            "What tools this task primarily needs. Defaults to 'browser'. 'companion' for tasks that drive a paired companion device; 'mixed' for tasks that need both.",
+        },
+        device_id: {
+          type: "string",
+          description:
+            "Optional. For type='companion', the paired device this task targets. Look it up via companion_list_devices.",
+        },
+        max_checks: {
+          type: "integer",
+          description:
+            "How many verification rounds the agent is allowed before giving up. Default 3. After this, fail the task with a useful reason rather than looping forever.",
+        },
+        auto_start: {
+          type: "boolean",
+          description:
+            "When true (default), the task starts in 'running'. When false, it queues until something flips it.",
+        },
+      },
+      required: ["name", "goal"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "update_task",
+    description:
+      "Update a task's progress and/or status. Call this on every check-back: take stock of where you are (screenshot, fs read, command output), then write a one-line summary into progress so the Tasks panel shows what just happened. Status moves: 'running' (still working), 'paused' (don't take more actions until resumed), 'checking' (mid-verification, increments check_count). Use complete_task / fail_task / cancel_task for terminal states. Pass record_check:true to bump the verification counter without changing status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task id from create_task." },
+        status: {
+          type: "string",
+          enum: [
+            "queued",
+            "running",
+            "paused",
+            "checking",
+            "completed",
+            "failed",
+            "cancelled",
+          ],
+          description:
+            "Optional new status. Omit when only the progress / record_check is changing.",
+        },
+        progress: {
+          type: "string",
+          description:
+            "One-line summary shown under the task name in the Tasks panel. Max 2000 chars.",
+        },
+        error: {
+          type: "string",
+          description:
+            "Optional error/blocker note. Surfaces in the panel; useful when status='failed' or 'paused'.",
+        },
+        record_check: {
+          type: "boolean",
+          description:
+            "When true, increment the verification counter as part of this update. Use this for 'I just looked, still not there' so the panel can show 2/3 verified.",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "complete_task",
+    description:
+      "Mark a task as completed (the goal is verified met). Bumps the verification counter as part of the call. Pass verified:true when you actually did the goal check (vs. just running the steps and assuming) — the panel surfaces this distinction. After completing, consider save_playbook so the next time this work comes up you have a head-start.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task id." },
+        verified: {
+          type: "boolean",
+          description:
+            "True when the goal was actually verified, not just assumed. Default false.",
+        },
+        summary: {
+          type: "string",
+          description:
+            "Optional one-liner about how the goal was met. Stored as the final progress line.",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fail_task",
+    description:
+      "Mark a task as failed. Use when the task can't be completed (operator needs to step in, the page is blocking us, the device is offline). The panel turns red and the row stays around so the operator can see what blocked. After failing, tell the operator out loud what went wrong.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task id." },
+        reason: {
+          type: "string",
+          description:
+            "Short reason why the task failed. Saved as the error and surfaced in the panel.",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pause_task",
+    description:
+      "Pause a running task. The executing context should stop taking new actions until resume_task is called. Use when the operator says 'hold on' or you need to wait for something out-of-band (an email confirmation, a captcha solve).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task id." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "resume_task",
+    description:
+      "Resume a paused or queued task. Status moves back to 'running' and execution picks up where it left off (the agent reads the latest progress line / instructions to know where that is).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task id." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cancel_task",
+    description:
+      "Cancel a task. Terminal state — the row stays around in the Tasks panel for a short fade-out and is then dropped. Different from fail_task: cancelled = the operator (or the agent) decided this isn't worth pursuing; failed = the task tried and couldn't.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task id." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_tasks",
+    description:
+      "List the user's tasks. By default returns active rows (anything not in a terminal state). Filter by status to narrow, or pass include_terminal:true to also see recently-completed/failed/cancelled rows. Use as your 'what's pending?' recovery tool after a worker recycle.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: [
+            "queued",
+            "running",
+            "paused",
+            "checking",
+            "completed",
+            "failed",
+            "cancelled",
+          ],
+          description: "Optional status filter.",
+        },
+        include_terminal: {
+          type: "boolean",
+          description:
+            "When true, include completed/failed/cancelled rows. Defaults to active-only.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "save_playbook",
+    description:
+      "Save a task's known-good steps as a reusable playbook. Call this after a task completes successfully when you expect the same kind of work to come up again. If a playbook with this name already exists it is updated rather than duplicated. Tag it generously — the search is fuzzy on name + tags.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Display name. Examples: 'Open Outlook', 'Check Vercel deploy'.",
+        },
+        goal_template: {
+          type: "string",
+          description:
+            "Goal template — the success condition for this kind of task. May include placeholders the agent expands at run-time.",
+        },
+        instructions: {
+          type: "string",
+          description: "The known-good sequence of steps in plain prose.",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional tags for fuzzy lookup. Lowercased and de-duplicated server-side. Max 16 tags.",
+        },
+      },
+      required: ["name", "goal_template", "instructions"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_playbook",
+    description:
+      "Retrieve a single playbook by id or name. Use before create_task when you remember the playbook name; the result has the goal_template + instructions you'll thread into the task. Throws when nothing matches.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Playbook id (pbk_…)." },
+        name: {
+          type: "string",
+          description: "Exact (case-insensitive) name match.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_playbooks",
+    description:
+      "List saved playbooks. Pass `q` for a fuzzy filter against name + tags (every whitespace-separated token has to appear in one of those fields). Returned rows are ordered by recent use first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "Optional search query." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "delete_playbook",
+    description:
+      "Delete a saved playbook. Tasks that already reference it stay intact (their playbookId field will simply not resolve anymore).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Playbook id (pbk_…)." },
+      },
+      required: ["id"],
       additionalProperties: false,
     },
   },

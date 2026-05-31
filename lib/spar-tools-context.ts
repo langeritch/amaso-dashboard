@@ -895,6 +895,31 @@ export async function dispatchToProjectTool(
   if (!canAccessProject(ctx.user, projectId)) {
     throw new Error("forbidden: no access to this project");
   }
+  // Item 5 - preview-then-confirm gate. Outside autopilot, the FIRST call
+  // never sends: it returns a preview (project name + exact prompt) so the
+  // user can catch a wrong project before anything lands (the NEVA17 /
+  // amaso-portfolio blunders). The AI must call again with confirm:true,
+  // same project_id + prompt, after a clear user yes. Autopilot keeps its
+  // act-freely semantics and dispatches immediately.
+  if (args.confirm !== true && !isAutopilotEnabled(ctx.user.id)) {
+    const project = getProject(projectId);
+    const name = project?.name ?? projectId;
+    return {
+      preview: true,
+      sent: false,
+      project_id: projectId,
+      project_name: name,
+      prompt,
+      message:
+        "DISPATCH PREVIEW - NOT SENT.\n" +
+        "PROJECT: " + name + "  (id: " + projectId + ")\n\n" +
+        "PROMPT:\n" + prompt + "\n\n" +
+        "Read the PROJECT name back to the user plus the gist of the prompt, " +
+        "then get an explicit yes. To actually send, call dispatch_to_project " +
+        "again with the SAME project_id and prompt plus confirm: true. If the " +
+        "user meant a different project, fix project_id first.",
+    };
+  }
   const entry = dispatchToProject(ctx.user.id, projectId, prompt);
   if (entry.status === "failed") {
     throw new Error(entry.error ?? "dispatch failed");
